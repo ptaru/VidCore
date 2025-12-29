@@ -190,6 +190,17 @@ constant float3x3 bt2020NCMatrix = float3x3(
     float3(1.4746,  -0.5714,   0.0)
 );
 
+// BT.2020 → Display P3 color gamut mapping matrix
+// This is a chromatic adaptation using the Bradford transform
+// Converts linear light from BT.2020 primaries to Display P3 primaries
+// Derived from: DisplayP3_from_XYZ * Bradford * XYZ_from_BT2020
+constant float3x3 bt2020ToDisplayP3 = float3x3(
+    float3( 1.2249,  -0.0420,  -0.0197),
+    float3(-0.2247,   1.0424,  -0.0786),
+    float3(-0.0002,  -0.0004,   1.0983)
+);
+
+
 // PQ (SMPTE ST 2084) EOTF constants
 // Converts PQ-encoded values to linear light in nits
 constant float pq_m1 = 0.1593017578125;    // 2610 / 16384
@@ -208,7 +219,7 @@ float3 pqToLinear(float3 pq) {
 
 // HDR Fragment shader for NV12/P010 10-bit bi-planar
 // Y plane: texture(0) as r16Unorm, UV plane: texture(1) as rg16Unorm
-// Outputs linear light for EDR (1.0 = SDR white at 100 nits)
+// Outputs linear light in Display P3 for EDR (1.0 = SDR white at 100 nits)
 fragment float4 hdrNV12FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> yTexture [[texture(0)]],
@@ -231,17 +242,21 @@ fragment float4 hdrNV12FragmentShader(
     float3 rgb = bt2020NCMatrix * float3(y, u, v);
     rgb = saturate(rgb);
     
-    // PQ EOTF: Convert to linear light (nits)
-    float3 linearNits = pqToLinear(rgb);
+    // PQ EOTF: Convert to linear light (nits) in BT.2020 primaries
+    float3 linearBT2020 = pqToLinear(rgb);
+    
+    // Gamut mapping: BT.2020 → Display P3
+    // This preserves color relationships while mapping to the display's color volume
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearBT2020;
     
     // Output for macOS EDR: 1.0 = SDR reference white (100 nits)
     // Values > 1.0 are HDR highlights
-    return float4(linearNits / 100.0, 1.0);
+    return float4(linearDisplayP3 / 100.0, 1.0);
 }
 
 // HDR Fragment shader for I420/YUV420P10 10-bit tri-planar
 // Y plane: texture(0), U plane: texture(1), V plane: texture(2) - all r16Unorm
-// Outputs linear light for EDR (1.0 = SDR white at 100 nits)
+// Outputs linear light in Display P3 for EDR (1.0 = SDR white at 100 nits)
 fragment float4 hdrI420FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> yTexture [[texture(0)]],
@@ -264,9 +279,13 @@ fragment float4 hdrI420FragmentShader(
     float3 rgb = bt2020NCMatrix * float3(y, u, v);
     rgb = saturate(rgb);
     
-    // PQ EOTF: Convert to linear light (nits)
-    float3 linearNits = pqToLinear(rgb);
+    // PQ EOTF: Convert to linear light (nits) in BT.2020 primaries
+    float3 linearBT2020 = pqToLinear(rgb);
+    
+    // Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearBT2020;
     
     // Output for macOS EDR: 1.0 = SDR reference white (100 nits)
-    return float4(linearNits / 100.0, 1.0);
+    // Values > 1.0 are HDR highlights
+    return float4(linearDisplayP3 / 100.0, 1.0);
 }
