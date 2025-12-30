@@ -1,6 +1,6 @@
 //
 //  FFmpegDecoder.h
-//  VidPreview
+//  VidCore
 //
 //  Objective-C++ wrapper for FFmpeg video decoding
 //
@@ -124,7 +124,8 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Seek to a specific timestamp.
 ///
 /// @param seconds The target time in seconds.
-/// @param accurate If YES, performs a frame-precise seek (slower). If NO, seeks to nearest keyframe (faster).
+/// @param accurate If YES, performs a frame-precise seek (slower). If NO, seeks
+/// to nearest keyframe (faster).
 - (BOOL)seekToTime:(double)seconds accurate:(BOOL)accurate;
 
 /// Release all FFmpeg resources.

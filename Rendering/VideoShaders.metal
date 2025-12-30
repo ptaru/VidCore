@@ -1,5 +1,5 @@
 //
-//  YUVShaders.metal
+//  VideoShaders.metal
 //  VidCore
 //
 //  Metal shaders for GPU-accelerated YUV to RGB conversion

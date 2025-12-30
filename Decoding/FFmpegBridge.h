@@ -1,6 +1,6 @@
 //
 //  FFmpegBridge.h
-//  VidPreview
+//  VidCore
 //
 //  FFmpeg C library imports for Objective-C++
 //

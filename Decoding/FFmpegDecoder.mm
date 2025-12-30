@@ -1,6 +1,6 @@
 //
 //  FFmpegDecoder.mm
-//  VidPreview
+//  VidCore
 //
 //  FFmpeg video decoder implementation with VideoToolbox hardware acceleration
 //
@@ -859,9 +859,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (frame->format == AV_PIX_FMT_YUV420P10LE) {
     // Use CVPixelBufferPool for efficient P010 buffer reuse
     // This is critical for 4K HDR content to avoid massive memory churn
-    // Lazy initialization: only create P010 pool when first HDR frame is detected
-    if (!_hasCreatedP010Pool || !_p010BufferPool || _poolWidth != frame->width ||
-        _poolHeight != frame->height) {
+    // Lazy initialization: only create P010 pool when first HDR frame is
+    // detected
+    if (!_hasCreatedP010Pool || !_p010BufferPool ||
+        _poolWidth != frame->width || _poolHeight != frame->height) {
       if (_p010BufferPool) {
         CVPixelBufferPoolRelease(_p010BufferPool);
         _p010BufferPool = NULL;
