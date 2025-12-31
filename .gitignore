@@ -136,3 +136,7 @@ dist/
 *.gcda
 coverage/
 test_results/
+
+# ffmpeg
+build-ffmpeg/
+Frameworks/FFmpeg/

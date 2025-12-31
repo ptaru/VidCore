@@ -8,7 +8,7 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 
 ## Features
 
-- **FFmpeg Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1, etc.)
+- **FFmpeg + dav1d Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
 - **HDR Support**: Full HDR10 support with BT.2020 color primaries, PQ (SMPTE ST 2084) transfer function, and 10-bit color depth
 - **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for both SDR and HDR content
@@ -21,32 +21,45 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 
 - macOS 15.0+
 - Xcode 15.0+
-- FFmpeg 6.0+ (via Homebrew: `brew install ffmpeg`)
 
 ## Installation
 
-### As a Framework Target
+### Embedding VidCore.framework
 
-Add VidCore as a framework target in your Xcode project:
+VidCore includes bundled FFmpeg + dav1d libraries—no external dependencies required.
 
-1. Copy the `VidCore/` directory into your project
-2. Add a new Framework target named "VidCore"
-3. Configure FFmpeg header/library search paths
-4. Link against VidCore in your main app target
+1. **Build VidCore** (if not pre-built):
+   ```bash
+   cd /path/to/VidPreview
+   xcodebuild -scheme VidCore -configuration Release build
+   ```
 
-### FFmpeg Setup
+2. **Embed in your project**:
+   - Drag `VidCore.framework` into your app target
+   - In **General > Frameworks, Libraries, and Embedded Content**, set to "Embed & Sign"
+
+3. **Import and use**:
+   ```swift
+   import VidCore
+   ```
+
+### Building FFmpeg + dav1d (One-Time)
+
+If the bundled libraries are missing, build them:
 
 ```bash
-# Install FFmpeg via Homebrew
-brew install ffmpeg
+# Install build tools (one-time)
+brew install nasm meson ninja pkg-config
 
-# Note the installation path (usually /opt/homebrew/Cellar/ffmpeg/<version>)
+# Build FFmpeg + dav1d (~5-10 min)
+cd VidCore/Scripts
+chmod +x build-ffmpeg.sh
+./build-ffmpeg.sh
 ```
 
-Configure your target's build settings:
-- **Header Search Paths**: `/opt/homebrew/Cellar/ffmpeg/<version>/include`
-- **Library Search Paths**: `/opt/homebrew/Cellar/ffmpeg/<version>/lib`
-- **Other Linker Flags**: `-lavcodec -lavformat -lavutil -lswresample -lswscale`
+This creates universal static libraries (arm64 + x86_64) in `VidCore/Frameworks/FFmpeg/`:
+- `libavcodec.a`, `libavformat.a`, `libavutil.a`, `libswresample.a`, `libswscale.a`
+- `libdav1d.a` (fast AV1 decoder)
 
 ---
 
