@@ -1216,4 +1216,40 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   NSLog(@"[FFmpegDecoder] close() completed - all resources freed");
 }
 
+#pragma mark - Cover Image Extraction
+
+- (nullable NSData *)extractCoverImage {
+  if (!_formatContext) {
+    return nil;
+  }
+
+  // Iterate through all streams looking for attachment streams
+  for (unsigned int i = 0; i < _formatContext->nb_streams; i++) {
+    AVStream *stream = _formatContext->streams[i];
+
+    // Check if this is an attachment stream
+    if (stream->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT) {
+      continue;
+    }
+
+    // Check if it's an image codec (JPEG, PNG, or BMP)
+    enum AVCodecID codecId = stream->codecpar->codec_id;
+    if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
+        codecId != AV_CODEC_ID_BMP) {
+      continue;
+    }
+
+    // The attachment data is in extradata
+    if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
+      NSLog(@"[FFmpegDecoder] Found embedded cover image: %s, size: %d bytes",
+            avcodec_get_name(codecId), stream->codecpar->extradata_size);
+      return [NSData dataWithBytes:stream->codecpar->extradata
+                            length:stream->codecpar->extradata_size];
+    }
+  }
+
+  NSLog(@"[FFmpegDecoder] No embedded cover image found");
+  return nil;
+}
+
 @end

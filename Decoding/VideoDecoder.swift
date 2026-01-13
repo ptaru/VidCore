@@ -5,9 +5,9 @@
 //  Swift async wrapper around FFmpegDecoder with separated demux/decode pipelines
 //
 
-import Foundation
-import CoreVideo
 import AVFoundation
+import CoreVideo
+import Foundation
 
 /// Metadata about a video stream.
 ///
@@ -35,8 +35,11 @@ public struct VideoInfo {
     public let isHardwareAccelerated: Bool
     /// Whether the video is HDR content (PQ or HLG transfer function).
     public let isHDR: Bool
-    
-    public init(width: Int, height: Int, frameRate: Double, duration: Double, codecName: String, isHardwareAccelerated: Bool, isHDR: Bool = false) {
+
+    public init(
+        width: Int, height: Int, frameRate: Double, duration: Double, codecName: String,
+        isHardwareAccelerated: Bool, isHDR: Bool = false
+    ) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
@@ -87,11 +90,12 @@ public enum DecodedFrame {
 public class VideoDecoder {
     private var decoder: FFmpegDecoder?
     private let url: URL
-    
+
     // Separate queues for demuxing and decoding to enable parallelism
     private let demuxQueue = DispatchQueue(label: "com.vidpreview.demux", qos: .userInitiated)
-    private let decodeQueue = DispatchQueue(label: "com.vidpreview.decode", qos: .userInitiated, attributes: .concurrent)
-    
+    private let decodeQueue = DispatchQueue(
+        label: "com.vidpreview.decode", qos: .userInitiated, attributes: .concurrent)
+
     private let lock = NSLock()
     private var isClosed = false
 
@@ -116,7 +120,9 @@ public class VideoDecoder {
         }
 
         guard let decoder = self.decoder, let info = decoder.getVideoInfo() else {
-            throw NSError(domain: "VideoDecoder", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to get video info"])
+            throw NSError(
+                domain: "VideoDecoder", code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to get video info"])
         }
 
         self.videoInfo = VideoInfo(
@@ -139,13 +145,13 @@ public class VideoDecoder {
     public func close() {
         lock.lock()
         defer { lock.unlock() }
-        
+
         guard !isClosed, let decoder = self.decoder else { return }
         isClosed = true
         decoder.close()
         self.decoder = nil
     }
-    
+
     private var isDecoderClosed: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -153,7 +159,7 @@ public class VideoDecoder {
     }
 
     // MARK: - New Parallel Demux/Decode API
-    
+
     /// Demux next packet from the container (runs on demux queue)
     /// Returns nil at end of stream
     public func demuxNextPacket() async -> FFmpegPacketData? {
@@ -163,21 +169,21 @@ public class VideoDecoder {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                
+
                 guard !self.isClosed, let decoder = self.decoder else {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 let packet = decoder.demuxNextPacket()
                 continuation.resume(returning: packet)
             }
         }
     }
-    
+
     /// Decode a packet into frames (can run concurrently on decode queue)
     /// Returns array of decoded frames - may be multiple for video with multi-threaded decoding
     /// Returns empty array if packet produces no output (e.g., decoder needs more data)
@@ -188,17 +194,17 @@ public class VideoDecoder {
                     continuation.resume(returning: [])
                     return
                 }
-                
+
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                
+
                 guard !self.isClosed, let decoder = self.decoder else {
                     continuation.resume(returning: [])
                     return
                 }
-                
+
                 var results: [DecodedFrame] = []
-                
+
                 // Handle video packets - get ALL available frames
                 if packet.isVideo {
                     if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
@@ -215,18 +221,20 @@ public class VideoDecoder {
                 // Handle audio packets - typically 1:1 packet-to-frame
                 else if packet.isAudio {
                     if let decodedFrame = decoder.decodePacket(packet),
-                       let audioFrameObj = decodedFrame as? FFmpegAudioFrame {
-                        results.append(.audio(audioFrameObj.pcmBuffer, audioFrameObj.presentationTime))
+                        let audioFrameObj = decodedFrame as? FFmpegAudioFrame
+                    {
+                        results.append(
+                            .audio(audioFrameObj.pcmBuffer, audioFrameObj.presentationTime))
                     }
                 }
-                
+
                 continuation.resume(returning: results)
             }
         }
     }
-    
+
     // MARK: - Decoder Flush/Drain (for multi-threaded decoders)
-    
+
     /// Flush the video decoder to signal end of stream
     /// Must be called before draining remaining frames
     public func flushVideoDecoder() async {
@@ -236,21 +244,21 @@ public class VideoDecoder {
                     continuation.resume()
                     return
                 }
-                
+
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                
+
                 guard !self.isClosed, let decoder = self.decoder else {
                     continuation.resume()
                     return
                 }
-                
+
                 decoder.flushVideoDecoder()
                 continuation.resume()
             }
         }
     }
-    
+
     /// Drain remaining buffered frames from the decoder after flush
     /// Returns nil when all frames have been drained
     public func drainVideoFrame() async -> VideoFrame? {
@@ -260,20 +268,20 @@ public class VideoDecoder {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                
+
                 guard !self.isClosed, let decoder = self.decoder else {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 guard let videoFrameObj = decoder.drainVideoFrame() else {
                     continuation.resume(returning: nil)
                     return
                 }
-                
+
                 let frame = VideoFrame(
                     pixelBuffer: videoFrameObj.pixelBuffer,
                     presentationTime: videoFrameObj.presentationTime,
@@ -284,19 +292,36 @@ public class VideoDecoder {
         }
     }
 
+    // MARK: - Cover Image Extraction
+
+    /// Extracts an embedded cover image from the video container, if present.
+    ///
+    /// Many video containers (especially MKV) can include embedded cover art as attachment streams.
+    /// This method searches for JPEG, PNG, or BMP attachments and returns the image data.
+    ///
+    /// - Returns: The cover image data, or nil if no cover image is found.
+    public func extractCoverImage() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !isClosed, let decoder = self.decoder else { return nil }
+        return decoder.extractCoverImage()
+    }
+
     // MARK: - Seeking
-    
+
     public func seek(to seconds: Double, accurate: Bool = true) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             demuxQueue.async { [weak self] in
                 guard let self = self else {
                     continuation.resume()
                     return
                 }
-                
+
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                
+
                 guard !self.isClosed, let decoder = self.decoder else {
                     continuation.resume()
                     return
@@ -307,7 +332,10 @@ public class VideoDecoder {
                 if success {
                     continuation.resume()
                 } else {
-                    continuation.resume(throwing: NSError(domain: "VideoDecoder", code: -3, userInfo: [NSLocalizedDescriptionKey: "Seek failed"]))
+                    continuation.resume(
+                        throwing: NSError(
+                            domain: "VideoDecoder", code: -3,
+                            userInfo: [NSLocalizedDescriptionKey: "Seek failed"]))
                 }
             }
         }

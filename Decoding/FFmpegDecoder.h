@@ -131,6 +131,15 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Release all FFmpeg resources.
 - (void)close;
 
+/// Extract embedded cover image from the container (e.g., MKV attachments).
+///
+/// Many video containers like MKV can include embedded cover art as attachment
+/// streams. This method searches for JPEG or PNG attachments and returns the
+/// image data.
+/// @return The cover image data as JPEG or PNG, or nil if no cover image is
+/// found.
+- (nullable NSData *)extractCoverImage;
+
 /// Whether to use optimized seeking (may be less accurate).
 @property(nonatomic, assign) BOOL seekOptimizationEnabled;
 

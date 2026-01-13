@@ -249,6 +249,21 @@ while let frame = await decoder.drainVideoFrame() {
 decoder.close()
 ```
 
+#### Extracting Cover Images
+
+MKV and other containers can include embedded cover art (common for movies/anime):
+
+```swift
+let decoder = try VideoDecoder(url: videoURL)
+
+if let coverData = decoder.extractCoverImage() {
+    // coverData is JPEG, PNG, or BMP image data
+    let image = NSImage(data: coverData)
+}
+
+decoder.close()
+```
+
 ---
 
 ### HDR Playback
@@ -399,6 +414,7 @@ Low-level decoder with split demux/decode pipeline.
 | `seek(to:accurate:)` | Seek to timestamp (async, throws) |
 | `flushVideoDecoder()` | Signal end of stream (async) |
 | `drainVideoFrame()` | Get remaining buffered frames (async) |
+| `extractCoverImage()` | Extract embedded cover art (JPEG/PNG) from container |
 | `close()` | Release resources |
 | `videoInfo` | Video metadata |
 
