@@ -264,6 +264,38 @@ if let coverData = decoder.extractCoverImage() {
 decoder.close()
 ```
 
+#### Generating Thumbnails
+
+Use the decoder and rendering engine together to generate video thumbnails:
+
+```swift
+let decoder = try VideoDecoder(url: videoURL)
+let renderingEngine = RenderingEngine()
+
+// Seek to 10% into the video for a representative frame
+let seekTime = decoder.videoInfo.duration * 0.1
+try await decoder.seek(to: seekTime, accurate: true)
+
+// Decode one frame
+if let packet = await decoder.demuxNextPacket() {
+    let frames = await decoder.decodePacket(packet)
+    
+    for frame in frames {
+        if case .video(let videoFrame) = frame {
+            // Render to CGImage with optional scaling
+            let thumbnailSize = CGSize(width: 320, height: 180)
+            if let cgImage = renderingEngine?.renderToCGImage(videoFrame, targetSize: thumbnailSize) {
+                let nsImage = NSImage(cgImage: cgImage, size: thumbnailSize)
+                // Use the thumbnail...
+            }
+            break
+        }
+    }
+}
+
+decoder.close()
+```
+
 ---
 
 ### HDR Playback
@@ -465,6 +497,7 @@ GPU-accelerated frame rendering with HDR support.
 | `renderVideoFrame(_:to:)` | Render VideoFrame with HDR awareness |
 | `renderPixelBuffer(_:to:)` | Render CVPixelBuffer to drawable (SDR) |
 | `renderHDRPixelBuffer(_:to:)` | Render 10-bit HDR content with PQ EOTF |
+| `renderToCGImage(_:targetSize:)` | Render VideoFrame to CGImage for thumbnail generation |
 | `flush()` | Flush texture cache |
 
 **HDR Rendering:**
