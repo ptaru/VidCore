@@ -1223,28 +1223,49 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return nil;
   }
 
-  // Iterate through all streams looking for attachment streams
+  // Iterate through all streams looking for cover images
   for (unsigned int i = 0; i < _formatContext->nb_streams; i++) {
     AVStream *stream = _formatContext->streams[i];
-
-    // Check if this is an attachment stream
-    if (stream->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT) {
-      continue;
-    }
-
-    // Check if it's an image codec (JPEG, PNG, or BMP)
     enum AVCodecID codecId = stream->codecpar->codec_id;
-    if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
-        codecId != AV_CODEC_ID_BMP) {
-      continue;
+
+    // Method 1: Check attachment streams (common in MP4, M4A)
+    if (stream->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT) {
+      // Check if it's an image codec (JPEG, PNG, or BMP)
+      if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
+          codecId != AV_CODEC_ID_BMP) {
+        continue;
+      }
+
+      // The attachment data is in extradata
+      if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
+        NSLog(@"[FFmpegDecoder] Found embedded cover image (attachment): %s, "
+              @"size: %d bytes",
+              avcodec_get_name(codecId), stream->codecpar->extradata_size);
+        return [NSData dataWithBytes:stream->codecpar->extradata
+                              length:stream->codecpar->extradata_size];
+      }
     }
 
-    // The attachment data is in extradata
-    if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
-      NSLog(@"[FFmpegDecoder] Found embedded cover image: %s, size: %d bytes",
-            avcodec_get_name(codecId), stream->codecpar->extradata_size);
-      return [NSData dataWithBytes:stream->codecpar->extradata
-                            length:stream->codecpar->extradata_size];
+    // Method 2: Check video streams with attached_pic disposition (common in
+    // MKV) MKV files store cover images as video streams with the
+    // AV_DISPOSITION_ATTACHED_PIC flag
+    if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+        (stream->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+      // Verify it's an image codec
+      if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
+          codecId != AV_CODEC_ID_BMP && codecId != AV_CODEC_ID_WEBP) {
+        continue;
+      }
+
+      // For attached_pic streams, we need to read the packet data
+      // The image data is stored as a single packet, not in extradata
+      if (stream->attached_pic.data && stream->attached_pic.size > 0) {
+        NSLog(@"[FFmpegDecoder] Found embedded cover image (attached_pic): %s, "
+              @"size: %d bytes",
+              avcodec_get_name(codecId), stream->attached_pic.size);
+        return [NSData dataWithBytes:stream->attached_pic.data
+                              length:stream->attached_pic.size];
+      }
     }
   }
 
