@@ -38,7 +38,6 @@ constant float3x3 bt709Matrix = float3x3(
     float3(1.793, -0.533, 0.0)
 );
 
-// Vertex shader - generates full-screen quad
 vertex VertexOut yuvVertexShader(uint vertexID [[vertex_id]]) {
     VertexOut out;
     out.position = float4(quadVertices[vertexID], 0, 1);
@@ -68,7 +67,6 @@ fragment float4 nv12FragmentShader(
     float3 yuv = float3(y, u, v);
     float3 rgb = bt709Matrix * yuv;
     
-    // Clamp to valid range
     rgb = saturate(rgb);
     
     return float4(rgb, 1.0);
@@ -97,7 +95,6 @@ fragment float4 nv12FullRangeFragmentShader(
     float g = y - 0.1873 * u - 0.4681 * v;
     float b = y + 1.8556 * u;
     
-    // Clamp to valid range
     float3 rgb = saturate(float3(r, g, b));
     
     return float4(rgb, 1.0);
@@ -128,7 +125,6 @@ fragment float4 i420FragmentShader(
     float3 yuv = float3(y, u, v);
     float3 rgb = bt709Matrix * yuv;
     
-    // Clamp to valid range
     rgb = saturate(rgb);
     
     return float4(rgb, 1.0);
@@ -163,7 +159,6 @@ fragment float4 i420FullRangeFragmentShader(
     float g = y - 0.1873 * u - 0.4681 * v;
     float b = y + 1.8556 * u;
     
-    // Clamp to valid range
     float3 rgb = saturate(float3(r, g, b));
     
     return float4(rgb, 1.0);
@@ -179,11 +174,18 @@ fragment float4 bgraFragmentShader(
 }
 
 // =============================================================================
-// HDR Support - BT.2020 + PQ (SMPTE ST 2084)
+// HDR Support - BT.2020 + PQ (SMPTE ST 2084) + BT.2390 Tone Mapping
 // =============================================================================
 
+struct ToneMappingParams {
+    float inputMin;     // e.g. 0.0
+    float inputMax;     // e.g. 1000.0 (content peak)
+    float outputMin;    // e.g. 0.0
+    float outputMax;    // e.g. 1000.0 (display peak) - if < inputMax, we tone map
+};
+
 // BT.2020 YCbCr to RGB matrix (non-constant luminance)
-// Used for HDR10 content with BT.2020 color primaries
+// ... (rest of existing matrix)
 constant float3x3 bt2020NCMatrix = float3x3(
     float3(1.0,      1.0,      1.0),
     float3(0.0,     -0.1646,   1.8814),
@@ -191,25 +193,20 @@ constant float3x3 bt2020NCMatrix = float3x3(
 );
 
 // BT.2020 → Display P3 color gamut mapping matrix
-// This is a chromatic adaptation using the Bradford transform
-// Converts linear light from BT.2020 primaries to Display P3 primaries
-// Derived from: DisplayP3_from_XYZ * Bradford * XYZ_from_BT2020
 constant float3x3 bt2020ToDisplayP3 = float3x3(
     float3( 1.2249,  -0.0420,  -0.0197),
     float3(-0.2247,   1.0424,  -0.0786),
     float3(-0.0002,  -0.0004,   1.0983)
 );
 
+// PQ constants
+constant float pq_m1 = 0.1593017578125;
+constant float pq_m2 = 78.84375;
+constant float pq_c1 = 0.8359375;
+constant float pq_c2 = 18.8515625;
+constant float pq_c3 = 18.6875;
 
-// PQ (SMPTE ST 2084) EOTF constants
-// Converts PQ-encoded values to linear light in nits
-constant float pq_m1 = 0.1593017578125;    // 2610 / 16384
-constant float pq_m2 = 78.84375;           // 2523 / 32 * 128
-constant float pq_c1 = 0.8359375;          // 3424 / 4096
-constant float pq_c2 = 18.8515625;         // 2413 / 128
-constant float pq_c3 = 18.6875;            // 2392 / 128
-
-// PQ EOTF: Convert PQ-encoded signal [0,1] to linear light [0, 10000] nits
+// PQ EOTF: PQ [0,1] -> Linear (nits)
 float3 pqToLinear(float3 pq) {
     float3 p = pow(max(pq, 0.0), 1.0 / pq_m2);
     float3 num = max(p - pq_c1, 0.0);
@@ -217,55 +214,165 @@ float3 pqToLinear(float3 pq) {
     return pow(num / max(den, 1e-6), 1.0 / pq_m1) * 10000.0;
 }
 
+// PQ Inverse EOTF: Linear (nits) -> PQ [0,1]
+float3 linearToPQ(float3 linear) {
+    float3 y = linear / 10000.0;
+    float3 num = pq_c1 + pq_c2 * pow(y, pq_m1);
+    float3 den = 1.0 + pq_c3 * pow(y, pq_m1);
+    float3 n = pow(num / den, pq_m2);
+    return n;
+}
+
+// Helper: Rescale absolute nits to [0, 1] relative to input range
+float rescale_in(float x, constant ToneMappingParams& params) {
+    return (x - params.inputMin) / (params.inputMax - params.inputMin);
+}
+
+// Helper: Rescale [0, 1] relative to output range back to absolute nits
+float rescale_out(float x, constant ToneMappingParams& params) {
+    return x * (params.outputMax - params.outputMin) + params.outputMin;
+}
+
+// ITU-R BT.2390 EETF (Electrical-Electrical Transfer Function)
+// Based on standard implementation
+float3 toneMapBT2390(float3 linearRGB, constant ToneMappingParams& params) {
+    // If display is brighter than content, no tone mapping needed (conceptually)
+    // Map when content peak > display peak
+    if (params.outputMax >= params.inputMax) {
+        return linearRGB;
+    }
+
+    // Work in PQ space for the hermite spline interpolation.
+    // The reference implementation operates on 0.0-1.0 PQ-encoded signal.
+    
+    // Convert Linear Nits -> PQ
+    float3 pq = linearToPQ(linearRGB);
+    
+    // Apply tone mapping curve to the max component to preserve hue.
+    // ICtCp intensity is computationally expensive on GPU.
+    
+    float maxSig = max(pq.r, max(pq.g, pq.b));
+    
+    if (maxSig < 1e-6) return float3(0.0);
+
+    // --- BT.2390 Algorithm (Scalar on maxSig) ---
+    
+    // Input/Output params are in NITS (Linear).
+    // Convert Nits limits to PQ [0-1] range for the curve calculation.
+    
+    // Convert Nits limits to PQ limits
+    // 10000 nits = 1.0 PQ
+    float pqInputMin = 0.0; // Assuming 0 nits start
+    float pqInputMax = linearToPQ(float3(params.inputMax)).r;
+    float pqOutputMin = 0.0;
+    float pqOutputMax = linearToPQ(float3(params.outputMax)).r;
+    
+    // rescale_in equivalent for current pixel val 'x' (which is 'maxSig')
+    // range: [pqInputMin, pqInputMax] -> [0, 1]
+    float x = (maxSig - pqInputMin) / (pqInputMax - pqInputMin);
+    
+    float minLum = (pqOutputMin - pqInputMin) / (pqInputMax - pqInputMin);
+    float maxLum = (pqOutputMax - pqInputMin) / (pqInputMax - pqInputMin);
+    
+    // knee_offset default 1.0. 
+    float offset = 1.0; 
+    // Calculate knee point (ks) based on maxLum.
+    // Using default offset = 1.0: ks = (1 + offset) * maxLum - offset = 2.0 * maxLum - 1.0
+    float ks = (2.0 * maxLum) - 1.0; 
+    
+    float bp = minLum > 0 ? min(1.0 / minLum, 4.0) : 4.0;
+    
+    // gain_inv
+    float gain_inv = 1.0 + (minLum / maxLum) * pow(1.0 - maxLum, bp);
+    float gain = maxLum < 1.0 ? 1.0 / gain_inv : 1.0;
+    
+    float mappedX = x;
+
+    // Piece-wise hermite spline
+    if (ks < 1.0) {
+        // if x > ks
+        if (x > ks) {
+            float tb = (x - ks) / (1.0 - ks);
+            float tb2 = tb * tb;
+            float tb3 = tb2 * tb;
+            
+            // Hermite polynomials
+            // pb = (2t^3 - 3t^2 + 1) * ks + (t^3 - 2t^2 + t) * (1-ks) + (-2t^3 + 3t^2) * maxLum
+            
+            float term1 = (2.0 * tb3 - 3.0 * tb2 + 1.0) * ks;
+            float term2 = (tb3 - 2.0 * tb2 + tb) * (1.0 - ks);
+            float term3 = (-2.0 * tb3 + 3.0 * tb2) * maxLum;
+            
+            mappedX = term1 + term2 + term3;
+        }
+    }
+    
+    // Black point adaptation
+    if (mappedX < 1.0) {
+        mappedX += minLum * pow(1.0 - mappedX, bp);
+        mappedX = gain * (mappedX - minLum) + minLum;
+    }
+    
+    // Convert back to absolute PQ
+    float pqMapped = mappedX * (pqInputMax - pqInputMin) + pqInputMin;
+    
+    // Apply gain to RGB
+    // ratio = newMax / oldMax
+    float ratio = pqMapped / maxSig;
+    float3 pqToneMapped = pq * ratio;
+    
+    return pqToLinear(pqToneMapped);
+}
+
 // HDR Fragment shader for NV12/P010 10-bit bi-planar
 // Y plane: texture(0) as r16Unorm, UV plane: texture(1) as rg16Unorm
-// Outputs linear light in Display P3 for EDR (1.0 = SDR white at 100 nits)
 fragment float4 hdrNV12FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> yTexture [[texture(0)]],
-    texture2d<float> uvTexture [[texture(1)]]
+    texture2d<float> uvTexture [[texture(1)]],
+    constant ToneMappingParams& params [[buffer(0)]]
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // Sample 10-bit YUV (normalized to [0,1] by texture sampler)
+    // Sample 10-bit YUV
     float y = yTexture.sample(textureSampler, in.texCoord).r;
     float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
     
-    // 10-bit video range conversion:
-    // Y: [64, 940] / 1023 -> [0, 1]
-    // UV: [64, 960] / 1023, centered at 512/1023
+    // 10-bit video range conversion
     y = (y - 64.0/1023.0) * (1023.0/876.0);
     float u = (uv.x - 512.0/1023.0) * (1023.0/896.0);
     float v = (uv.y - 512.0/1023.0) * (1023.0/896.0);
     
-    // BT.2020 YUV to RGB (result is still PQ-encoded)
-    float3 rgb = bt2020NCMatrix * float3(y, u, v);
-    rgb = saturate(rgb);
+    // BT.2020 YUV to RGB (result is still PQ-encoded, [0,1] range roughly)
+    float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
+    rgbPQ = max(rgbPQ, 0.0); // Clamp negative only
+
+    // Pipeline: rgbPQ -> Linear -> ToneMap -> Linear Result.
+    // Note: toneMapBT2390 accepts linear input for compatibility, even though it processes in PQ space.
     
-    // PQ EOTF: Convert to linear light (nits) in BT.2020 primaries
-    float3 linearBT2020 = pqToLinear(rgb);
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Apply Tone Mapping
+    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
     
     // Gamut mapping: BT.2020 → Display P3
-    // This preserves color relationships while mapping to the display's color volume
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearBT2020;
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
     
-    // Output for macOS EDR: 1.0 = SDR reference white (100 nits)
-    // Values > 1.0 are HDR highlights
+    // Output for macOS EDR (1.0 = 100 nits)
     return float4(linearDisplayP3 / 100.0, 1.0);
 }
 
 // HDR Fragment shader for I420/YUV420P10 10-bit tri-planar
-// Y plane: texture(0), U plane: texture(1), V plane: texture(2) - all r16Unorm
-// Outputs linear light in Display P3 for EDR (1.0 = SDR white at 100 nits)
 fragment float4 hdrI420FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> yTexture [[texture(0)]],
     texture2d<float> uTexture [[texture(1)]],
-    texture2d<float> vTexture [[texture(2)]]
+    texture2d<float> vTexture [[texture(2)]],
+    constant ToneMappingParams& params [[buffer(0)]]
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // Sample 10-bit YUV (normalized to [0,1] by texture sampler)
+    // Sample 10-bit YUV
     float y = yTexture.sample(textureSampler, in.texCoord).r;
     float u = uTexture.sample(textureSampler, in.texCoord).r;
     float v = vTexture.sample(textureSampler, in.texCoord).r;
@@ -275,17 +382,178 @@ fragment float4 hdrI420FragmentShader(
     u = (u - 512.0/1023.0) * (1023.0/896.0);
     v = (v - 512.0/1023.0) * (1023.0/896.0);
     
-    // BT.2020 YUV to RGB (result is still PQ-encoded)
-    float3 rgb = bt2020NCMatrix * float3(y, u, v);
-    rgb = saturate(rgb);
+    // BT.2020 YUV to RGB PQ
+    float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
+    rgbPQ = max(rgbPQ, 0.0);
     
-    // PQ EOTF: Convert to linear light (nits) in BT.2020 primaries
-    float3 linearBT2020 = pqToLinear(rgb);
+    // Convert to Linear
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Tone Map
+    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
+    
+    // Gamut mapping
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
+    
+    return float4(linearDisplayP3 / 100.0, 1.0);
+}
+
+// =============================================================================
+// Dolby Vision Profile 5 (IPTPQc2) Support
+// =============================================================================
+
+// DoVi reshape component data - passed via separate buffer indices to stay under 4KB
+// Each component (I, P, T) uses ~2.3KB
+struct DoViReshapeComponent {
+    float pivots[9];           // Pivot values normalized [0,1]
+    float4 coeffs[8];          // x=c0/constant, y=c1/mmr_idx, z=c2, w=order (0=poly)
+    float4 mmr[48];            // MMR coefficients (up to 8 pivots × 6 vec4s)
+    uint numPivots;
+    float _padding[3];         // Alignment padding
+};
+
+// DoVi color transformation parameters
+// Layout must match Swift DoViParamsBuffer exactly
+struct DoViParams {
+    float4 nonlinearOffset;    // xyz = offset, w = unused (matches Swift SIMD4<Float>)
+    float3x3 nonlinearMatrix;  // IPT → LMS matrix (ycc_to_rgb)
+    float3x3 lms2rgbMatrix;    // Combined HPE inverse × rgb_to_lms
+    float sourceMinPQ;         // For tone mapping
+    float sourceMaxPQ;
+    float _padding[2];
+};
+
+// Polynomial reshape: s_out = c2*s² + c1*s + c0
+float doviReshapePoly(float s, float4 coeffs) {
+    return (coeffs.z * s + coeffs.y) * s + coeffs.x;
+}
+
+// MMR reshape (order 1, 2, or 3)
+// Uses cross-products of all three IPT channels
+float doviReshapeMMR(float3 sig, float4 coeffs, constant float4 *mmr) {
+    int mmr_idx = int(coeffs.y);
+    int order = int(coeffs.w);
+    
+    // Cross-products: xy, xz, yz, xyz
+    float4 sigX;
+    sigX.xyz = sig.xxy * sig.yzz;  // (I*P, I*T, P*T)
+    sigX.w = sigX.x * sig.z;       // I*P*T
+    
+    // Order 1: constant + linear + cross terms
+    float s = coeffs.x;  // constant
+    s += dot(mmr[mmr_idx + 0].xyz, sig);    // linear I, P, T
+    s += dot(mmr[mmr_idx + 1], sigX);       // cross terms
+    
+    // Order 2: add quadratic terms
+    if (order >= 2) {
+        float3 sig2 = sig * sig;
+        float4 sigX2 = sigX * sigX;
+        s += dot(mmr[mmr_idx + 2].xyz, sig2);
+        s += dot(mmr[mmr_idx + 3], sigX2);
+        
+        // Order 3: add cubic terms
+        if (order >= 3) {
+            s += dot(mmr[mmr_idx + 4].xyz, sig2 * sig);
+            s += dot(mmr[mmr_idx + 5], sigX2 * sigX);
+        }
+    }
+    return s;
+}
+
+// Select coefficient set based on signal value and pivot points
+// Uses binary search via mix() for GPU efficiency
+float4 doviSelectCoeffs(float s, constant DoViReshapeComponent& comp) {
+    // Start with last interval's coefficients
+    float4 result = comp.coeffs[max(int(comp.numPivots) - 2, 0)];
+    
+    // Binary search through pivots (unrolled for GPU)
+    for (int i = int(comp.numPivots) - 3; i >= 0; i--) {
+        result = mix(result, comp.coeffs[i], float4(s < comp.pivots[i + 1]));
+    }
+    return result;
+}
+
+// Reshape one component (I, P, or T)
+float doviReshapeComponent(float3 sig, int c, constant DoViReshapeComponent& comp) {
+    if (comp.numPivots < 2) return sig[c];  // No reshaping
+    
+    float s = sig[c];
+    float4 coeffs = doviSelectCoeffs(s, comp);
+    
+    // coeffs.w == 0 means polynomial, otherwise MMR with that order
+    if (coeffs.w == 0.0) {
+        s = doviReshapePoly(s, coeffs);
+    } else {
+        s = doviReshapeMMR(sig, coeffs, comp.mmr);
+    }
+    
+    return clamp(s, comp.pivots[0], comp.pivots[comp.numPivots - 1]);
+}
+
+// Full DoVi Profile 5 processing pipeline
+// Reshape BEFORE matrix multiplication
+float3 processDoVi(float3 ipt, constant DoViParams& params,
+                   constant DoViReshapeComponent& compI,
+                   constant DoViReshapeComponent& compP,
+                   constant DoViReshapeComponent& compT) {
+    
+    // 1. RESHAPE (performed on raw I/P/T components FIRST)
+    // Input is normalized [0,1] full-range IPT data
+    float3 reshaped;
+    reshaped.x = doviReshapeComponent(ipt, 0, compI);  // I channel
+    reshaped.y = doviReshapeComponent(ipt, 1, compP);  // P channel
+    reshaped.z = doviReshapeComponent(ipt, 2, compT);  // T channel
+    
+    // 2. NONLINEAR MATRIX (IPT → LMS, still in PQ domain)
+    // Offset is SUBTRACTED (per reference black level handling)
+    float3 lmsPQ = params.nonlinearMatrix * (reshaped - params.nonlinearOffset.xyz);
+    
+    // 3. PQ EOTF → Linear LMS
+    float3 lmsLinear = pqToLinear(lmsPQ);
+    
+    // 4. LINEAR MATRIX (LMS → RGB in BT.2020)
+    // Combined: HPE LMS→RGB inverse × rgb_to_lms from metadata
+    float3 rgbLinear = params.lms2rgbMatrix * lmsLinear;
+    
+    // 5. PQ OETF → Back to PQ for tone mapper input
+    return linearToPQ(rgbLinear);
+}
+
+// DoVi Profile 5 Fragment shader for NV12/P010 10-bit bi-planar
+// Profile 5 content is ALWAYS full range - no limited range scaling!
+fragment float4 doviNV12FragmentShader(
+    VertexOut in [[stage_in]],
+    texture2d<float> yTexture [[texture(0)]],
+    texture2d<float> uvTexture [[texture(1)]],
+    constant DoViParams& doviParams [[buffer(0)]],
+    constant DoViReshapeComponent& compI [[buffer(1)]],
+    constant DoViReshapeComponent& compP [[buffer(2)]],
+    constant DoViReshapeComponent& compT [[buffer(3)]],
+    constant ToneMappingParams& toneParams [[buffer(4)]]
+) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    
+    // Sample 10-bit IPT (Profile 5 is ALWAYS full range)
+    // IPT values are all in [0,1] range after normalization
+    float I = yTexture.sample(textureSampler, in.texCoord).r;
+    float2 PT = uvTexture.sample(textureSampler, in.texCoord).rg;
+    
+    // IPT signal: all channels normalized to [0,1]
+    // Do NOT subtract 0.5 from P/T like YCbCr - DoVi IPT is not chroma-centered!
+    float3 ipt = float3(I, PT.x, PT.y);
+    
+    // DoVi processing → outputs PQ-encoded RGB in BT.2020
+    float3 rgbPQ = processDoVi(ipt, doviParams, compI, compP, compT);
+    
+    // Convert to linear for tone mapping
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Apply BT.2390 tone mapping
+    float3 linearToneMapped = toneMapBT2390(linearSrc, toneParams);
     
     // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearBT2020;
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
     
-    // Output for macOS EDR: 1.0 = SDR reference white (100 nits)
-    // Values > 1.0 are HDR highlights
+    // Output for macOS EDR (1.0 = 100 nits)
     return float4(linearDisplayP3 / 100.0, 1.0);
 }

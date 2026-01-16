@@ -31,7 +31,6 @@ public actor VideoFrameBuffer {
     /// Push a frame to the buffer in presentation time order
     /// Frames are inserted sorted by PTS to handle out-of-order decode
     public func push(_ frame: VideoFrame) {
-        // Insert in sorted order by presentation time
         insertSorted(frame)
         
         // If someone is waiting AND we have enough frames for reordering, wake them
@@ -40,7 +39,6 @@ public actor VideoFrameBuffer {
             if let first = frames.first {
                 frames.removeFirst()
                 continuation.resume(returning: first)
-                // Wake a waiting producer if any
                 if let producer = waitingProducers.first {
                     waitingProducers.removeFirst()
                     producer.resume()
@@ -50,7 +48,7 @@ public actor VideoFrameBuffer {
             }
         }
         
-        // Remove oldest frames if buffer is full (shouldn't happen with proper back-pressure)
+        // Remove oldest frames if buffer is full
         while frames.count > maxSize {
             frames.removeFirst()
         }
@@ -58,7 +56,6 @@ public actor VideoFrameBuffer {
     
     /// Insert a frame in sorted PTS order (binary insertion for efficiency)
     private func insertSorted(_ frame: VideoFrame) {
-        // Binary search for insertion point
         var low = 0
         var high = frames.count
         while low < high {
@@ -75,7 +72,6 @@ public actor VideoFrameBuffer {
     /// Wait until buffer has space, then push the frame
     /// This provides back-pressure without polling
     public func pushWithBackpressure(_ frame: VideoFrame) async {
-        // Wait if buffer is full
         while frames.count >= maxSize && !isClosed && !isSuspended {
             await withCheckedContinuation { continuation in
                 waitingProducers.append(continuation)
@@ -121,43 +117,35 @@ public actor VideoFrameBuffer {
     /// Returns true if a frame is ready, false if the buffer was closed/suspended with no remaining frames
     /// Respects the reorder delay unless the buffer is closed (then flushes remaining frames)
     public func waitForFrameAvailable() async -> Bool {
-        // Have enough frames for reordering OR buffer is closed with remaining frames
         if frames.count >= reorderDelay || (isClosed && !frames.isEmpty) {
             return true
         }
         
-        // Buffer is closed or suspended with no frames left
         if (isClosed || isSuspended) && frames.isEmpty {
             return false
         }
         
-        // Return false immediately if suspended (don't block)
         if isSuspended {
             return false
         }
         
-        // Wait for frames to arrive (will be woken when reorderDelay is met, or buffer closes/suspends)
         let frame = await withCheckedContinuation { continuation in
             waitingConsumers.append(continuation)
         }
         
-        // If we got a frame, put it back in the buffer for peek/pop
         if let frame = frame {
             insertSorted(frame)
             return true
         }
         
-        // nil frame but check if buffer has remaining frames (edge case during close)
         return !frames.isEmpty
     }
     
     /// Wait for the next frame asynchronously and consume it
     /// Returns nil when the buffer is closed
     public func waitForFrame() async -> VideoFrame? {
-        // Return immediately if we have frames
         if !frames.isEmpty {
             let frame = frames.removeFirst()
-            // Wake a waiting producer
             if let producer = waitingProducers.first {
                 waitingProducers.removeFirst()
                 producer.resume()
@@ -165,12 +153,10 @@ public actor VideoFrameBuffer {
             return frame
         }
         
-        // Return nil if buffer is closed
         if isClosed {
             return nil
         }
         
-        // Wait for a frame to be pushed
         return await withCheckedContinuation { continuation in
             waitingConsumers.append(continuation)
         }
@@ -179,7 +165,6 @@ public actor VideoFrameBuffer {
     /// Clear all buffered frames and cancel waiting consumers
     public func clear() {
         frames.removeAll()
-        // Resume all waiting continuations with nil
         for continuation in waitingConsumers {
             continuation.resume(returning: nil)
         }
@@ -195,21 +180,17 @@ public actor VideoFrameBuffer {
     public func close() {
         isClosed = true
         
-        // Wake waiting consumers - they should check frames array for remaining frames
-        // Give them remaining frames instead of nil when possible
         while let continuation = waitingConsumers.first, let frame = frames.first {
             waitingConsumers.removeFirst()
             frames.removeFirst()
             continuation.resume(returning: frame)
         }
         
-        // Any remaining consumers get nil (no more frames)
         for continuation in waitingConsumers {
             continuation.resume(returning: nil)
         }
         waitingConsumers.removeAll()
         
-        // Wake all waiting producers
         for producer in waitingProducers {
             producer.resume()
         }
@@ -219,7 +200,7 @@ public actor VideoFrameBuffer {
     /// Reset the buffer for reuse (e.g., after seek)
     public func reset() {
         frames.removeAll()
-        frames = []  // Reset capacity to zero, releasing all CVPixelBuffer references
+        frames = []
         isClosed = false
         isSuspended = false
         for continuation in waitingConsumers {
@@ -236,12 +217,10 @@ public actor VideoFrameBuffer {
     /// Frames are preserved in the buffer
     public func suspend() {
         isSuspended = true
-        // Wake waiting consumers with nil (they should check isSuspended)
         for continuation in waitingConsumers {
             continuation.resume(returning: nil)
         }
         waitingConsumers.removeAll()
-        // Wake waiting producers
         for producer in waitingProducers {
             producer.resume()
         }

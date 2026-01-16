@@ -611,4 +611,4 @@ graph TD
 
 ## License
 
-MIT License
+LGPL License

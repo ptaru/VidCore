@@ -29,12 +29,15 @@ public struct VideoFrame {
     public let presentationTime: Double
     /// Whether this frame contains HDR content (PQ or HLG transfer function).
     public let isHDR: Bool
+    /// Dolby Vision Profile 5 metadata, if present.
+    public let doviMetadata: DoViMetadata?
 
     /// Creates a video frame (SDR content).
     public init(pixelBuffer: CVPixelBuffer, presentationTime: Double) {
         self.pixelBuffer = pixelBuffer
         self.presentationTime = presentationTime
         self.isHDR = false
+        self.doviMetadata = nil
     }
     
     /// Creates a video frame with HDR flag.
@@ -42,5 +45,14 @@ public struct VideoFrame {
         self.pixelBuffer = pixelBuffer
         self.presentationTime = presentationTime
         self.isHDR = isHDR
+        self.doviMetadata = nil
+    }
+    
+    /// Creates a video frame with Dolby Vision metadata.
+    public init(pixelBuffer: CVPixelBuffer, presentationTime: Double, isHDR: Bool, doviMetadata: DoViMetadata?) {
+        self.pixelBuffer = pixelBuffer
+        self.presentationTime = presentationTime
+        self.isHDR = isHDR
+        self.doviMetadata = doviMetadata
     }
 }

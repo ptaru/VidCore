@@ -20,7 +20,6 @@ public class AudioPlayer: ObservableObject {
     private var sampleRate: Double = 48000.0
     private var playbackStartTime: AVAudioTime?
     
-    // PTS tracking for A/V sync
     private var baseAudioPTS: Double = 0
     private var totalSamplesEnqueued: Int64 = 0
     
@@ -60,7 +59,7 @@ public class AudioPlayer: ObservableObject {
     /// Fully stops and clears audio playback.
     /// Use this for cleanup when the view model is being torn down.
     public func stop() {
-        playerNode.stop()  // Clears all scheduled buffers
+        playerNode.stop()
         engine.stop()
         isEngineRunning = false
         resetSync()
@@ -70,17 +69,16 @@ public class AudioPlayer: ObservableObject {
     /// Detaches audio nodes from the engine graph to release memory.
     public func cleanup() {
         stop()
-        engine.detach(playerNode)  // Release node from engine graph
+        engine.detach(playerNode)
     }
 
     public func seek(to seconds: Double) {
-        playerNode.stop()  // Clears scheduled buffers and stops playback
+        playerNode.stop()
         resetSync()
-        // Don't auto-play here - caller will call play() when ready to resume
+        // Caller manages resume logic
     }
 
     public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double) {
-        // Track base PTS from first buffer
         if totalSamplesEnqueued == 0 {
             baseAudioPTS = pts
         }

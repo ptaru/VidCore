@@ -158,7 +158,7 @@ public class VideoDecoder {
         return isClosed
     }
 
-    // MARK: - New Parallel Demux/Decode API
+    // MARK: - Parallel Demux/Decode API
 
     /// Demux next packet from the container (runs on demux queue)
     /// Returns nil at end of stream
@@ -205,14 +205,19 @@ public class VideoDecoder {
 
                 var results: [DecodedFrame] = []
 
-                // Handle video packets - get ALL available frames
                 if packet.isVideo {
                     if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
                         for ffmpegFrame in ffmpegFrames {
+                            var doviMetadata: DoViMetadata? = nil
+                            if let doviDict = ffmpegFrame.doviMetadata as? [String: Any] {
+                                doviMetadata = DoViMetadata(fromDictionary: doviDict)
+                            }
+                            
                             let frame = VideoFrame(
                                 pixelBuffer: ffmpegFrame.pixelBuffer,
                                 presentationTime: ffmpegFrame.presentationTime,
-                                isHDR: self.videoInfo.isHDR
+                                isHDR: self.videoInfo.isHDR,
+                                doviMetadata: doviMetadata
                             )
                             results.append(.video(frame))
                         }
@@ -281,11 +286,17 @@ public class VideoDecoder {
                     continuation.resume(returning: nil)
                     return
                 }
+                
+                var doviMetadata: DoViMetadata? = nil
+                if let doviDict = videoFrameObj.doviMetadata as? [String: Any] {
+                    doviMetadata = DoViMetadata(fromDictionary: doviDict)
+                }
 
                 let frame = VideoFrame(
                     pixelBuffer: videoFrameObj.pixelBuffer,
                     presentationTime: videoFrameObj.presentationTime,
-                    isHDR: self.videoInfo.isHDR
+                    isHDR: self.videoInfo.isHDR,
+                    doviMetadata: doviMetadata
                 )
                 continuation.resume(returning: frame)
             }

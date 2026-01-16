@@ -39,8 +39,8 @@ public struct MetalVideoRenderer: NSViewRepresentable {
     public func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.parent = self
         
-        // Configure layer for HDR/EDR when HDR content is detected
-        if let frame = currentFrame, frame.isHDR {
+        // Configure layer for HDR/EDR when HDR or DoVi content is detected
+        if let frame = currentFrame, (frame.isHDR || frame.doviMetadata != nil) {
             configureForHDR(nsView)
         }
         

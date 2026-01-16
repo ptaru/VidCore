@@ -14,6 +14,11 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 
+// Dolby Vision metadata support
+extern "C" {
+#include <libavutil/dovi_meta.h>
+}
+
 // Forward declaration for the hw_format callback
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                         const enum AVPixelFormat *pix_fmts);
@@ -98,6 +103,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 - (instancetype)initWithURL:(NSURL *)url error:(NSError **)error {
   self = [super init];
   if (self) {
+    // Set log level to ERROR to avoid noisy hevc logs
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      av_log_set_level(AV_LOG_ERROR);
+    });
     _formatContext = NULL;
     _codecContext = NULL;
     _audioCodecContext = NULL;
@@ -401,6 +411,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _videoInfo.colorSpace = _codecContext->colorspace;
   _videoInfo.colorRange = _codecContext->color_range;
 
+  // Check for Dolby Vision side data in the stream
+  const AVPacketSideData *doviSideData = av_packet_side_data_get(
+      videoStream->codecpar->coded_side_data,
+      videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
+  _videoInfo.isDolbyVision = (doviSideData != NULL);
+
   // Calculate bits per component from pixel format
   const AVPixFmtDescriptor *pixFmtDesc =
       av_pix_fmt_desc_get(_codecContext->pix_fmt);
@@ -424,12 +440,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _videoInfo.duration = 0.0;
   }
 
-  NSLog(@"[FFmpegDecoder] Opened video: %dx%d, %.2f fps, %.2f sec, codec: %s, "
-        @"hardware: %@, HDR: %@, bits: %d",
-        _videoInfo.width, _videoInfo.height, _videoInfo.frameRate,
-        _videoInfo.duration, codec->name,
-        _usingHardwareDecoder ? @"YES" : @"NO",
-        _videoInfo.isHDR ? @"YES" : @"NO", _videoInfo.bitsPerComponent);
+  NSLog(
+      @"[FFmpegDecoder] Opened video: %dx%d, %.2f fps, %.2f sec, codec: %s, "
+      @"hardware: %@, HDR: %@, bits: %d",
+      _videoInfo.width, _videoInfo.height, _videoInfo.frameRate,
+      _videoInfo.duration, codec->name, _usingHardwareDecoder ? @"YES" : @"NO",
+      _videoInfo.isDolbyVision ? @"DOVI" : (_videoInfo.isHDR ? @"YES" : @"NO"),
+      _videoInfo.bitsPerComponent);
 
   return YES;
 }
@@ -599,6 +616,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     videoFrame.pixelBuffer = pixelBuffer;
     videoFrame.presentationTime = pts;
 
+    // Extract Dolby Vision Profile 5 metadata if present
+    videoFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+
     [frames addObject:videoFrame];
   }
 
@@ -764,6 +784,143 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   NSLog(@"[FFmpegDecoder] Failed to extract CVPixelBuffer from hardware frame");
   return NULL;
+}
+
+/// Extract Dolby Vision Profile 5 metadata from frame side data
+/// Returns nil for Profile 8 or non-DoVi content (fallback to standard HDR)
+- (nullable NSDictionary *)extractDoViMetadataFromFrame:(AVFrame *)frame {
+  AVFrameSideData *sd =
+      av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
+  if (!sd)
+    return nil;
+
+  const AVDOVIMetadata *metadata = (AVDOVIMetadata *)sd->data;
+  const AVDOVIRpuDataHeader *header = av_dovi_get_header(metadata);
+
+  // CRITICAL: Only process Profile 5 (IPTPQc2)
+  // Profile 5 uses full range video (bl_video_full_range_flag = 1)
+  // Profile 8.x uses limited range with HDR10/HLG-compatible base layer
+  // Applying IPTPQc2 pipeline to Profile 8 causes severe color corruption
+  //
+  // Note: Profile 5 is distinguished by:
+  // - bl_video_full_range_flag = 1 (always full range)
+  // - Single layer (disable_residual_flag = 1)
+  // Profile 8 typically has:
+  // - bl_video_full_range_flag = 0 (limited range, HDR10-compatible)
+  // - disable_residual_flag = 1 (single layer variant)
+
+  // Single-layer only (no enhancement layer)
+  if (!header->disable_residual_flag) {
+    NSLog(@"[FFmpegDecoder] DoVi enhancement layer present, not supported");
+    return nil;
+  }
+
+  // Profile 5 heuristic: full range video
+  if (!header->bl_video_full_range_flag) {
+    static BOOL loggedOnce = NO;
+    if (!loggedOnce) {
+      NSLog(@"[FFmpegDecoder] DoVi limited range (Profile 8-like), using "
+            @"standard HDR pipeline");
+      loggedOnce = YES;
+    }
+    return nil;
+  }
+
+  // Log only once per session to avoid spam
+  static BOOL loggedDoViDetection = NO;
+  if (!loggedDoViDetection) {
+    NSLog(@"[FFmpegDecoder] Processing DoVi Profile 5 metadata");
+    loggedDoViDetection = YES;
+  }
+
+  const AVDOVIDataMapping *mapping = av_dovi_get_mapping(metadata);
+  const AVDOVIColorMetadata *color = av_dovi_get_color(metadata);
+
+  // Extract color matrices (row-major)
+  NSMutableArray *nonlinearMatrix = [NSMutableArray arrayWithCapacity:9];
+  NSMutableArray *linearMatrix = [NSMutableArray arrayWithCapacity:9];
+  NSMutableArray *nonlinearOffset = [NSMutableArray arrayWithCapacity:3];
+
+  for (int i = 0; i < 9; i++) {
+    [nonlinearMatrix addObject:@(av_q2d(color->ycc_to_rgb_matrix[i]))];
+    [linearMatrix addObject:@(av_q2d(color->rgb_to_lms_matrix[i]))];
+  }
+  for (int i = 0; i < 3; i++) {
+    [nonlinearOffset addObject:@(av_q2d(color->ycc_to_rgb_offset[i]))];
+  }
+
+  // Extract reshape curves (per component: I, P, T)
+  NSMutableArray *components = [NSMutableArray arrayWithCapacity:3];
+  float scale = 1.0f / ((1 << header->bl_bit_depth) - 1);
+  float coefScale = 1.0f / (1 << header->coef_log2_denom);
+
+  for (int c = 0; c < 3; c++) {
+    const AVDOVIReshapingCurve *curve = &mapping->curves[c];
+    NSMutableDictionary *comp = [NSMutableDictionary dictionary];
+    comp[@"numPivots"] = @(curve->num_pivots);
+
+    // Pivots normalized to [0, 1]
+    NSMutableArray *pivots = [NSMutableArray arrayWithCapacity:9];
+    for (int i = 0; i < curve->num_pivots; i++) {
+      [pivots addObject:@(scale * curve->pivots[i])];
+    }
+    comp[@"pivots"] = pivots;
+
+    // Methods and coefficients per interval
+    NSMutableArray *methods = [NSMutableArray array];
+    NSMutableArray *polyCoeffs = [NSMutableArray array];
+    NSMutableArray *mmrOrders = [NSMutableArray array];
+    NSMutableArray *mmrConstants = [NSMutableArray array];
+    NSMutableArray *mmrCoeffsArray = [NSMutableArray array];
+
+    for (int i = 0; i < curve->num_pivots - 1; i++) {
+      [methods addObject:@(curve->mapping_idc[i])];
+
+      if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
+        NSMutableArray *poly = [NSMutableArray arrayWithCapacity:3];
+        for (int k = 0; k < 3; k++) {
+          float val = (k <= curve->poly_order[i])
+                          ? coefScale * curve->poly_coef[i][k]
+                          : 0;
+          [poly addObject:@(val)];
+        }
+        [polyCoeffs addObject:poly];
+        [mmrOrders addObject:@(0)];
+        [mmrConstants addObject:@(0.0f)];
+        [mmrCoeffsArray addObject:@[]];
+      } else { // MMR
+        [polyCoeffs addObject:@[ @(0.0f), @(0.0f), @(0.0f) ]];
+        [mmrOrders addObject:@(curve->mmr_order[i])];
+        [mmrConstants addObject:@(coefScale * curve->mmr_constant[i])];
+
+        NSMutableArray *orderCoeffs = [NSMutableArray array];
+        for (int j = 0; j < curve->mmr_order[i]; j++) {
+          NSMutableArray *coeffs = [NSMutableArray arrayWithCapacity:7];
+          for (int k = 0; k < 7; k++) {
+            [coeffs addObject:@(coefScale * curve->mmr_coef[i][j][k])];
+          }
+          [orderCoeffs addObject:coeffs];
+        }
+        [mmrCoeffsArray addObject:orderCoeffs];
+      }
+    }
+
+    comp[@"methods"] = methods;
+    comp[@"polyCoeffs"] = polyCoeffs;
+    comp[@"mmrOrders"] = mmrOrders;
+    comp[@"mmrConstants"] = mmrConstants;
+    comp[@"mmrCoeffs"] = mmrCoeffsArray;
+    [components addObject:comp];
+  }
+
+  return @{
+    @"nonlinearMatrix" : nonlinearMatrix,
+    @"linearMatrix" : linearMatrix,
+    @"nonlinearOffset" : nonlinearOffset,
+    @"components" : components,
+    @"sourceMinPQ" : @(color->source_min_pq / 4095.0f),
+    @"sourceMaxPQ" : @(color->source_max_pq / 4095.0f)
+  };
 }
 
 - (CVPixelBufferRef)convertFrameToPixelBuffer:(AVFrame *)frame {

@@ -12,7 +12,6 @@ import os
 
 private let logger = Logger(subsystem: "com.vidcore", category: "player")
 
-// Track deallocation for debugging memory issues
 private let deallocationLogger = Logger(subsystem: "com.vidcore", category: "memory")
 
 // MARK: - Timing Constants
@@ -146,7 +145,7 @@ public class VideoPlayer {
                 videoInfo = decoder.videoInfo
                 logger.info("[VideoPlayer] Video loaded: \(decoder.videoInfo.width)x\(decoder.videoInfo.height), duration: \(self.duration)s")
                 
-                // Decode first frame for preview using unified pipeline
+
                 while !Task.isCancelled {
                     guard let packet = await decoder.demuxNextPacket() else { break }
                     let frames = await decoder.decodePacket(packet)
@@ -176,13 +175,10 @@ public class VideoPlayer {
     public func play() {
         guard state == .ready || state == .paused || state == .finished else { return }
         
-        // Reset if finished - seek to beginning and restart playback
-        // We need to start fresh loops since the old ones have terminated
+
         if state == .finished {
             Task {
                 await seek(to: 0)
-                // After seek, buffers are suspended and loops have terminated.
-                // Resume buffers and set to .ready so play() starts fresh loops.
                 await packetQueue.resume()
                 await frameBuffer.resume()
                 state = .ready
@@ -191,16 +187,16 @@ public class VideoPlayer {
             return
         }
         
-        // Resume from paused state
+
         if state == .paused {
             state = .playing
             audioPlayer.play()
             
-            // Adjust timing to account for pause duration
+
             let pauseDuration = CACurrentMediaTime() - pauseTimestamp
             playbackStartTime += pauseDuration
             
-            // Resume buffers - loops will continue
+
             Task {
                 await packetQueue.resume()
                 await frameBuffer.resume()
@@ -210,11 +206,10 @@ public class VideoPlayer {
             return
         }
         
-        // Start fresh from ready state
         state = .playing
         audioPlayer.play()
         
-        // Start parallel demux/decode/display pipeline
+
         demuxTask = Task { [weak self] in
             await self?.runDemuxLoop()
         }
@@ -238,7 +233,7 @@ public class VideoPlayer {
         pauseTimestamp = CACurrentMediaTime()
         audioPlayer.pause()
         
-        // Suspend buffers - loops will yield when they check suspension state
+
         Task {
             await packetQueue.suspend()
             await frameBuffer.suspend()
@@ -276,7 +271,7 @@ public class VideoPlayer {
             state = .seeking
             audioPlayer.pause()
             
-            // Suspend loops first
+
             await packetQueue.suspend()
             await frameBuffer.suspend()
             
@@ -291,7 +286,7 @@ public class VideoPlayer {
                 return
             }
             
-            // Reset buffers to clear stale data
+
             await packetQueue.reset()
             await frameBuffer.reset()
             
@@ -306,13 +301,13 @@ public class VideoPlayer {
                 currentTime = clampedSeconds
                 
                 if wasPlaying {
-                    // Resume playback - buffers are already reset and ready
+
                     state = .playing
                     audioPlayer.play()
                     await packetQueue.resume()
                     await frameBuffer.resume()
                 } else {
-                    // Decode one frame to show at seek position
+
                     while !Task.isCancelled {
                         guard let packet = await decoder.demuxNextPacket() else { break }
                         let frames = await decoder.decodePacket(packet)
@@ -351,7 +346,7 @@ public class VideoPlayer {
             pause()
         }
         
-        audioPlayer.cleanup()  // Full cleanup with node detachment
+        audioPlayer.cleanup()
         
         demuxTask?.cancel()
         decodeTask?.cancel()
@@ -391,7 +386,6 @@ public class VideoPlayer {
         logger.debug("[VideoPlayer] Demux loop started")
         
         while !Task.isCancelled {
-            // Check if queue is suspended and wait
             if await packetQueue.suspended {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                 continue
@@ -417,19 +411,16 @@ public class VideoPlayer {
         logger.debug("[VideoPlayer] Decode loop started")
         
         while !Task.isCancelled {
-            // Check if queue is suspended and wait
             if await packetQueue.suspended {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                 continue
             }
             
             guard let packet = await packetQueue.pop() else {
-                // nil could mean suspended or end of stream - check suspension
                 if await packetQueue.suspended {
                     continue
                 }
                 
-                // Flush and drain decoder
                 logger.debug("[VideoPlayer] Decode reached end of packets, flushing decoder")
                 
                 await decoder.flushVideoDecoder()
@@ -475,7 +466,6 @@ public class VideoPlayer {
         logger.debug("[VideoPlayer] Display loop started")
         
         while !Task.isCancelled {
-            // Check if buffer is suspended and wait
             if await frameBuffer.suspended {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                 continue
@@ -484,7 +474,6 @@ public class VideoPlayer {
             let frameAvailable = await frameBuffer.waitForFrameAvailable()
             
             guard frameAvailable else {
-                // nil/false could mean suspended or end of stream - check suspension
                 if await frameBuffer.suspended {
                     continue
                 }
@@ -509,8 +498,7 @@ public class VideoPlayer {
                 hasStarted = true
             }
             
-            // Calculate current playback time (audio is master clock when available)
-            // Only update currentTime when actually playing to avoid race with seek
+            // Audio is master clock when available; only update currentTime when playing to avoid race with seek
             let currentPlaybackTime: Double
             if hasAudio && audioPlayer.isPlaying {
                 currentPlaybackTime = audioPlayer.mediaTime
@@ -522,24 +510,20 @@ public class VideoPlayer {
                 currentTime = currentPlaybackTime
             }
             
-            // Calculate wait time
             let waitTime = nextFrame.presentationTime - currentPlaybackTime
             
-            // A/V sync drift detection (only when using audio clock)
             if hasAudio && audioPlayer.isPlaying {
-                let drift = waitTime  // positive = video ahead, negative = video behind
+                let drift = waitTime
                 
                 if abs(drift) > SyncTiming.driftWarningThreshold {
                     consecutiveDriftCount += 1
                     
-                    // Severe drift - hard resync by seeking video to audio position
                     if abs(drift) > SyncTiming.severeDriftThreshold 
                         && consecutiveDriftCount >= SyncTiming.severeDriftCountThreshold {
                         
                         logger.warning("[VideoPlayer] Severe A/V drift (\(Int(abs(drift) * 1000))ms) - triggering hard resync")
                         consecutiveDriftCount = 0
                         
-                        // Seek video to current audio position
                         let audioPosition = audioPlayer.mediaTime
                         await packetQueue.reset()
                         await frameBuffer.reset()
@@ -552,15 +536,12 @@ public class VideoPlayer {
                         continue
                     }
                     
-                    // Normal drift handling
                     if abs(drift) > SyncTiming.driftCorrectionThreshold 
                         && consecutiveDriftCount >= SyncTiming.consecutiveDriftCountThreshold {
                         
                         if drift > 0 {
-                            // Video ahead of audio - let the wait logic below handle it naturally
                             logger.debug("[VideoPlayer] A/V sync: video ahead by \(Int(drift * 1000))ms, waiting for audio")
                         } else {
-                            // Video behind audio - late frame drop logic below handles this
                             logger.debug("[VideoPlayer] A/V sync: video behind by \(Int(-drift * 1000))ms, will drop late frames")
                         }
                     }
@@ -616,34 +597,26 @@ public class VideoPlayer {
         // This is safe in deinit as we're the last reference holder
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                // Pause playback first
                 if isPlaying {
                     pause()
                 }
 
                 audioPlayer.cleanup()
 
-                // Release decoder and its pools FIRST (this releases the CVPixelBufferPools)
                 decoder?.close()
                 decoder = nil
 
-                // Release current frame reference
                 currentFrame = nil
 
-                // Clear task references
                 demuxTask = nil
                 decodeTask = nil
                 displayTask = nil
                 currentSeekTask = nil
 
-                // Flush Metal texture cache
                 renderingEngine?.flush()
 
-                // Reset state
                 state = .idle
 
-                // CRITICAL: Reset buffers to release CVPixelBuffer references
-                // Capture actor references and reset asynchronously
                 let pq = packetQueue
                 let fb = frameBuffer
                 Task.detached(priority: .high) {
@@ -655,34 +628,26 @@ public class VideoPlayer {
         } else {
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
-                    // Pause playback first
                     if isPlaying {
                         pause()
                     }
 
                     audioPlayer.cleanup()
 
-                    // Release decoder and its pools FIRST (this releases the CVPixelBufferPools)
                     decoder?.close()
                     decoder = nil
 
-                    // Release current frame reference
                     currentFrame = nil
 
-                    // Clear task references
                     demuxTask = nil
                     decodeTask = nil
                     displayTask = nil
                     currentSeekTask = nil
 
-                    // Flush Metal texture cache
                     renderingEngine?.flush()
 
-                    // Reset state
                     state = .idle
 
-                    // CRITICAL: Reset buffers to release CVPixelBuffer references
-                    // Capture actor references and reset asynchronously
                     let pq = packetQueue
                     let fb = frameBuffer
                     Task.detached(priority: .high) {
@@ -699,8 +664,7 @@ public class VideoPlayer {
     
     nonisolated deinit {
         deallocationLogger.info("[VideoPlayer] DEINIT - deallocating")
-        // Only cancel tasks here - closeSync() was already called by ViewModel.cleanupSync()
-        // This is a fallback for edge cases where VideoPlayer is deallocated without explicit cleanup
+
         cancelAllTasks()
     }
 }

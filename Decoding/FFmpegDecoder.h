@@ -38,6 +38,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int bitsPerComponent;
 /// Whether the content is HDR (PQ or HLG transfer function).
 @property(nonatomic, readonly) BOOL isHDR;
+/// Whether the content is Dolby Vision.
+@property(nonatomic, assign) BOOL isDolbyVision;
 @end
 
 /// Type of decoded frame.
@@ -60,6 +62,9 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @interface FFmpegVideoFrame : FFmpegFrame
 /// The decoded pixel buffer (CVImageBuffer).
 @property(nonatomic, assign) CVPixelBufferRef pixelBuffer;
+/// Dolby Vision Profile 5 metadata, if present (bridges to Swift as
+/// dictionary).
+@property(nonatomic, strong, nullable) NSDictionary *doviMetadata;
 @end
 
 /// A decoded audio frame.
