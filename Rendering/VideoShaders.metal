@@ -398,6 +398,45 @@ fragment float4 hdrI420FragmentShader(
     return float4(linearDisplayP3 / 100.0, 1.0);
 }
 
+// HDR10 to SDR Fragment shader for NV12/P010 10-bit bi-planar
+// Same processing as hdrNV12FragmentShader but outputs gamma-corrected SDR for BGRA8 displays
+fragment float4 hdrNV12SDRFragmentShader(
+    VertexOut in [[stage_in]],
+    texture2d<float> yTexture [[texture(0)]],
+    texture2d<float> uvTexture [[texture(1)]],
+    constant ToneMappingParams& params [[buffer(0)]]
+) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    
+    // Sample 10-bit YUV
+    float y = yTexture.sample(textureSampler, in.texCoord).r;
+    float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
+    
+    // 10-bit video range conversion
+    y = (y - 64.0/1023.0) * (1023.0/876.0);
+    float u = (uv.x - 512.0/1023.0) * (1023.0/896.0);
+    float v = (uv.y - 512.0/1023.0) * (1023.0/896.0);
+    
+    // BT.2020 YUV to RGB (result is still PQ-encoded)
+    float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
+    rgbPQ = max(rgbPQ, 0.0);
+
+    // Convert PQ to linear
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Apply BT.2390 tone mapping (params.outputMax should be 100 for SDR)
+    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
+    
+    // Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
+    
+    // For SDR: normalize to 100 nits and apply gamma for sRGB
+    float3 normalizedRGB = linearDisplayP3 / 100.0;
+    float3 sRGB = pow(saturate(normalizedRGB), 1.0 / 2.2);
+    
+    return float4(sRGB, 1.0);
+}
+
 // =============================================================================
 // Dolby Vision Profile 5 (IPTPQc2) Support
 // =============================================================================
@@ -556,4 +595,44 @@ fragment float4 doviNV12FragmentShader(
     
     // Output for macOS EDR (1.0 = 100 nits)
     return float4(linearDisplayP3 / 100.0, 1.0);
+}
+
+// DoVi Profile 5 Fragment shader for SDR output (thumbnail generation)
+// Same processing as doviNV12FragmentShader but outputs SDR-clamped RGB for BGRA8Unorm textures
+fragment float4 doviNV12SDRFragmentShader(
+    VertexOut in [[stage_in]],
+    texture2d<float> yTexture [[texture(0)]],
+    texture2d<float> uvTexture [[texture(1)]],
+    constant DoViParams& doviParams [[buffer(0)]],
+    constant DoViReshapeComponent& compI [[buffer(1)]],
+    constant DoViReshapeComponent& compP [[buffer(2)]],
+    constant DoViReshapeComponent& compT [[buffer(3)]],
+    constant ToneMappingParams& toneParams [[buffer(4)]]
+) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    
+    // Sample 10-bit IPT (Profile 5 is ALWAYS full range)
+    float I = yTexture.sample(textureSampler, in.texCoord).r;
+    float2 PT = uvTexture.sample(textureSampler, in.texCoord).rg;
+    
+    float3 ipt = float3(I, PT.x, PT.y);
+    
+    // DoVi processing → outputs PQ-encoded RGB in BT.2020
+    float3 rgbPQ = processDoVi(ipt, doviParams, compI, compP, compT);
+    
+    // Convert to linear for tone mapping
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Apply BT.2390 tone mapping (tone map to SDR range - 100 nits max)
+    float3 linearToneMapped = toneMapBT2390(linearSrc, toneParams);
+    
+    // Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
+    
+    // For SDR output: normalize to 100 nits and apply gamma for sRGB display
+    // Simple gamma 2.2 approximation for SDR
+    float3 normalizedRGB = linearDisplayP3 / 100.0;
+    float3 sRGB = pow(saturate(normalizedRGB), 1.0 / 2.2);
+    
+    return float4(sRGB, 1.0);
 }

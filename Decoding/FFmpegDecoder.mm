@@ -824,7 +824,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   // Single-layer only (no enhancement layer)
   if (!header->disable_residual_flag) {
-    NSLog(@"[FFmpegDecoder] DoVi enhancement layer present, not supported");
+    static BOOL loggedEnhancementLayer = NO;
+    if (!loggedEnhancementLayer) {
+      NSLog(@"[FFmpegDecoder] DoVi enhancement layer present, not supported");
+      loggedEnhancementLayer = YES;
+    }
     return nil;
   }
 

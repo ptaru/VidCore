@@ -74,8 +74,14 @@ public class RenderingEngine {
     private var hdrNV12PipelineState: MTLRenderPipelineState?
     private var hdrI420PipelineState: MTLRenderPipelineState?
     
+    // HDR10 SDR pipeline (for non-EDR displays)
+    private var hdrNV12SDRPipelineState: MTLRenderPipelineState?
+    
     // Dolby Vision Profile 5 pipeline (IPTPQc2 processing)
     private var doviNV12PipelineState: MTLRenderPipelineState?
+    
+    // Dolby Vision Profile 5 SDR pipeline (for thumbnail generation)
+    private var doviNV12SDRPipelineState: MTLRenderPipelineState?
 
     /// Creates a new rendering engine with the default Metal device.
     ///
@@ -240,6 +246,22 @@ public class RenderingEngine {
                 print("[RenderingEngine] Failed to create HDR I420 pipeline: \(error)")
             }
         }
+        
+        // HDR10 NV12 SDR pipeline (for non-EDR displays)
+        if let vertexFunc = library.makeFunction(name: "yuvVertexShader"),
+            let fragmentFunc = library.makeFunction(name: "hdrNV12SDRFragmentShader")
+        {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunc
+            descriptor.fragmentFunction = fragmentFunc
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm  // SDR output
+            
+            do {
+                hdrNV12SDRPipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            } catch {
+                print("[RenderingEngine] Failed to create HDR NV12 SDR pipeline: \(error)")
+            }
+        }
 
         // SDR NV12 pipeline with rgba16Float output (for HDR-configured layers)
         if let vertexFunc = library.makeFunction(name: "yuvVertexShader"),
@@ -288,6 +310,22 @@ public class RenderingEngine {
                 doviNV12PipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
             } catch {
                 print("[RenderingEngine] Failed to create DoVi NV12 pipeline: \(error)")
+            }
+        }
+        
+        // Dolby Vision Profile 5 SDR pipeline (for thumbnail generation)
+        if let vertexFunc = library.makeFunction(name: "yuvVertexShader"),
+            let fragmentFunc = library.makeFunction(name: "doviNV12SDRFragmentShader")
+        {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunc
+            descriptor.fragmentFunction = fragmentFunc
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm  // SDR output
+            
+            do {
+                doviNV12SDRPipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
+            } catch {
+                print("[RenderingEngine] Failed to create DoVi NV12 SDR pipeline: \(error)")
             }
         }
     }
@@ -772,32 +810,35 @@ public class RenderingEngine {
         // Dolby Vision Profile 5 path (IPTPQc2)
         if let doviMetadata = frame.doviMetadata {
             if isFloat16Layer {
+                // EDR display: use full HDR DoVi pipeline
                 if renderDoViPixelBuffer(frame.pixelBuffer, metadata: doviMetadata, to: drawable) {
                     return
                 }
                 // Fall through to regular HDR if DoVi render failed
             } else {
-                // Log warning once about layer configuration
-                struct WarnState { static var warned = false }
-                if !WarnState.warned {
-                    print("[RenderingEngine] ⚠️ DoVi content detected but layer is BGRA8. Configure layer for EDR: pixelFormat = .rgba16Float, wantsExtendedDynamicRangeContent = true")
-                    WarnState.warned = true
+                // SDR display: use tone-mapped DoVi SDR pipeline
+                if renderDoViPixelBufferSDR(frame.pixelBuffer, metadata: doviMetadata, to: drawable) {
+                    return
                 }
+                // Fall through to standard rendering if DoVi SDR render fails
             }
         }
 
         if isEffectivelyHDR {
-            // Try HDR render path for 10-bit content IF the layer is configured for it
             if isFloat16Layer {
+                // EDR display: use full HDR pipeline
                 if renderHDRPixelBuffer(frame.pixelBuffer, to: drawable) {
                     return
                 }
-            }
-
-            // If HDR render failed or layer not ready, check if we need Float16 sdr fallback
-            if isFloat16Layer {
+                // Fall back to Float16 SDR if HDR render failed
                 renderPixelBufferFloat16(frame.pixelBuffer, to: drawable)
                 return
+            } else {
+                // SDR display: use tone-mapped HDR SDR pipeline
+                if renderHDRPixelBufferSDR(frame.pixelBuffer, to: drawable) {
+                    return
+                }
+                // Fall through to standard rendering if HDR SDR fails
             }
         }
 
@@ -850,6 +891,136 @@ public class RenderingEngine {
 
         // 8-bit I420 from FFmpeg sws_scale - can't do true HDR, return false to use SDR fallback
         return false
+    }
+    
+    /// Renders HDR10 content to SDR drawable (for non-EDR displays)
+    /// Uses BT.2390 tone mapping to 100 nits with gamma output
+    private func renderHDRPixelBufferSDR(_ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable)
+        -> Bool
+    {
+        let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        
+        // P010 - 10-bit bi-planar (common hardware decode output for HDR)
+        if format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            || format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+        {
+            return renderHDRNV12PixelBufferSDR(pixelBuffer, to: drawable)
+        }
+        
+        // 8-bit I420 from FFmpeg sws_scale - already SDR, return false
+        return false
+    }
+    
+    /// GPU-accelerated 10-bit P010 (HDR NV12) rendering with tone mapping to SDR
+    private func renderHDRNV12PixelBufferSDR(
+        _ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable
+    ) -> Bool {
+        guard let pipelineState = hdrNV12SDRPipelineState,
+              let textureCache = textureCache
+        else {
+            return false
+        }
+        
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        
+        guard width > 0 && height > 0 else { return false }
+        
+        // Create Y texture (plane 0, r16Unorm for 10-bit)
+        var yTextureCv: CVMetalTexture?
+        var result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .r16Unorm,
+            width,
+            height,
+            0,
+            &yTextureCv
+        )
+        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
+              let yTexture = CVMetalTextureGetTexture(yTextureCv)
+        else {
+            return false
+        }
+        
+        // Create UV texture (plane 1, rg16Unorm for 10-bit)
+        var uvTextureCv: CVMetalTexture?
+        result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .rg16Unorm,
+            width / 2,
+            height / 2,
+            1,
+            &uvTextureCv
+        )
+        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
+              let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
+        else {
+            return false
+        }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
+        
+        // Setup render pass
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
+        else {
+            return false
+        }
+        
+        // Calculate viewport for aspect-fit scaling
+        let drawableWidth = Float(drawable.texture.width)
+        let drawableHeight = Float(drawable.texture.height)
+        let imageWidth = Float(width)
+        let imageHeight = Float(height)
+        
+        let scaleX = drawableWidth / imageWidth
+        let scaleY = drawableHeight / imageHeight
+        let scale = min(scaleX, scaleY)
+        
+        let scaledWidth = imageWidth * scale
+        let scaledHeight = imageHeight * scale
+        let offsetX = (drawableWidth - scaledWidth) / 2
+        let offsetY = (drawableHeight - scaledHeight) / 2
+        
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setViewport(MTLViewport(
+            originX: Double(offsetX),
+            originY: Double(offsetY),
+            width: Double(scaledWidth),
+            height: Double(scaledHeight),
+            znear: 0, zfar: 1
+        ))
+        
+        encoder.setFragmentTexture(yTexture, index: 0)
+        encoder.setFragmentTexture(uvTexture, index: 1)
+        
+        // Tone mapping params - map to SDR (100 nits)
+        var toneParams = ToneMappingParams(
+            inputMin: 0.0,
+            inputMax: contentPeakNits,
+            outputMin: 0.0,
+            outputMax: 100.0  // SDR output - 100 nits max
+        )
+        encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 0)
+        
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+        
+        return true
     }
 
     /// Configuration for HDR Tone Mapping (BT.2390)
@@ -1322,6 +1493,267 @@ public class RenderingEngine {
         return true
     }
     
+    /// Renders Dolby Vision Profile 5 content to an SDR drawable (for non-EDR displays)
+    /// Uses the DoVi processing pipeline with tone mapping to 100 nits SDR output
+    private func renderDoViPixelBufferSDR(
+        _ pixelBuffer: CVPixelBuffer,
+        metadata: DoViMetadata,
+        to drawable: CAMetalDrawable
+    ) -> Bool {
+        guard let pipelineState = doviNV12SDRPipelineState,
+              let textureCache = textureCache
+        else {
+            return false
+        }
+        
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        guard width > 0 && height > 0 else { return false }
+        
+        // Create Y texture (plane 0, r16Unorm for 10-bit)
+        var yTextureCv: CVMetalTexture?
+        var result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .r16Unorm,
+            width,
+            height,
+            0,
+            &yTextureCv
+        )
+        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
+              let yTexture = CVMetalTextureGetTexture(yTextureCv)
+        else {
+            return false
+        }
+        
+        // Create UV texture (plane 1, rg16Unorm for 10-bit)
+        var uvTextureCv: CVMetalTexture?
+        result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .rg16Unorm,
+            width / 2,
+            height / 2,
+            1,
+            &uvTextureCv
+        )
+        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
+              let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
+        else {
+            return false
+        }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
+        
+        // Setup render pass
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
+        else {
+            return false
+        }
+        
+        // Calculate viewport for aspect-fit scaling
+        let drawableWidth = Float(drawable.texture.width)
+        let drawableHeight = Float(drawable.texture.height)
+        let imageWidth = Float(width)
+        let imageHeight = Float(height)
+        
+        let scaleX = drawableWidth / imageWidth
+        let scaleY = drawableHeight / imageHeight
+        let scale = min(scaleX, scaleY)
+        
+        let scaledWidth = imageWidth * scale
+        let scaledHeight = imageHeight * scale
+        let offsetX = (drawableWidth - scaledWidth) / 2
+        let offsetY = (drawableHeight - scaledHeight) / 2
+        
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setViewport(MTLViewport(
+            originX: Double(offsetX),
+            originY: Double(offsetY),
+            width: Double(scaledWidth),
+            height: Double(scaledHeight),
+            znear: 0, zfar: 1
+        ))
+        
+        encoder.setFragmentTexture(yTexture, index: 0)
+        encoder.setFragmentTexture(uvTexture, index: 1)
+        
+        // Encode DoVi parameters (buffer 0)
+        var doviParams = DoViParamsBuffer(from: metadata)
+        encoder.setFragmentBytes(&doviParams, length: MemoryLayout<DoViParamsBuffer>.size, index: 0)
+        
+        // Encode reshape components (buffers 1, 2, 3)
+        var compI = DoViReshapeComponentBuffer(from: metadata.components[0])
+        var compP = DoViReshapeComponentBuffer(from: metadata.components[1])
+        var compT = DoViReshapeComponentBuffer(from: metadata.components[2])
+        encoder.setFragmentBytes(&compI, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 1)
+        encoder.setFragmentBytes(&compP, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 2)
+        encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
+        
+        // Encode tone mapping params (buffer 4)
+        // For SDR output, tone map to 100 nits
+        let dynamicPeakPQ = metadata.sceneMaxPQ ?? metadata.sourceMaxPQ
+        let dynamicPeakNits = pqToNits(dynamicPeakPQ)
+        
+        var toneParams = ToneMappingParams(
+            inputMin: 0.0,
+            inputMax: dynamicPeakNits,
+            outputMin: 0.0,
+            outputMax: 100.0  // SDR output - 100 nits max
+        )
+        encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 4)
+        
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+        
+        return true
+    }
+    
+    /// Renders Dolby Vision Profile 5 content to an SDR texture (for thumbnail generation)
+    /// Uses the DoVi processing pipeline with tone mapping to 100 nits SDR output
+    private func renderDoViPixelBufferToTexture(
+        _ pixelBuffer: CVPixelBuffer,
+        metadata: DoViMetadata,
+        to texture: MTLTexture
+    ) -> Bool {
+        guard let pipelineState = doviNV12SDRPipelineState,
+              let textureCache = textureCache
+        else {
+            print("[RenderingEngine] DoVi SDR pipeline not available")
+            return false
+        }
+        
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        guard width > 0 && height > 0 else { return false }
+        
+        // Create Y texture (plane 0, r16Unorm for 10-bit)
+        var yTextureCv: CVMetalTexture?
+        var result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .r16Unorm,
+            width,
+            height,
+            0,
+            &yTextureCv
+        )
+        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
+              let yTexture = CVMetalTextureGetTexture(yTextureCv)
+        else {
+            return false
+        }
+        
+        // Create UV texture (plane 1, rg16Unorm for 10-bit)
+        var uvTextureCv: CVMetalTexture?
+        result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .rg16Unorm,
+            width / 2,
+            height / 2,
+            1,
+            &uvTextureCv
+        )
+        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
+              let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
+        else {
+            return false
+        }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
+        
+        // Setup render pass to texture
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
+        else {
+            return false
+        }
+        
+        // Calculate viewport for aspect-fit scaling
+        let drawableWidth = Float(texture.width)
+        let drawableHeight = Float(texture.height)
+        let imageWidth = Float(width)
+        let imageHeight = Float(height)
+        
+        let scaleX = drawableWidth / imageWidth
+        let scaleY = drawableHeight / imageHeight
+        let scale = min(scaleX, scaleY)
+        
+        let scaledWidth = imageWidth * scale
+        let scaledHeight = imageHeight * scale
+        let offsetX = (drawableWidth - scaledWidth) / 2
+        let offsetY = (drawableHeight - scaledHeight) / 2
+        
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setViewport(MTLViewport(
+            originX: Double(offsetX),
+            originY: Double(offsetY),
+            width: Double(scaledWidth),
+            height: Double(scaledHeight),
+            znear: 0, zfar: 1
+        ))
+        
+        encoder.setFragmentTexture(yTexture, index: 0)
+        encoder.setFragmentTexture(uvTexture, index: 1)
+        
+        // Encode DoVi parameters (buffer 0)
+        var doviParams = DoViParamsBuffer(from: metadata)
+        encoder.setFragmentBytes(&doviParams, length: MemoryLayout<DoViParamsBuffer>.size, index: 0)
+        
+        // Encode reshape components (buffers 1, 2, 3)
+        var compI = DoViReshapeComponentBuffer(from: metadata.components[0])
+        var compP = DoViReshapeComponentBuffer(from: metadata.components[1])
+        var compT = DoViReshapeComponentBuffer(from: metadata.components[2])
+        encoder.setFragmentBytes(&compI, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 1)
+        encoder.setFragmentBytes(&compP, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 2)
+        encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
+        
+        // Encode tone mapping params (buffer 4)
+        // For SDR thumbnail output, always tone map to 100 nits
+        let dynamicPeakPQ = metadata.sceneMaxPQ ?? metadata.sourceMaxPQ
+        let dynamicPeakNits = pqToNits(dynamicPeakPQ)
+        
+        var toneParams = ToneMappingParams(
+            inputMin: 0.0,
+            inputMax: dynamicPeakNits,
+            outputMin: 0.0,
+            outputMax: 100.0  // SDR output - 100 nits max
+        )
+        encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 4)
+        
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        return true
+    }
+    
     /// Converts PQ value (0.0-1.0) to absolute luminance in nits
     private func pqToNits(_ pq: Float) -> Float {
         guard pq > 0 else { return 0 }
@@ -1515,6 +1947,7 @@ public class RenderingEngine {
     /// This method creates an offscreen render target, renders the pixel buffer using
     /// the appropriate Metal shader for its format, and reads back the result as a CGImage.
     /// This is useful for thumbnail generation where all pixel formats need to be supported.
+    /// For Dolby Vision content, the DoVi processing pipeline is used with tone mapping to SDR.
     ///
     /// - Parameters:
     ///   - frame: The video frame to render.
@@ -1554,9 +1987,19 @@ public class RenderingEngine {
             return nil
         }
 
-        // Render the pixel buffer to the texture
-        if !renderPixelBufferToTexture(pixelBuffer, to: outputTexture) {
-            return nil
+        // Use DoVi pipeline if metadata is present
+        if let doviMetadata = frame.doviMetadata {
+            if !renderDoViPixelBufferToTexture(pixelBuffer, metadata: doviMetadata, to: outputTexture) {
+                // Fall back to regular rendering if DoVi fails
+                if !renderPixelBufferToTexture(pixelBuffer, to: outputTexture) {
+                    return nil
+                }
+            }
+        } else {
+            // Render the pixel buffer to the texture using standard pipeline
+            if !renderPixelBufferToTexture(pixelBuffer, to: outputTexture) {
+                return nil
+            }
         }
 
         // Read back the texture as CGImage
