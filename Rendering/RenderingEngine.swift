@@ -1293,10 +1293,21 @@ public class RenderingEngine {
         encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
         
         // Encode tone mapping params (buffer 4)
+        // Use L1 scene brightness if available, otherwise fall back to static metadata
         let currentDisplayPeak = getCurrentScreenPeakNits()
+        let dynamicPeakPQ = metadata.sceneMaxPQ ?? metadata.sourceMaxPQ
+        let dynamicPeakNits = pqToNits(dynamicPeakPQ)
+        
+        // Log L1 usage once for verification
+        struct L1LogState { static var logged = false }
+        if !L1LogState.logged, metadata.sceneMaxPQ != nil {
+            print("[RenderingEngine] Using L1 scene brightness: max=\(dynamicPeakPQ), nits=\(dynamicPeakNits)")
+            L1LogState.logged = true
+        }
+        
         var toneParams = ToneMappingParams(
             inputMin: 0.0,
-            inputMax: contentPeakNits,
+            inputMax: dynamicPeakNits,
             outputMin: 0.0,
             outputMax: currentDisplayPeak
         )
@@ -1309,6 +1320,21 @@ public class RenderingEngine {
         commandBuffer.commit()
         
         return true
+    }
+    
+    /// Converts PQ value (0.0-1.0) to absolute luminance in nits
+    private func pqToNits(_ pq: Float) -> Float {
+        guard pq > 0 else { return 0 }
+        let m1: Float = 0.1593017578125
+        let m2: Float = 78.84375
+        let c1: Float = 0.8359375
+        let c2: Float = 18.8515625
+        let c3: Float = 18.6875
+        
+        let p = pow(pq, 1.0 / m2)
+        let num = max(p - c1, 0)
+        let den = c2 - c3 * p
+        return pow(num / max(den, 1e-6), 1.0 / m1) * 10000.0
     }
 
     /// Detects the maximum potential brightness of the current screen in nits.

@@ -74,6 +74,14 @@ public struct DoViMetadata {
     /// Source maximum luminance in PQ [0-1]
     public var sourceMaxPQ: Float = 1
     
+    // MARK: - L1 Scene Brightness Metadata (per-frame dynamic)
+    
+    /// Scene maximum PQ luminance [0-1], nil if L1 not present
+    public var sceneMaxPQ: Float?
+    
+    /// Scene average PQ luminance [0-1], nil if L1 not present
+    public var sceneAvgPQ: Float?
+    
     public init() {}
     
     /// Initialize from ObjC dictionary (bridged from FFmpegDecoder)
@@ -111,6 +119,10 @@ public struct DoViMetadata {
         
         self.sourceMinPQ = (dict["sourceMinPQ"] as? NSNumber)?.floatValue ?? 0
         self.sourceMaxPQ = (dict["sourceMaxPQ"] as? NSNumber)?.floatValue ?? 1
+        
+        // L1 scene brightness (nil if not present in metadata)
+        self.sceneMaxPQ = (dict["sceneMaxPQ"] as? NSNumber)?.floatValue
+        self.sceneAvgPQ = (dict["sceneAvgPQ"] as? NSNumber)?.floatValue
         
         for (i, compDict) in componentsArray.enumerated() {
             var comp = DoViReshapeData()

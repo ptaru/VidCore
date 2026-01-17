@@ -35,10 +35,80 @@ public struct VideoInfo {
     public let isHardwareAccelerated: Bool
     /// Whether the video is HDR content (PQ or HLG transfer function).
     public let isHDR: Bool
-
+    
+    // MARK: - Color Metadata
+    
+    /// Color primaries (FFmpeg AVCOL_PRI_*: 1=BT.709, 9=BT.2020).
+    public let colorPrimaries: Int
+    /// Transfer characteristics (FFmpeg AVCOL_TRC_*: 1=BT.709, 16=PQ, 18=HLG).
+    public let colorTransfer: Int
+    /// Color space/matrix (FFmpeg AVCOL_SPC_*: 1=BT.709, 9=BT.2020nc).
+    public let colorSpace: Int
+    /// Color range (FFmpeg AVCOL_RANGE_*: 1=limited, 2=full).
+    public let colorRange: Int
+    /// Bits per color component (8, 10, 12).
+    public let bitsPerComponent: Int
+    /// Whether the content is Dolby Vision.
+    public let isDolbyVision: Bool
+    
+    // MARK: - Audio Info
+    
+    /// Audio codec name (e.g., "aac", "opus", "flac"), nil if no audio.
+    public let audioCodecName: String?
+    /// Audio sample rate in Hz (e.g., 48000), nil if no audio.
+    public let audioSampleRate: Int?
+    /// Number of audio channels (e.g., 2 for stereo), nil if no audio.
+    public let audioChannels: Int?
+    
+    // MARK: - Computed Properties
+    
+    /// Human-readable transfer function name
+    public var transferFunctionName: String {
+        switch colorTransfer {
+        case 1: return "BT.709"
+        case 16: return isDolbyVision ? "PQ (DoVi)" : "PQ (HDR10)"
+        case 18: return "HLG"
+        default:
+            // DoVi content may not have standard FFmpeg color metadata
+            if isDolbyVision { return "PQ (DoVi)" }
+            return colorTransfer > 0 ? "Unknown (\(colorTransfer))" : "Unspecified"
+        }
+    }
+    
+    /// Human-readable color primaries name
+    public var colorPrimariesName: String {
+        switch colorPrimaries {
+        case 1: return "BT.709"
+        case 9: return "BT.2020"
+        default:
+            // DoVi content is always BT.2020
+            if isDolbyVision { return "BT.2020 (IPT)" }
+            return colorPrimaries > 0 ? "Unknown (\(colorPrimaries))" : "Unspecified"
+        }
+    }
+    
+    /// Human-readable color space/matrix name
+    public var colorSpaceName: String {
+        // DoVi Profile 5 uses IPTPQc2 color space
+        if isDolbyVision {
+            return "IPTPQc2"
+        }
+        
+        switch colorSpace {
+        case 1: return "BT.709"
+        case 5: return "BT.470bg"
+        case 6: return "SMPTE 170M"
+        case 9: return "BT.2020nc"
+        case 10: return "BT.2020c"
+        default: return colorSpace > 0 ? "Unknown (\(colorSpace))" : "YCbCr"
+        }
+    }
     public init(
         width: Int, height: Int, frameRate: Double, duration: Double, codecName: String,
-        isHardwareAccelerated: Bool, isHDR: Bool = false
+        isHardwareAccelerated: Bool, isHDR: Bool = false,
+        colorPrimaries: Int = 0, colorTransfer: Int = 0, colorSpace: Int = 0,
+        colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false,
+        audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil
     ) {
         self.width = width
         self.height = height
@@ -47,6 +117,15 @@ public struct VideoInfo {
         self.codecName = codecName
         self.isHardwareAccelerated = isHardwareAccelerated
         self.isHDR = isHDR
+        self.colorPrimaries = colorPrimaries
+        self.colorTransfer = colorTransfer
+        self.colorSpace = colorSpace
+        self.colorRange = colorRange
+        self.bitsPerComponent = bitsPerComponent
+        self.isDolbyVision = isDolbyVision
+        self.audioCodecName = audioCodecName
+        self.audioSampleRate = audioSampleRate
+        self.audioChannels = audioChannels
     }
 }
 
@@ -132,7 +211,16 @@ public class VideoDecoder {
             duration: info.duration,
             codecName: info.codecName,
             isHardwareAccelerated: info.isHardwareAccelerated,
-            isHDR: info.isHDR
+            isHDR: info.isHDR,
+            colorPrimaries: Int(info.colorPrimaries),
+            colorTransfer: Int(info.colorTransfer),
+            colorSpace: Int(info.colorSpace),
+            colorRange: Int(info.colorRange),
+            bitsPerComponent: Int(info.bitsPerComponent),
+            isDolbyVision: info.isDolbyVision,
+            audioCodecName: info.audioCodecName,
+            audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
+            audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil
         )
     }
 

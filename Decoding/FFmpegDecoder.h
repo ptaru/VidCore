@@ -40,6 +40,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) BOOL isHDR;
 /// Whether the content is Dolby Vision.
 @property(nonatomic, assign) BOOL isDolbyVision;
+/// Audio codec name (e.g., "aac", "opus"), nil if no audio stream.
+@property(nonatomic, copy, nullable) NSString *audioCodecName;
+/// Audio sample rate in Hz (e.g., 48000), 0 if no audio.
+@property(nonatomic, assign) int audioSampleRate;
+/// Number of audio channels (e.g., 2 for stereo), 0 if no audio.
+@property(nonatomic, assign) int audioChannels;
 @end
 
 /// Type of decoded frame.

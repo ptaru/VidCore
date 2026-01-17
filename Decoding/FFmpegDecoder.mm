@@ -440,6 +440,19 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _videoInfo.duration = 0.0;
   }
 
+  // Populate audio info if audio stream is available
+  if (_audioStreamIndex >= 0 && _audioCodecContext) {
+    AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
+    const AVCodec *audioCodec =
+        avcodec_find_decoder(audioStream->codecpar->codec_id);
+    if (audioCodec) {
+      _videoInfo.audioCodecName =
+          [NSString stringWithUTF8String:audioCodec->name];
+    }
+    _videoInfo.audioSampleRate = _audioCodecContext->sample_rate;
+    _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
+  }
+
   NSLog(
       @"[FFmpegDecoder] Opened video: %dx%d, %.2f fps, %.2f sec, codec: %s, "
       @"hardware: %@, HDR: %@, bits: %d",
@@ -913,14 +926,37 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     [components addObject:comp];
   }
 
-  return @{
+  // Build result dictionary with static metadata
+  NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:@{
     @"nonlinearMatrix" : nonlinearMatrix,
     @"linearMatrix" : linearMatrix,
     @"nonlinearOffset" : nonlinearOffset,
     @"components" : components,
     @"sourceMinPQ" : @(color->source_min_pq / 4095.0f),
     @"sourceMaxPQ" : @(color->source_max_pq / 4095.0f)
-  };
+  }];
+
+  // Extract L1 scene brightness metadata from extension blocks (per-frame
+  // dynamic) L1 contains min_pq, max_pq, avg_pq for the current scene
+  for (int i = 0; i < metadata->num_ext_blocks; i++) {
+    const AVDOVIDmData *dm = av_dovi_get_ext(metadata, i);
+    if (dm->level == 1) {
+      // Found L1 block - extract scene brightness
+      result[@"sceneMaxPQ"] = @(dm->l1.max_pq / 4095.0f);
+      result[@"sceneAvgPQ"] = @(dm->l1.avg_pq / 4095.0f);
+
+      // Log once for verification
+      static BOOL loggedL1 = NO;
+      if (!loggedL1) {
+        NSLog(@"[FFmpegDecoder] DoVi L1 scene brightness: max=%.3f avg=%.3f",
+              dm->l1.max_pq / 4095.0f, dm->l1.avg_pq / 4095.0f);
+        loggedL1 = YES;
+      }
+      break;
+    }
+  }
+
+  return result;
 }
 
 - (CVPixelBufferRef)convertFrameToPixelBuffer:(AVFrame *)frame {
