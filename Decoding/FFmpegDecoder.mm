@@ -1209,9 +1209,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   int64_t timestamp = (int64_t)(seconds / av_q2d(stream->time_base));
 
   // Phase 1: Fast seek to nearest keyframe before target
-  // AVSEEK_FLAG_BACKWARD ensures we don't skip past the target frame
-  if (av_seek_frame(_formatContext, _videoStreamIndex, timestamp,
-                    AVSEEK_FLAG_BACKWARD) < 0) {
+  // avformat_seek_file allows more precise control than av_seek_frame
+  // We use timestamp as max_ts and INT64_MIN as min_ts to enforce backward seek
+  // (finding a keyframe <= target)
+  if (avformat_seek_file(_formatContext, _videoStreamIndex, INT64_MIN,
+                         timestamp, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
     return NO;
   }
 
