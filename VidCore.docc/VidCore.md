@@ -4,7 +4,7 @@ High-performance video decoding and rendering framework for macOS.
 
 ## Overview
 
-VidCore provides a modern, asynchronous API for playing video content on macOS. It combines FFmpeg for broad codec support with Metal for efficient, zero-copy GPU rendering. Full HDR10 support with BT.2020 color primaries and PQ transfer function enables wide color gamut and extended dynamic range playback on EDR-capable displays.
+VidCore provides a modern, asynchronous API for playing video content on macOS. It combines FFmpeg for broad codec support with Metal for efficient, zero-copy GPU rendering. Full HDR10 and Dolby Vision Profile 5 support enables wide color gamut and extended dynamic range playback on EDR-capable displays.
 
 ### Quick Start
 
@@ -53,6 +53,7 @@ VidPlayer(player: player)
 - ``VideoInfo``
 - ``VideoFrame``
 - ``DecodedFrame``
+- ``DoViMetadata``
 
 ### Rendering
 

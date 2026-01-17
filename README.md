@@ -11,7 +11,9 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - **FFmpeg + dav1d Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
 - **HDR Support**: Full HDR10 support with BT.2020 color primaries, PQ (SMPTE ST 2084) transfer function, and 10-bit color depth
-- **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for both SDR and HDR content
+- **Dolby Vision**: Profile 5 support with IPTPQc2 colorspace and dynamic reshape metadata
+- **Tone Mapping**: Automatic BT.2390 tone mapping for HDR content on displays with limited peak brightness
+- **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for SDR, HDR10, and Dolby Vision
 - **Audio Playback**: Synchronized audio via AVAudioEngine with A/V sync correction
 - **SwiftUI Integration**: Drop-in `VidPlayer` view, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
@@ -363,6 +365,34 @@ Access detailed color information from the decoder:
 - **Bit Depth**: 10-bit color depth
 - **Output**: Linear light values for EDR displays
 
+#### Dolby Vision Support (Profile 5)
+
+VidCore supports Dolby Vision Profile 5 (IPTPQc2) decoding and rendering:
+
+- **Metadata Parsing**: Extracts dynamic reshape metadata (pivot points, polynomial/MMR coefficients) from the bitstream.
+- **Reshape Pipeline**: Applies per-frame reshape curves in the Metal shader to reconstruct linear light.
+- **Color Conversion**: Performs IPTPQc2 → LMS → RGB conversion using dynamic color matrices.
+- **Automatic Fallback**: If DoVi metadata is missing or invalid, falls back to standard HDR10 rendering.
+
+#### Tone Mapping (BT.2390)
+
+For optimal HDR reproduction on screens with lower peak brightness (e.g., MacBook Air, older iPad Pro), VidCore implements BT.2390 tone mapping:
+
+- **Dynamic Headroom Detection**: Automatically detects the current screen's peak brightness (e.g., 500 nits vs 1600 nits).
+- **EETF**: Applies the BT.2390 Electrical-Electrical Transfer Function to roll off highlights smoothly.
+- **Configurable**: You can set the content peak and target display peak:
+
+```swift
+if let engine = player.renderingEngine {
+    // Override default target of 1000 nits
+    // (VidCore automatically detects screen peak, but you can force it)
+    engine.targetDisplayPeakNits = 600.0 
+    
+    // Set content peak (default 1000.0)
+    engine.contentPeakNits = 1000.0
+}
+```
+
 ---
 
 ## API Reference
@@ -498,6 +528,8 @@ GPU-accelerated frame rendering with HDR support.
 | `renderPixelBuffer(_:to:)` | Render CVPixelBuffer to drawable (SDR) |
 | `renderHDRPixelBuffer(_:to:)` | Render 10-bit HDR content with PQ EOTF |
 | `renderToCGImage(_:targetSize:)` | Render VideoFrame to CGImage for thumbnail generation |
+| `targetDisplayPeakNits` | `Float` | Target display peak brightness in nits (auto-detected usually) |
+| `contentPeakNits` | `Float` | Content peak brightness in nits (default 1000.0) |
 | `flush()` | Flush texture cache |
 
 **HDR Rendering:**
