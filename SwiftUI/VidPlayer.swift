@@ -57,6 +57,7 @@ public struct VidPlayer<Overlay: View>: View {
     private let player: VideoPlayer
     private let overlay: Overlay
     private let showsBuiltInControls: Bool
+    private let allowsDebugMenu: Bool
     private let ownsPlayer: Bool
     
     @State private var internalPlayer: VideoPlayer?
@@ -78,10 +79,12 @@ public struct VidPlayer<Overlay: View>: View {
     public init(
         player: VideoPlayer,
         showsBuiltInControls: Bool = true,
+        allowsDebugMenu: Bool = false,
         @ViewBuilder overlay: () -> Overlay
     ) {
         self.player = player
         self.showsBuiltInControls = showsBuiltInControls
+        self.allowsDebugMenu = allowsDebugMenu
         self.overlay = overlay()
         self.ownsPlayer = false
     }
@@ -146,11 +149,13 @@ public struct VidPlayer<Overlay: View>: View {
             overlay
         }
         .contextMenu {
-            Button(action: { showDebugInfo.toggle() }) {
-                Label(
-                    showDebugInfo ? "Hide Debug Info" : "Show Debug Info",
-                    systemImage: showDebugInfo ? "info.circle.fill" : "info.circle"
-                )
+            if allowsDebugMenu {
+                Button(action: { showDebugInfo.toggle() }) {
+                    Label(
+                        showDebugInfo ? "Hide Debug Info" : "Show Debug Info",
+                        systemImage: showDebugInfo ? "info.circle.fill" : "info.circle"
+                    )
+                }
             }
         }
         .onDisappear {
@@ -173,8 +178,9 @@ extension VidPlayer where Overlay == EmptyView {
     /// - Parameters:
     ///   - player: The `VideoPlayer` instance to display.
     ///   - showsBuiltInControls: Whether to show built-in loading, error, and finished states.
-    public init(player: VideoPlayer, showsBuiltInControls: Bool = true) {
-        self.init(player: player, showsBuiltInControls: showsBuiltInControls) {
+    ///   - allowsDebugMenu: Whether to enable the debug info context menu. Defaults to `false`.
+    public init(player: VideoPlayer, showsBuiltInControls: Bool = true, allowsDebugMenu: Bool = false) {
+        self.init(player: player, showsBuiltInControls: showsBuiltInControls, allowsDebugMenu: allowsDebugMenu) {
             EmptyView()
         }
     }
@@ -187,10 +193,12 @@ extension VidPlayer where Overlay == EmptyView {
     /// - Parameters:
     ///   - url: The URL of the video file to play.
     ///   - autoPlay: Whether to start playing automatically after loading. Defaults to `true`.
-    public init(url: URL, autoPlay: Bool = true) {
+    ///   - allowsDebugMenu: Whether to enable the debug info context menu. Defaults to `false`.
+    public init(url: URL, autoPlay: Bool = true, allowsDebugMenu: Bool = false) {
         // Create a placeholder player - the real one is created in onAppear
         self.player = VideoPlayer()
         self.showsBuiltInControls = true
+        self.allowsDebugMenu = allowsDebugMenu
         self.overlay = EmptyView()
         self.ownsPlayer = true
         self._internalPlayer = State(initialValue: nil)

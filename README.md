@@ -11,11 +11,11 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - **FFmpeg + dav1d Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
 - **HDR Support**: Full HDR10 support with BT.2020 color primaries, PQ (SMPTE ST 2084) transfer function, and 10-bit color depth
-- **Dolby Vision**: Profile 5 support with IPTPQc2 colorspace and dynamic reshape metadata
-- **Tone Mapping**: Automatic BT.2390 tone mapping for HDR content on displays with limited peak brightness
+- **Dolby Vision**: Profile 5 support with IPTPQc2 colorspace, dynamic reshape metadata, and L1 scene brightness
+- **Tone Mapping**: Automatic BT.2390 tone mapping with scene-adaptive L1 metadata for HDR content
 - **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for SDR, HDR10, and Dolby Vision
 - **Audio Playback**: Synchronized audio via AVAudioEngine with A/V sync correction
-- **SwiftUI Integration**: Drop-in `VidPlayer` view, similar to AVKit's `VideoPlayer`
+- **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
 - **Optimized Buffering**: Intelligent buffer management with CVPixelBufferPool and frame reordering for multi-threaded decoders
 
@@ -374,6 +374,28 @@ VidCore supports Dolby Vision Profile 5 (IPTPQc2) decoding and rendering:
 - **Color Conversion**: Performs IPTPQc2 → LMS → RGB conversion using dynamic color matrices.
 - **Automatic Fallback**: If DoVi metadata is missing or invalid, falls back to standard HDR10 rendering.
 
+#### L1 Scene Brightness Metadata
+
+VidCore extracts Dolby Vision L1 dynamic metadata for per-frame scene brightness. This enables more accurate tone mapping that adapts to scene content rather than using fixed mastering values:
+
+```swift
+if let frame = player.currentFrame, let dovi = frame.doviMetadata {
+    // Static mastering range (always present)
+    print("Mastering Min: \(dovi.sourceMinPQ) PQ")
+    print("Mastering Max: \(dovi.sourceMaxPQ) PQ")
+    
+    // Dynamic scene brightness (L1, per-frame, nil if not present)
+    if let sceneMax = dovi.sceneMaxPQ {
+        print("Scene Max: \(sceneMax) PQ")  // Peak brightness in this scene
+    }
+    if let sceneAvg = dovi.sceneAvgPQ {
+        print("Scene Avg: \(sceneAvg) PQ")  // Average brightness in this scene
+    }
+}
+```
+
+The rendering engine automatically uses L1 data when available—`sceneMaxPQ` is preferred over `sourceMaxPQ` for tone mapping, resulting in better highlight preservation in darker scenes and smoother rolloff in bright scenes.
+
 #### Tone Mapping (BT.2390)
 
 For optimal HDR reproduction on screens with lower peak brightness (e.g., MacBook Air, older iPad Pro), VidCore implements BT.2390 tone mapping:
@@ -448,13 +470,37 @@ VidPlayer(player: VideoPlayer)
 VidPlayer(player: VideoPlayer) { OverlayView() }
 
 // With options
-VidPlayer(player: VideoPlayer, showsBuiltInControls: Bool, overlay: () -> Overlay)
+VidPlayer(player: VideoPlayer, showsBuiltInControls: Bool, allowsDebugMenu: Bool, overlay: () -> Overlay)
 ```
 
 **Parameters:**
 - `player`: The `VideoPlayer` instance to display
 - `showsBuiltInControls`: Show built-in loading/error/finished UI (default: `true`)
+- `allowsDebugMenu`: Enable right-click context menu to toggle debug overlay (default: `false`)
 - `overlay`: Custom content to display over the video
+
+#### Debug Overlay
+
+Enable the debug overlay to inspect video playback in real-time:
+
+```swift
+// Enable debug menu via right-click context menu
+VidPlayer(player: player, allowsDebugMenu: true)
+
+// Also works with URL-based player
+VidPlayerURL(url: videoURL, allowsDebugMenu: true)
+```
+
+When enabled, right-click on the video to toggle the debug overlay, which displays:
+
+| Category | Information |
+|----------|-------------|
+| **Video** | Resolution, frame rate, codec, hardware acceleration |
+| **Format** | Pixel format (NV12, P010, etc.), bit depth (8/10-bit) |
+| **Color** | Transfer function, primaries, color space, range |
+| **HDR** | HDR status, Dolby Vision profile, L1 scene brightness |
+| **Audio** | Codec, sample rate, channel count |
+| **Timing** | Current PTS, frame number |
 
 ### VidPlayerURL
 
@@ -510,12 +556,27 @@ A decoded video frame with pixel data and timing information.
 | `isHDR` | `Bool` | Whether frame contains HDR content |
 | `width` | `Int` | Frame width |
 | `height` | `Int` | Frame height |
+| `doviMetadata` | `DoViMetadata?` | Dolby Vision metadata for this frame (Profile 5 only) |
 
 **Supported Pixel Formats:**
 - **NV12** (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) - 8-bit bi-planar, hardware decode
 - **I420** (`kCVPixelFormatType_420YpCbCr8Planar`) - 8-bit tri-planar, software decode
 - **P010** (`kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`) - 10-bit bi-planar, HDR hardware decode
 - **BGRA** (`kCVPixelFormatType_32BGRA`) - 8-bit packed, fallback format
+
+### DoViMetadata
+
+Dolby Vision metadata for a single frame (Profile 5 IPTPQc2).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `sourceMinPQ` | `Float` | Source mastering min luminance in PQ [0-1] |
+| `sourceMaxPQ` | `Float` | Source mastering max luminance in PQ [0-1] |
+| `sceneMaxPQ` | `Float?` | L1 scene max PQ (nil if L1 not present) |
+| `sceneAvgPQ` | `Float?` | L1 scene average PQ (nil if L1 not present) |
+| `nonlinearMatrix` | `matrix_float3x3` | IPT to LMS transformation matrix |
+| `linearMatrix` | `matrix_float3x3` | LMS to RGB transformation matrix |
+| `components` | `[DoViReshapeData]` | Reshape curves for I, P, T channels |
 
 ### RenderingEngine
 
