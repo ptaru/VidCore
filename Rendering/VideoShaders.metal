@@ -9,6 +9,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// MARK: - Structures & Constants
+
 // Vertex output structure
 struct VertexOut {
     float4 position [[position]];
@@ -38,12 +40,16 @@ constant float3x3 bt709Matrix = float3x3(
     float3(1.793, -0.533, 0.0)
 );
 
+// MARK: - Vertex Shaders
+
 vertex VertexOut yuvVertexShader(uint vertexID [[vertex_id]]) {
     VertexOut out;
     out.position = float4(quadVertices[vertexID], 0, 1);
     out.texCoord = quadTexCoords[vertexID];
     return out;
 }
+
+// MARK: - SDR Fragment Shaders
 
 // Fragment shader for NV12 (bi-planar YUV 4:2:0)
 // Y plane: texture(0), UV plane (interleaved): texture(1)
@@ -174,7 +180,7 @@ fragment float4 bgraFragmentShader(
 }
 
 // =============================================================================
-// HDR Support - BT.2020 + PQ (SMPTE ST 2084) + BT.2390 Tone Mapping
+// MARK: - HDR Maths Helpers (BT.2020 + PQ + BT.2390)
 // =============================================================================
 
 struct ToneMappingParams {
@@ -324,6 +330,8 @@ float3 toneMapBT2390(float3 linearRGB, constant ToneMappingParams& params) {
     return pqToLinear(pqToneMapped);
 }
 
+// MARK: - HDR Fragment Shaders
+
 // HDR Fragment shader for NV12/P010 10-bit bi-planar
 // Y plane: texture(0) as r16Unorm, UV plane: texture(1) as rg16Unorm
 fragment float4 hdrNV12FragmentShader(
@@ -438,7 +446,7 @@ fragment float4 hdrNV12SDRFragmentShader(
 }
 
 // =============================================================================
-// Dolby Vision Profile 5 (IPTPQc2) Support
+// MARK: - Dolby Vision Profile 5 (IPTPQc2) Implementation
 // =============================================================================
 
 // DoVi reshape component data - passed via separate buffer indices to stay under 4KB
@@ -557,6 +565,8 @@ float3 processDoVi(float3 ipt, constant DoViParams& params,
     // 5. PQ OETF → Back to PQ for tone mapper input
     return linearToPQ(rgbLinear);
 }
+
+// MARK: - Dolby Vision Fragment Shaders
 
 // DoVi Profile 5 Fragment shader for NV12/P010 10-bit bi-planar
 // Profile 5 content is ALWAYS full range - no limited range scaling!

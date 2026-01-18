@@ -49,6 +49,8 @@ import AppKit
 /// The GPU shader approach eliminates CPU color conversion overhead. For 4K video,
 /// this saves approximately 20-30ms per frame compared to CPU-based `sws_scale`.
 public class RenderingEngine {
+    // MARK: - Properties
+
     /// The Metal device used for rendering.
     public let device: MTLDevice
     /// The command queue for submitting render commands.
@@ -82,6 +84,8 @@ public class RenderingEngine {
     
     // Dolby Vision Profile 5 SDR pipeline (for thumbnail generation)
     private var doviNV12SDRPipelineState: MTLRenderPipelineState?
+
+    // MARK: - Initialization
 
     /// Creates a new rendering engine with the default Metal device.
     ///
@@ -330,6 +334,8 @@ public class RenderingEngine {
         }
     }
 
+    // MARK: - Public Rendering
+
     /// Renders a pixel buffer to a drawable, automatically detecting format
     /// Uses direct Metal shaders for all common formats - minimal Core Image fallback
     public func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable) {
@@ -367,6 +373,8 @@ public class RenderingEngine {
         // Fallback to Core Image for unknown/rare formats only
         renderPixelBufferWithCoreImage(pixelBuffer, to: drawable)
     }
+
+    // MARK: - SDR Rendering
 
     /// GPU-accelerated NV12 rendering using Metal shader
     /// - Parameter fullRange: If true, uses full range (0-255) conversion; otherwise video range (16-235)
@@ -1754,6 +1762,8 @@ public class RenderingEngine {
         return true
     }
     
+    // MARK: - Helpers
+
     /// Converts PQ value (0.0-1.0) to absolute luminance in nits
     private func pqToNits(_ pq: Float) -> Float {
         guard pq > 0 else { return 0 }
@@ -1786,6 +1796,8 @@ public class RenderingEngine {
         // Clamp to reasonable limits just in case
         return max(100.0, scalingFactor * 100.0)
     }
+
+    // MARK: - Float16 Rendering
 
     /// NV12 rendering to rgba16Float target (for HDR-configured layers with SDR content)
     private func renderNV12PixelBufferFloat16(

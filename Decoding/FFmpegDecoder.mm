@@ -14,14 +14,11 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 
-// Dolby Vision metadata support
-extern "C" {
-#include <libavutil/dovi_meta.h>
-}
-
 // Forward declaration for the hw_format callback
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                         const enum AVPixelFormat *pix_fmts);
+
+#pragma mark - FFmpegVideoInfo
 
 @implementation FFmpegVideoInfo
 // isHDR is true for PQ (SMPTE2084) or HLG transfer functions
@@ -31,6 +28,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return _colorTransfer == 16 || _colorTransfer == 18;
 }
 @end
+
+#pragma mark - FFmpegFrame & Subclasses
 
 @implementation FFmpegFrame
 @end
@@ -46,6 +45,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 @implementation FFmpegAudioFrame
 @end
+
+#pragma mark - FFmpegPacketData
 
 @implementation FFmpegPacketData
 @end
@@ -78,6 +79,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) CVPixelBufferPoolRef p010BufferPool;
 @property(nonatomic, assign) BOOL hasCreatedP010Pool;
 @end
+#pragma mark - Internal Helper Functions
+
 // Constants for audio conversion
 static const int kAudioSampleRate = 48000;
 static const enum AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
@@ -98,7 +101,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return pix_fmts[0];
 }
 
+#pragma mark - FFmpegDecoder Implementation
+
 @implementation FFmpegDecoder
+
+#pragma mark - Initialization & Lifecycle
 
 - (instancetype)initWithURL:(NSURL *)url error:(NSError **)error {
   self = [super init];
@@ -464,11 +471,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return YES;
 }
 
+#pragma mark - Metadata Accessors
+
 - (nullable FFmpegVideoInfo *)getVideoInfo {
   return _videoInfo;
 }
 
-#pragma mark - Separated Demux/Decode Methods
+#pragma mark - Demuxing & Decoding
 
 - (nullable FFmpegPacketData *)demuxNextPacket {
   if (!_formatContext) {
@@ -667,6 +676,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return audioFrame;
 }
 
+#pragma mark - Decoder Flushing & Draining
+
 - (void)flushVideoDecoder {
   if (!_codecContext) {
     return;
@@ -720,6 +731,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   return videoFrame;
 }
+
+#pragma mark - Internal Frame Conversion & Processing
 
 - (AVAudioPCMBuffer *)convertAudioFrame:(AVFrame *)frame {
   // Initialize SwrContext if needed
@@ -1200,6 +1213,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return pixelBuffer;
 }
 
+#pragma mark - Seeking
+
 - (BOOL)seekToTime:(double)seconds accurate:(BOOL)accurate {
   if (!_formatContext || _videoStreamIndex < 0) {
     return NO;
@@ -1327,6 +1342,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _codecContext->skip_frame = originalSkipFrame; // Safety restore
   return YES;
 }
+
+#pragma mark - Cleanup
 
 - (void)close {
   // Guard against double-close (dealloc also calls close)

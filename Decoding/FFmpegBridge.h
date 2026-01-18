@@ -16,6 +16,7 @@ extern "C" {
 #import <libavcodec/avcodec.h>
 #import <libavformat/avformat.h>
 #import <libavutil/avutil.h>
+#import <libavutil/dovi_meta.h>
 #import <libavutil/hwcontext.h>
 #import <libavutil/imgutils.h>
 #import <libswresample/swresample.h>
