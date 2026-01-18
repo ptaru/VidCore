@@ -360,7 +360,7 @@ Access detailed color information from the decoder:
 #### Supported HDR Formats
 
 - **Pixel Formats**: P010 (10-bit bi-planar), YUV420P10LE (10-bit tri-planar)
-- **Color Primaries**: BT.2020 (wide color gamut)
+- **Color Primaries**: BT.2020 (wide color gamut) with automatic mapping to Display P3
 - **Transfer Function**: PQ/SMPTE ST 2084 (HDR10)
 - **Bit Depth**: 10-bit color depth
 - **Output**: Linear light values for EDR displays
@@ -637,10 +637,11 @@ VidCore includes several performance optimizations for efficient video playback:
 - **1-frame reorder delay** to allow out-of-order arrivals
 
 ### Optimized Seeking
-- **Two-phase seek**: Fast keyframe seek + frame-accurate catchup
-- **AVDISCARD_NONREF** optimization to skip non-reference frames during catchup
-- **Safety margin** (0.5s) before target to enable decoders to gather reference frames
-- Configurable via `seekOptimizationEnabled` property
+- **Two-Phase Strategy**: Implements a hybrid approach for frame-accurate seeking:
+  1. **Fast Seek**: Jumps to the nearest keyframe before the target timestamp using `avformat_seek_file`.
+  2. **Precise Catch-up**: Decodes frames sequentially from the keyframe until the exact target timestamp is reached.
+- **Performance Optimization**: During the catch-up phase, the decoder automatically skips non-reference frames (`AVDISCARD_NONREF`) to speed up processing.
+- **Safety Margin**: The optimization is automatically disabled 0.5s before the target timestamp to ensure all necessary reference frames are decoded for a clean image.
 
 ---
 

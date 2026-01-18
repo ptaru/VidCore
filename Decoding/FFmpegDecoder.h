@@ -137,7 +137,8 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// @param seconds The target time in seconds.
 /// @param accurate If YES, performs a frame-precise seek (slower). If NO, seeks
 /// to nearest keyframe (faster).
-- (BOOL)seekToTime:(double)seconds accurate:(BOOL)accurate;
+/// @return The video frame at the seek target, or nil if seek failed.
+- (nullable FFmpegVideoFrame *)seekToTime:(double)seconds accurate:(BOOL)accurate;
 
 /// Release all FFmpeg resources.
 - (void)close;

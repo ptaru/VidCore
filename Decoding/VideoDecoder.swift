@@ -409,12 +409,12 @@ public class VideoDecoder {
 
     // MARK: - Seeking
 
-    public func seek(to seconds: Double, accurate: Bool = true) async throws {
+    public func seek(to seconds: Double, accurate: Bool = true) async throws -> VideoFrame? {
         try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
+            (continuation: CheckedContinuation<VideoFrame?, Error>) in
             demuxQueue.async { [weak self] in
                 guard let self = self else {
-                    continuation.resume()
+                    continuation.resume(returning: nil)
                     return
                 }
 
@@ -422,14 +422,23 @@ public class VideoDecoder {
                 defer { self.lock.unlock() }
 
                 guard !self.isClosed, let decoder = self.decoder else {
-                    continuation.resume()
+                    continuation.resume(returning: nil)
                     return
                 }
 
-                let success = decoder.seek(toTime: seconds, accurate: accurate)
-
-                if success {
-                    continuation.resume()
+                if let ffmpegFrame = decoder.seek(toTime: seconds, accurate: accurate) {
+                     var doviMetadata: DoViMetadata? = nil
+                     if let doviDict = ffmpegFrame.doviMetadata as? [String: Any] {
+                         doviMetadata = DoViMetadata(fromDictionary: doviDict)
+                     }
+                     
+                     let frame = VideoFrame(
+                         pixelBuffer: ffmpegFrame.pixelBuffer,
+                         presentationTime: ffmpegFrame.presentationTime,
+                         isHDR: self.videoInfo.isHDR,
+                         doviMetadata: doviMetadata
+                     )
+                     continuation.resume(returning: frame)
                 } else {
                     continuation.resume(
                         throwing: NSError(

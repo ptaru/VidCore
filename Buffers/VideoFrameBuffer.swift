@@ -15,6 +15,7 @@ public actor VideoFrameBuffer {
     private var frames: [VideoFrame] = []
     private let maxSize: Int
     private var waitingConsumers: [CheckedContinuation<VideoFrame?, Never>] = []
+    private var availabilityWaiters: [CheckedContinuation<Void, Never>] = []
     private var waitingProducers: [CheckedContinuation<Void, Never>] = []
     private var isClosed = false
     private var isSuspended = false
@@ -32,6 +33,14 @@ public actor VideoFrameBuffer {
     /// Frames are inserted sorted by PTS to handle out-of-order decode
     public func push(_ frame: VideoFrame) {
         insertSorted(frame)
+        
+        // Wake availability waiters if we have enough frames
+        if !availabilityWaiters.isEmpty && frames.count >= reorderDelay {
+            for waiter in availabilityWaiters {
+                waiter.resume()
+            }
+            availabilityWaiters.removeAll()
+        }
         
         // If someone is waiting AND we have enough frames for reordering, wake them
         if let continuation = waitingConsumers.first, frames.count >= reorderDelay {
@@ -129,13 +138,8 @@ public actor VideoFrameBuffer {
             return false
         }
         
-        let frame = await withCheckedContinuation { continuation in
-            waitingConsumers.append(continuation)
-        }
-        
-        if let frame = frame {
-            insertSorted(frame)
-            return true
+        await withCheckedContinuation { continuation in
+            availabilityWaiters.append(continuation)
         }
         
         return !frames.isEmpty
@@ -169,6 +173,10 @@ public actor VideoFrameBuffer {
             continuation.resume(returning: nil)
         }
         waitingConsumers.removeAll()
+        for waiter in availabilityWaiters {
+            waiter.resume()
+        }
+        availabilityWaiters.removeAll()
         for producer in waitingProducers {
             producer.resume()
         }
@@ -179,6 +187,11 @@ public actor VideoFrameBuffer {
     /// Remaining frames will still be yielded to consumers (without waiting for reorder delay)
     public func close() {
         isClosed = true
+        
+        for waiter in availabilityWaiters {
+            waiter.resume()
+        }
+        availabilityWaiters.removeAll()
         
         while let continuation = waitingConsumers.first, let frame = frames.first {
             waitingConsumers.removeFirst()
@@ -207,6 +220,10 @@ public actor VideoFrameBuffer {
             continuation.resume(returning: nil)
         }
         waitingConsumers.removeAll()
+        for waiter in availabilityWaiters {
+            waiter.resume()
+        }
+        availabilityWaiters.removeAll()
         for producer in waitingProducers {
             producer.resume()
         }
@@ -221,6 +238,10 @@ public actor VideoFrameBuffer {
             continuation.resume(returning: nil)
         }
         waitingConsumers.removeAll()
+        for waiter in availabilityWaiters {
+            waiter.resume()
+        }
+        availabilityWaiters.removeAll()
         for producer in waitingProducers {
             producer.resume()
         }

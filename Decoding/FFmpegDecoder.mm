@@ -78,6 +78,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 // Pool for P010 (HDR) frames
 @property(nonatomic, assign) CVPixelBufferPoolRef p010BufferPool;
 @property(nonatomic, assign) BOOL hasCreatedP010Pool;
+// Queue for packets read during seek operations
+@property(nonatomic, strong) NSMutableArray<FFmpegPacketData *> *queuedPackets;
 @end
 #pragma mark - Internal Helper Functions
 
@@ -136,6 +138,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _poolHeight = 0;
     _p010BufferPool = NULL;
     _hasCreatedP010Pool = NO;
+    _queuedPackets = [NSMutableArray array];
 
     if (![self openVideoFile:url error:error]) {
       return nil;
@@ -482,6 +485,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 - (nullable FFmpegPacketData *)demuxNextPacket {
   if (!_formatContext) {
     return nil;
+  }
+
+  // Check if we have queued packets from a seek operation
+  if (_queuedPackets.count > 0) {
+    FFmpegPacketData *packetData = _queuedPackets.firstObject;
+    [_queuedPackets removeObjectAtIndex:0];
+    return packetData;
   }
 
   // Allocate a temporary packet for demuxing
@@ -1215,21 +1225,21 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 #pragma mark - Seeking
 
-- (BOOL)seekToTime:(double)seconds accurate:(BOOL)accurate {
+- (nullable FFmpegVideoFrame *)seekToTime:(double)seconds accurate:(BOOL)accurate {
   if (!_formatContext || _videoStreamIndex < 0) {
-    return NO;
+    return nil;
   }
+
+  // Clear any previously queued packets
+  [_queuedPackets removeAllObjects];
 
   AVStream *stream = _formatContext->streams[_videoStreamIndex];
   int64_t timestamp = (int64_t)(seconds / av_q2d(stream->time_base));
 
   // Phase 1: Fast seek to nearest keyframe before target
-  // avformat_seek_file allows more precise control than av_seek_frame
-  // We use timestamp as max_ts and INT64_MIN as min_ts to enforce backward seek
-  // (finding a keyframe <= target)
   if (avformat_seek_file(_formatContext, _videoStreamIndex, INT64_MIN,
                          timestamp, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
-    return NO;
+    return nil;
   }
 
   // Flush codec buffers to reset decoder state
@@ -1238,13 +1248,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     avcodec_flush_buffers(_audioCodecContext);
   }
 
-  // If not accurate, stop here (keyframe-only seek for fast scrubbing)
-  if (!accurate) {
-    return YES;
-  }
-
   // Phase 2: Frame-accurate seek - decode frames until we reach target PTS
-  // This is essential for video editing where user wants precise control
   double targetPTS = seconds;
   double tolerance = 0.001; // 1ms tolerance for floating point comparison
 
@@ -1252,44 +1256,84 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   enum AVDiscard originalSkipFrame = _codecContext->skip_frame;
   BOOL optimizationActive = NO;
 
-  if (self.seekOptimizationEnabled) {
+  if (accurate && self.seekOptimizationEnabled) {
     _codecContext->skip_frame = AVDISCARD_NONREF;
     optimizationActive = YES;
   }
 
+  FFmpegVideoFrame *resultFrame = nil;
+
   while (true) {
-    // Read next packet
     int readResult = av_read_frame(_formatContext, _packet);
     if (readResult < 0) {
-      // If we hit EOF or error, we still might have buffered frames in the
-      // decoder. Flush it and see if the target is in there.
+      // Handle EOF or error
       if (readResult == AVERROR_EOF) {
         avcodec_send_packet(_codecContext, NULL); // Flush
         while (avcodec_receive_frame(_codecContext, _frame) == 0) {
+          double framePTS = 0.0;
           if (_frame->pts != AV_NOPTS_VALUE) {
-            double framePTS = (double)_frame->pts * av_q2d(stream->time_base);
-            if (framePTS >= targetPTS - tolerance) {
-              _codecContext->skip_frame = originalSkipFrame;
-              return YES;
+            framePTS = (double)_frame->pts * av_q2d(stream->time_base);
+          }
+          
+          if (!accurate || framePTS >= targetPTS - tolerance) {
+            CVPixelBufferRef pixelBuffer = NULL;
+            if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
+              pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
+            } else {
+              pixelBuffer = [self convertFrameToPixelBuffer:_frame];
             }
+            
+            if (pixelBuffer) {
+              resultFrame = [[FFmpegVideoFrame alloc] init];
+              resultFrame.type = FFmpegFrameTypeVideo;
+              resultFrame.pixelBuffer = pixelBuffer;
+              resultFrame.presentationTime = framePTS;
+              resultFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+            }
+            break;
           }
         }
       }
       av_packet_unref(_packet);
-      // Restore skip frame setting before returning
-      _codecContext->skip_frame = originalSkipFrame;
-      return YES;
+      break;
     }
 
-    // Only process video packets during seeking
-    if (_packet->stream_index == _videoStreamIndex && _codecContext) {
+    // Audio Packet - Queue it for later consumption
+    if (_packet->stream_index == _audioStreamIndex && _audioCodecContext) {
+      AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
+      double audioPTS = (double)_packet->pts * av_q2d(audioStream->time_base);
+      
+      // Only queue audio packets that are close to or after our target time
+      // Discard packets from the "catch-up" phase (between keyframe and target)
+      // Use a small negative tolerance (50ms) to ensure we don't miss the start of the audio segment
+      if (audioPTS >= targetPTS - 0.05) {
+          FFmpegPacketData *packetData = [[FFmpegPacketData alloc] init];
+          packetData.streamIndex = _packet->stream_index;
+          packetData.pts = _packet->pts;
+          packetData.dts = _packet->dts;
+          packetData.duration = _packet->duration;
+          packetData.flags = _packet->flags;
+          packetData.isAudio = YES;
+          packetData.isVideo = NO;
+          
+          if (_packet->data && _packet->size > 0) {
+            packetData.data = [NSData dataWithBytes:_packet->data length:_packet->size];
+            packetData.size = _packet->size;
+          } else {
+            packetData.data = [NSData data];
+            packetData.size = 0;
+          }
+          
+          [_queuedPackets addObject:packetData];
+      }
+      av_packet_unref(_packet);
+      continue;
+    }
 
-      // Check if we are close enough to target to disable optimization
-      // We need to decode all frames accurately when getting close
+    // Video Packet - Decode
+    if (_packet->stream_index == _videoStreamIndex && _codecContext) {
       if (optimizationActive) {
         double packetPTS = (double)_packet->pts * av_q2d(stream->time_base);
-        // Safety margin of 0.5 seconds before target to ensure we have
-        // reference frames
         if (packetPTS >= targetPTS - 0.5) {
           _codecContext->skip_frame = originalSkipFrame;
           optimizationActive = NO;
@@ -1303,44 +1347,48 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
       av_packet_unref(_packet);
 
-      // Drain ALL available frames from the decoder (multi-threaded decoders
-      // like dav1d may have multiple frames ready)
-      BOOL foundTarget = NO;
+      // Drain frames
       while (true) {
         int ret = avcodec_receive_frame(_codecContext, _frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0) break;
 
-        if (ret == AVERROR(EAGAIN)) {
-          // Need more packets before output is available
-          break;
-        }
-        if (ret == AVERROR_EOF || ret < 0) {
-          _codecContext->skip_frame = originalSkipFrame; // Restore
-          return YES;
-        }
-
-        // Check if we've reached the target frame
+        double framePTS = 0.0;
         if (_frame->pts != AV_NOPTS_VALUE) {
-          double framePTS = (double)_frame->pts * av_q2d(stream->time_base);
+          framePTS = (double)_frame->pts * av_q2d(stream->time_base);
+        }
 
-          // If this frame is at or past our target, we're done
-          if (framePTS >= targetPTS - tolerance) {
-            foundTarget = YES;
-            break;
+        // If not accurate, return the first frame we find (keyframe)
+        // If accurate, wait for target
+        if (!accurate || framePTS >= targetPTS - tolerance) {
+          CVPixelBufferRef pixelBuffer = NULL;
+          if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
+            pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
+          } else {
+            pixelBuffer = [self convertFrameToPixelBuffer:_frame];
           }
+
+          if (pixelBuffer) {
+            resultFrame = [[FFmpegVideoFrame alloc] init];
+            resultFrame.type = FFmpegFrameTypeVideo;
+            resultFrame.pixelBuffer = pixelBuffer;
+            resultFrame.presentationTime = framePTS;
+            resultFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+          }
+          break; // Found it
         }
       }
 
-      if (foundTarget) {
-        break; // Exit outer loop to cleanup
+      if (resultFrame) {
+        break; // Exit outer loop
       }
     } else {
-      // Discard audio and other stream packets during seeking
+      // Discard other stream packets
       av_packet_unref(_packet);
     }
   }
 
   _codecContext->skip_frame = originalSkipFrame; // Safety restore
-  return YES;
+  return resultFrame;
 }
 
 #pragma mark - Cleanup

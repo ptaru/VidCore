@@ -291,42 +291,38 @@ public class VideoPlayer {
             await frameBuffer.reset()
             
             do {
-                try await decoder.seek(to: clampedSeconds, accurate: accurate)
+                if let seekFrame = try await decoder.seek(to: clampedSeconds, accurate: accurate) {
+                    currentFrame = seekFrame
+                    // Push the seek frame to buffer so it flows into the display loop when playing
+                    await frameBuffer.push(seekFrame)
+                    
+                    // Update timing to match the actual frame found
+                    currentTime = seekFrame.presentationTime
+                    firstFramePTS = seekFrame.presentationTime
+                    audioStartOffset = seekFrame.presentationTime
+                } else {
+                    // Fallback if no frame returned (should catch in error)
+                    currentTime = clampedSeconds
+                    firstFramePTS = clampedSeconds
+                    audioStartOffset = clampedSeconds
+                }
                 
-                audioPlayer.seek(to: clampedSeconds)
-                
-                playbackStartTime = CACurrentMediaTime() - clampedSeconds
-                firstFramePTS = clampedSeconds
-                audioStartOffset = clampedSeconds
-                currentTime = clampedSeconds
+                audioPlayer.seek(to: currentTime)
+                playbackStartTime = CACurrentMediaTime() - currentTime
                 
                 if wasPlaying {
-
                     state = .playing
                     audioPlayer.play()
                     await packetQueue.resume()
                     await frameBuffer.resume()
                 } else {
-
-                    while !Task.isCancelled {
-                        guard let packet = await decoder.demuxNextPacket() else { break }
-                        let frames = await decoder.decodePacket(packet)
-                        if let videoFrame = frames.compactMap({ frame -> VideoFrame? in
-                            if case .video(let vf) = frame { return vf }
-                            return nil
-                        }).first {
-                            await frameBuffer.push(videoFrame)
-                            currentFrame = videoFrame
-                            break
-                        }
-                    }
-                    // Re-suspend buffers to prevent loops from running while paused
+                    // We already have the frame displayed, so just pause
                     await packetQueue.suspend()
                     await frameBuffer.suspend()
                     state = .paused
                 }
                 
-                logger.debug("[VideoPlayer] Seeked to \(clampedSeconds)s (accurate: \(accurate))")
+                logger.debug("[VideoPlayer] Seeked to \(currentTime)s (accurate: \(accurate))")
             } catch {
                 logger.error("[VideoPlayer] Seek failed: \(error.localizedDescription)")
                 // Restore to paused state on error
