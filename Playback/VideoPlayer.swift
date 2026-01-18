@@ -192,17 +192,15 @@ public class VideoPlayer {
             state = .playing
             audioPlayer.play()
             
-
             let pauseDuration = CACurrentMediaTime() - pauseTimestamp
             playbackStartTime += pauseDuration
             
-
             Task {
                 await packetQueue.resume()
                 await frameBuffer.resume()
             }
-            
-            logger.debug("[VideoPlayer] Playback resumed")
+
+            startTasks()
             return
         }
         
@@ -210,17 +208,7 @@ public class VideoPlayer {
         audioPlayer.play()
         
 
-        demuxTask = Task { [weak self] in
-            await self?.runDemuxLoop()
-        }
-        
-        decodeTask = Task { [weak self] in
-            await self?.runDecodeLoop()
-        }
-        
-        displayTask = Task { [weak self] in
-            await self?.runDisplayLoop()
-        }
+        startTasks()
         
         logger.debug("[VideoPlayer] Playback started")
     }
@@ -238,8 +226,6 @@ public class VideoPlayer {
             await packetQueue.suspend()
             await frameBuffer.suspend()
         }
-        
-        logger.debug("[VideoPlayer] Playback paused at \(self.currentTime)s")
     }
     
     /// Toggle between play and pause.
@@ -261,6 +247,10 @@ public class VideoPlayer {
         
         let task = Task { @MainActor [weak self] in
             guard let self = self, let decoder = decoder else { return }
+            
+            // 1. Stop background tasks to prevent resource contention and race conditions
+            await self.stopTasks()
+            
             guard !Task.isCancelled else { return }
             
             let clampedSeconds = max(0, min(seconds, duration))
@@ -310,6 +300,13 @@ public class VideoPlayer {
                 audioPlayer.seek(to: currentTime)
                 playbackStartTime = CACurrentMediaTime() - currentTime
                 
+                guard !Task.isCancelled else {
+                    return 
+                }
+                
+                // 2. Restart tasks now that seek is complete and queues are clean
+                self.startTasks()
+                
                 if wasPlaying {
                     state = .playing
                     audioPlayer.play()
@@ -321,8 +318,6 @@ public class VideoPlayer {
                     await frameBuffer.suspend()
                     state = .paused
                 }
-                
-                logger.debug("[VideoPlayer] Seeked to \(currentTime)s (accurate: \(accurate))")
             } catch {
                 logger.error("[VideoPlayer] Seek failed: \(error.localizedDescription)")
                 // Restore to paused state on error
@@ -344,18 +339,8 @@ public class VideoPlayer {
         
         audioPlayer.cleanup()
         
-        demuxTask?.cancel()
-        decodeTask?.cancel()
-        displayTask?.cancel()
+        await stopTasks()
         currentSeekTask?.cancel()
-        
-        await demuxTask?.value
-        await decodeTask?.value
-        await displayTask?.value
-        
-        demuxTask = nil
-        decodeTask = nil
-        displayTask = nil
         currentSeekTask = nil
         
         await packetQueue.reset()
@@ -374,13 +359,48 @@ public class VideoPlayer {
         logger.info("[VideoPlayer] Closed")
     }
     
+    // MARK: - Task Management
+    
+    private func startTasks() {
+        // Only start if not already running
+        if demuxTask == nil {
+            demuxTask = Task { [weak self] in
+                await self?.runDemuxLoop()
+            }
+        }
+        
+        if decodeTask == nil {
+            decodeTask = Task { [weak self] in
+                await self?.runDecodeLoop()
+            }
+        }
+        
+        if displayTask == nil {
+            displayTask = Task { [weak self] in
+                await self?.runDisplayLoop()
+            }
+        }
+    }
+    
+    private func stopTasks() async {
+        demuxTask?.cancel()
+        decodeTask?.cancel()
+        displayTask?.cancel()
+        
+        await demuxTask?.value
+        await decodeTask?.value
+        await displayTask?.value
+        
+        demuxTask = nil
+        decodeTask = nil
+        displayTask = nil
+    }
+    
     // MARK: - Demux Loop
     
     private func runDemuxLoop() async {
         guard let decoder = decoder else { return }
-        
-        logger.debug("[VideoPlayer] Demux loop started")
-        
+
         while !Task.isCancelled {
             if await packetQueue.suspended {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
@@ -389,22 +409,17 @@ public class VideoPlayer {
             
             guard let packet = await decoder.demuxNextPacket() else {
                 await packetQueue.close()
-                logger.debug("[VideoPlayer] Demux reached end of stream")
                 break
             }
             
             await packetQueue.push(packet)
         }
-        
-        logger.debug("[VideoPlayer] Demux loop ended")
     }
     
     // MARK: - Decode Loop
     
     private func runDecodeLoop() async {
         guard let decoder = decoder else { return }
-        
-        logger.debug("[VideoPlayer] Decode loop started")
         
         while !Task.isCancelled {
             if await packetQueue.suspended {
@@ -450,16 +465,12 @@ public class VideoPlayer {
                 }
             }
         }
-        
-        logger.debug("[VideoPlayer] Decode loop ended")
     }
     
     // MARK: - Display Loop
     
     private func runDisplayLoop() async {
         var hasStarted = false
-        
-        logger.debug("[VideoPlayer] Display loop started")
         
         while !Task.isCancelled {
             if await frameBuffer.suspended {
@@ -565,8 +576,6 @@ public class VideoPlayer {
                 currentFrame = frame
             }
         }
-        
-        logger.debug("[VideoPlayer] Display loop ended")
     }
     
     // MARK: - Cleanup

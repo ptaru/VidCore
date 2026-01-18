@@ -58,3 +58,4 @@ VidPlayer(player: player)
 ### Rendering
 
 - ``RenderingEngine``
+- ``ToneMapping``

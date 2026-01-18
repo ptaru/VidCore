@@ -18,6 +18,7 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
 - **Optimized Buffering**: Intelligent buffer management with CVPixelBufferPool and frame reordering for multi-threaded decoders
+- **Optimized Seeking**: Zero-latency scrub interaction with two-phase seek (instant jump + precise refinement)
 
 ## Requirements
 
@@ -637,6 +638,7 @@ VidCore includes several performance optimizations for efficient video playback:
 - **1-frame reorder delay** to allow out-of-order arrivals
 
 ### Optimized Seeking
+- **Zero-Latency Interaction**: Immediate visual feedback during scrubbing by prioritizing the nearest keyframe for display while refining position in the background.
 - **Two-Phase Strategy**: Implements a hybrid approach for frame-accurate seeking:
   1. **Fast Seek**: Jumps to the nearest keyframe before the target timestamp using `avformat_seek_file`.
   2. **Precise Catch-up**: Decodes frames sequentially from the keyframe until the exact target timestamp is reached.
@@ -671,6 +673,7 @@ graph TD
 
         subgraph Rendering [Rendering Layer]
             RE[RenderingEngine]
+            TM[ToneMapping]
             YS[YUV Shaders<br/>Metal]
         end
     end
@@ -695,7 +698,10 @@ graph TD
     FD --> FF
     FD --> VT
 
-    RE --> YS
+    FD --> VT
+    
+    RE --> TM
+    TM --> YS
     YS --> MTL
 
     AP --> AV
