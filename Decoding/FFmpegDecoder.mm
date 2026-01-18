@@ -11,6 +11,8 @@
 #undef AVMediaType
 
 #import "FFmpegDecoder.h"
+#import "DoViMetadataExtractor.h"
+#import "PixelFormatConverter.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 
@@ -70,14 +72,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) AVBufferRef *hwDeviceCtx;
 @property(nonatomic, assign) BOOL usingHardwareDecoder;
 @property(nonatomic, assign) enum AVPixelFormat hwPixelFormat;
-// CVPixelBufferPool for efficient I420 buffer reuse (reduces memory
-// fragmentation)
-@property(nonatomic, assign) CVPixelBufferPoolRef i420BufferPool;
-@property(nonatomic, assign) int poolWidth;
-@property(nonatomic, assign) int poolHeight;
-// Pool for P010 (HDR) frames
-@property(nonatomic, assign) CVPixelBufferPoolRef p010BufferPool;
-@property(nonatomic, assign) BOOL hasCreatedP010Pool;
+// Pixel format converter for software decode path
+@property(nonatomic, strong) PixelFormatConverter *pixelFormatConverter;
 // Queue for packets read during seek operations
 @property(nonatomic, strong) NSMutableArray<FFmpegPacketData *> *queuedPackets;
 @end
@@ -87,6 +83,25 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 static const int kAudioSampleRate = 48000;
 static const enum AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
 static const int kAudioChannels = 2; // Stereo
+
+// Constants for seeking
+static const double kSeekPTSTolerance = 0.001;       // 1ms for frame matching
+static const double kAudioQueueTolerance = 0.05;     // 50ms for audio pre-buffer
+static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growth during long seeks
+static const double kSeekOptimizationFrameCount = 15.0; // Frames before target to stop skipping
+
+// Error handling helper macro for openVideoFile
+// Sets error, calls close, and returns NO in one statement
+#define FFMPEG_SET_ERROR_AND_CLOSE(errorPtr, errorCode, errorMsg) \
+  do { \
+    if (errorPtr) { \
+      *errorPtr = [NSError errorWithDomain:@"FFmpegDecoder" \
+                                      code:errorCode \
+                                  userInfo:@{NSLocalizedDescriptionKey: errorMsg}]; \
+    } \
+    [self close]; \
+    return NO; \
+  } while (0)
 
 // Static variable to store the expected hw pixel format for the callback
 static enum AVPixelFormat s_hwPixelFormat = AV_PIX_FMT_NONE;
@@ -133,11 +148,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _usingHardwareDecoder = NO;
     _hwPixelFormat = AV_PIX_FMT_VIDEOTOOLBOX;
     _seekOptimizationEnabled = YES; // Enable by default
-    _i420BufferPool = NULL;
-    _poolWidth = 0;
-    _poolHeight = 0;
-    _p010BufferPool = NULL;
-    _hasCreatedP010Pool = NO;
+    _pixelFormatConverter = [[PixelFormatConverter alloc] init];
     _queuedPackets = [NSMutableArray array];
 
     if (![self openVideoFile:url error:error]) {
@@ -197,37 +208,19 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                    NSLocalizedDescriptionKey : @"Failed to open video file"
                  }];
     }
-    return NO;
+    return NO; // Don't call close - nothing to clean up yet
   }
 
   // Retrieve stream information
   if (avformat_find_stream_info(_formatContext, NULL) < 0) {
-    if (error) {
-      *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                   code:1002
-                               userInfo:@{
-                                 NSLocalizedDescriptionKey :
-                                     @"Failed to find stream information"
-                               }];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1002, @"Failed to find stream information");
   }
 
   // Find the best video stream
   _videoStreamIndex =
       av_find_best_stream(_formatContext, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
   if (_videoStreamIndex < 0) {
-    if (error) {
-      *error =
-          [NSError errorWithDomain:@"FFmpegDecoder"
-                              code:1003
-                          userInfo:@{
-                            NSLocalizedDescriptionKey : @"No video stream found"
-                          }];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1003, @"No video stream found");
   }
 
   AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
@@ -235,14 +228,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Find decoder for the video stream
   const AVCodec *codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
   if (!codec) {
-    if (error) {
-      *error = [NSError
-          errorWithDomain:@"FFmpegDecoder"
-                     code:1004
-                 userInfo:@{NSLocalizedDescriptionKey : @"Codec not found"}];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1004, @"Codec not found");
   }
 
   // Try to initialize hardware decoder
@@ -251,30 +237,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Allocate codec context
   _codecContext = avcodec_alloc_context3(codec);
   if (!_codecContext) {
-    if (error) {
-      *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                   code:1005
-                               userInfo:@{
-                                 NSLocalizedDescriptionKey :
-                                     @"Failed to allocate codec context"
-                               }];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1005, @"Failed to allocate codec context");
   }
 
   // Copy codec parameters to codec context
   if (avcodec_parameters_to_context(_codecContext, videoStream->codecpar) < 0) {
-    if (error) {
-      *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                   code:1006
-                               userInfo:@{
-                                 NSLocalizedDescriptionKey :
-                                     @"Failed to copy codec parameters"
-                               }];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1006, @"Failed to copy codec parameters");
   }
 
   // Configure hardware acceleration if available
@@ -315,16 +283,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     }
 
     if (ret < 0) {
-      if (error) {
-        *error = [NSError
-            errorWithDomain:@"FFmpegDecoder"
-                       code:1007
-                   userInfo:@{
-                     NSLocalizedDescriptionKey : @"Failed to open codec"
-                   }];
-      }
-      [self close];
-      return NO;
+      FFMPEG_SET_ERROR_AND_CLOSE(error, 1007, @"Failed to open codec");
     }
   }
 
@@ -372,16 +331,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _packet = av_packet_alloc();
 
   if (!_frame || !_swFrame || !_packet || !_audioFrame || !_swrOutputFrame) {
-    if (error) {
-      *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                   code:1008
-                               userInfo:@{
-                                 NSLocalizedDescriptionKey :
-                                     @"Failed to allocate frame or packet"
-                               }];
-    }
-    [self close];
-    return NO;
+    FFMPEG_SET_ERROR_AND_CLOSE(error, 1008, @"Failed to allocate frame or packet");
   }
 
   // Initialize scaler context for YUV to BGRA conversion (only used for
@@ -395,16 +345,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                  SWS_BILINEAR, NULL, NULL, NULL);
 
     if (!_swsContext) {
-      if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                     code:1009
-                                 userInfo:@{
-                                   NSLocalizedDescriptionKey :
-                                       @"Failed to create scaler context"
-                                 }];
-      }
-      [self close];
-      return NO;
+      FFMPEG_SET_ERROR_AND_CLOSE(error, 1009, @"Failed to create scaler context");
     }
   }
 
@@ -507,24 +448,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
     // Only return video or audio packets
     if (isVideo || isAudio) {
-      FFmpegPacketData *packetData = [[FFmpegPacketData alloc] init];
-      packetData.streamIndex = pkt->stream_index;
-      packetData.pts = pkt->pts;
-      packetData.dts = pkt->dts;
-      packetData.duration = pkt->duration;
-      packetData.flags = pkt->flags;
-      packetData.isVideo = isVideo;
-      packetData.isAudio = isAudio;
-
-      // Copy packet data to NSData
-      if (pkt->data && pkt->size > 0) {
-        packetData.data = [NSData dataWithBytes:pkt->data length:pkt->size];
-        packetData.size = pkt->size;
-      } else {
-        packetData.data = [NSData data];
-        packetData.size = 0;
-      }
-
+      FFmpegPacketData *packetData = [self createPacketDataFromAVPacket:pkt
+                                                                isVideo:isVideo
+                                                                isAudio:isAudio];
       av_packet_free(&pkt);
       return packetData;
     }
@@ -604,6 +530,30 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return pkt;
 }
 
+/// Helper to create FFmpegPacketData from AVPacket
+- (FFmpegPacketData *)createPacketDataFromAVPacket:(AVPacket *)pkt
+                                           isVideo:(BOOL)isVideo
+                                           isAudio:(BOOL)isAudio {
+  FFmpegPacketData *packetData = [[FFmpegPacketData alloc] init];
+  packetData.streamIndex = pkt->stream_index;
+  packetData.pts = pkt->pts;
+  packetData.dts = pkt->dts;
+  packetData.duration = pkt->duration;
+  packetData.flags = pkt->flags;
+  packetData.isVideo = isVideo;
+  packetData.isAudio = isAudio;
+
+  if (pkt->data && pkt->size > 0) {
+    packetData.data = [NSData dataWithBytes:pkt->data length:pkt->size];
+    packetData.size = pkt->size;
+  } else {
+    packetData.data = [NSData data];
+    packetData.size = 0;
+  }
+
+  return packetData;
+}
+
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
@@ -626,30 +576,16 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       break;
     }
 
-    CVPixelBufferRef pixelBuffer = NULL;
-    if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
-      pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
-    } else {
-      pixelBuffer = [self convertFrameToPixelBuffer:_frame];
-    }
-
-    if (!pixelBuffer) {
-      continue; // Skip this frame but keep draining
-    }
-
     double pts = 0.0;
     if (_frame->pts != AV_NOPTS_VALUE) {
       AVStream *stream = _formatContext->streams[_videoStreamIndex];
       pts = (double)_frame->pts * av_q2d(stream->time_base);
     }
 
-    FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
-    videoFrame.type = FFmpegFrameTypeVideo;
-    videoFrame.pixelBuffer = pixelBuffer;
-    videoFrame.presentationTime = pts;
-
-    // Extract Dolby Vision Profile 5 metadata if present
-    videoFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+    FFmpegVideoFrame *videoFrame = [self createVideoFrameFromDecodedFrame:pts];
+    if (!videoFrame) {
+      continue; // Skip this frame but keep draining
+    }
 
     [frames addObject:videoFrame];
   }
@@ -717,29 +653,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return nil;
   }
 
-  CVPixelBufferRef pixelBuffer = NULL;
-  if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
-    pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
-  } else {
-    pixelBuffer = [self convertFrameToPixelBuffer:_frame];
-  }
-
-  if (!pixelBuffer) {
-    return nil;
-  }
-
   double pts = 0.0;
   if (_frame->pts != AV_NOPTS_VALUE) {
     AVStream *stream = _formatContext->streams[_videoStreamIndex];
     pts = (double)_frame->pts * av_q2d(stream->time_base);
   }
 
-  FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
-  videoFrame.type = FFmpegFrameTypeVideo;
-  videoFrame.pixelBuffer = pixelBuffer;
-  videoFrame.presentationTime = pts;
-
-  return videoFrame;
+  return [self createVideoFrameFromDecodedFrame:pts];
 }
 
 #pragma mark - Internal Frame Conversion & Processing
@@ -825,406 +745,50 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Extract Dolby Vision Profile 5 metadata from frame side data
 /// Returns nil for Profile 8 or non-DoVi content (fallback to standard HDR)
 - (nullable NSDictionary *)extractDoViMetadataFromFrame:(AVFrame *)frame {
-  AVFrameSideData *sd =
-      av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
-  if (!sd)
-    return nil;
-
-  const AVDOVIMetadata *metadata = (AVDOVIMetadata *)sd->data;
-  const AVDOVIRpuDataHeader *header = av_dovi_get_header(metadata);
-
-  // CRITICAL: Only process Profile 5 (IPTPQc2)
-  // Profile 5 uses full range video (bl_video_full_range_flag = 1)
-  // Profile 8.x uses limited range with HDR10/HLG-compatible base layer
-  // Applying IPTPQc2 pipeline to Profile 8 causes severe color corruption
-  //
-  // Note: Profile 5 is distinguished by:
-  // - bl_video_full_range_flag = 1 (always full range)
-  // - Single layer (disable_residual_flag = 1)
-  // Profile 8 typically has:
-  // - bl_video_full_range_flag = 0 (limited range, HDR10-compatible)
-  // - disable_residual_flag = 1 (single layer variant)
-
-  // Single-layer only (no enhancement layer)
-  if (!header->disable_residual_flag) {
-    static BOOL loggedEnhancementLayer = NO;
-    if (!loggedEnhancementLayer) {
-      NSLog(@"[FFmpegDecoder] DoVi enhancement layer present, not supported");
-      loggedEnhancementLayer = YES;
-    }
-    return nil;
-  }
-
-  // Profile 5 heuristic: full range video
-  if (!header->bl_video_full_range_flag) {
-    static BOOL loggedOnce = NO;
-    if (!loggedOnce) {
-      NSLog(@"[FFmpegDecoder] DoVi limited range (Profile 8-like), using "
-            @"standard HDR pipeline");
-      loggedOnce = YES;
-    }
-    return nil;
-  }
-
-  // Log only once per session to avoid spam
-  static BOOL loggedDoViDetection = NO;
-  if (!loggedDoViDetection) {
-    NSLog(@"[FFmpegDecoder] Processing DoVi Profile 5 metadata");
-    loggedDoViDetection = YES;
-  }
-
-  const AVDOVIDataMapping *mapping = av_dovi_get_mapping(metadata);
-  const AVDOVIColorMetadata *color = av_dovi_get_color(metadata);
-
-  // Extract color matrices (row-major)
-  NSMutableArray *nonlinearMatrix = [NSMutableArray arrayWithCapacity:9];
-  NSMutableArray *linearMatrix = [NSMutableArray arrayWithCapacity:9];
-  NSMutableArray *nonlinearOffset = [NSMutableArray arrayWithCapacity:3];
-
-  for (int i = 0; i < 9; i++) {
-    [nonlinearMatrix addObject:@(av_q2d(color->ycc_to_rgb_matrix[i]))];
-    [linearMatrix addObject:@(av_q2d(color->rgb_to_lms_matrix[i]))];
-  }
-  for (int i = 0; i < 3; i++) {
-    [nonlinearOffset addObject:@(av_q2d(color->ycc_to_rgb_offset[i]))];
-  }
-
-  // Extract reshape curves (per component: I, P, T)
-  NSMutableArray *components = [NSMutableArray arrayWithCapacity:3];
-  float scale = 1.0f / ((1 << header->bl_bit_depth) - 1);
-  float coefScale = 1.0f / (1 << header->coef_log2_denom);
-
-  for (int c = 0; c < 3; c++) {
-    const AVDOVIReshapingCurve *curve = &mapping->curves[c];
-    NSMutableDictionary *comp = [NSMutableDictionary dictionary];
-    comp[@"numPivots"] = @(curve->num_pivots);
-
-    // Pivots normalized to [0, 1]
-    NSMutableArray *pivots = [NSMutableArray arrayWithCapacity:9];
-    for (int i = 0; i < curve->num_pivots; i++) {
-      [pivots addObject:@(scale * curve->pivots[i])];
-    }
-    comp[@"pivots"] = pivots;
-
-    // Methods and coefficients per interval
-    NSMutableArray *methods = [NSMutableArray array];
-    NSMutableArray *polyCoeffs = [NSMutableArray array];
-    NSMutableArray *mmrOrders = [NSMutableArray array];
-    NSMutableArray *mmrConstants = [NSMutableArray array];
-    NSMutableArray *mmrCoeffsArray = [NSMutableArray array];
-
-    for (int i = 0; i < curve->num_pivots - 1; i++) {
-      [methods addObject:@(curve->mapping_idc[i])];
-
-      if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
-        NSMutableArray *poly = [NSMutableArray arrayWithCapacity:3];
-        for (int k = 0; k < 3; k++) {
-          float val = (k <= curve->poly_order[i])
-                          ? coefScale * curve->poly_coef[i][k]
-                          : 0;
-          [poly addObject:@(val)];
-        }
-        [polyCoeffs addObject:poly];
-        [mmrOrders addObject:@(0)];
-        [mmrConstants addObject:@(0.0f)];
-        [mmrCoeffsArray addObject:@[]];
-      } else { // MMR
-        [polyCoeffs addObject:@[ @(0.0f), @(0.0f), @(0.0f) ]];
-        [mmrOrders addObject:@(curve->mmr_order[i])];
-        [mmrConstants addObject:@(coefScale * curve->mmr_constant[i])];
-
-        NSMutableArray *orderCoeffs = [NSMutableArray array];
-        for (int j = 0; j < curve->mmr_order[i]; j++) {
-          NSMutableArray *coeffs = [NSMutableArray arrayWithCapacity:7];
-          for (int k = 0; k < 7; k++) {
-            [coeffs addObject:@(coefScale * curve->mmr_coef[i][j][k])];
-          }
-          [orderCoeffs addObject:coeffs];
-        }
-        [mmrCoeffsArray addObject:orderCoeffs];
-      }
-    }
-
-    comp[@"methods"] = methods;
-    comp[@"polyCoeffs"] = polyCoeffs;
-    comp[@"mmrOrders"] = mmrOrders;
-    comp[@"mmrConstants"] = mmrConstants;
-    comp[@"mmrCoeffs"] = mmrCoeffsArray;
-    [components addObject:comp];
-  }
-
-  // Build result dictionary with static metadata
-  NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:@{
-    @"nonlinearMatrix" : nonlinearMatrix,
-    @"linearMatrix" : linearMatrix,
-    @"nonlinearOffset" : nonlinearOffset,
-    @"components" : components,
-    @"sourceMinPQ" : @(color->source_min_pq / 4095.0f),
-    @"sourceMaxPQ" : @(color->source_max_pq / 4095.0f)
-  }];
-
-  // Extract L1 scene brightness metadata from extension blocks (per-frame
-  // dynamic) L1 contains min_pq, max_pq, avg_pq for the current scene
-  for (int i = 0; i < metadata->num_ext_blocks; i++) {
-    const AVDOVIDmData *dm = av_dovi_get_ext(metadata, i);
-    if (dm->level == 1) {
-      // Found L1 block - extract scene brightness
-      result[@"sceneMaxPQ"] = @(dm->l1.max_pq / 4095.0f);
-      result[@"sceneAvgPQ"] = @(dm->l1.avg_pq / 4095.0f);
-
-      // Log once for verification
-      static BOOL loggedL1 = NO;
-      if (!loggedL1) {
-        NSLog(@"[FFmpegDecoder] DoVi L1 scene brightness: max=%.3f avg=%.3f",
-              dm->l1.max_pq / 4095.0f, dm->l1.avg_pq / 4095.0f);
-        loggedL1 = YES;
-      }
-      break;
-    }
-  }
-
-  return result;
+  return [DoViMetadataExtractor extractMetadataFromFrame:frame];
 }
 
 - (CVPixelBufferRef)convertFrameToPixelBuffer:(AVFrame *)frame {
-  // Output YUV420P directly - Metal shader handles YUV→RGB conversion on GPU
-  // This eliminates CPU sws_scale overhead entirely
-
-  CVPixelBufferRef pixelBuffer = NULL;
-
-  // Check if input is already YUV420P (most common software decode output)
-  if (frame->format == AV_PIX_FMT_YUV420P) {
-    // Use CVPixelBufferPool for efficient buffer reuse
-    // This significantly reduces memory fragmentation for high-resolution video
-
-    // Create or recreate pool if dimensions changed
-    if (!_i420BufferPool || _poolWidth != frame->width ||
-        _poolHeight != frame->height) {
-      if (_i420BufferPool) {
-        CVPixelBufferPoolRelease(_i420BufferPool);
-        _i420BufferPool = NULL;
-      }
-
-      NSDictionary *poolAttributes =
-          @{(__bridge NSString *)kCVPixelBufferPoolMinimumBufferCountKey : @2};
-
-      NSDictionary *pixelBufferAttributes = @{
-        (__bridge NSString *)kCVPixelBufferWidthKey : @(frame->width),
-        (__bridge NSString *)kCVPixelBufferHeightKey : @(frame->height),
-        (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey :
-            @(kCVPixelFormatType_420YpCbCr8Planar),
-        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{}
-      };
-
-      CVReturn status = CVPixelBufferPoolCreate(
-          kCFAllocatorDefault, (__bridge CFDictionaryRef)poolAttributes,
-          (__bridge CFDictionaryRef)pixelBufferAttributes, &_i420BufferPool);
-
-      if (status != kCVReturnSuccess) {
-        NSLog(@"[FFmpegDecoder] Failed to create I420 pixel buffer pool");
-        return NULL;
-      }
-
-      _poolWidth = frame->width;
-      _poolHeight = frame->height;
-      NSLog(@"[FFmpegDecoder] Created I420 buffer pool: %dx%d", _poolWidth,
-            _poolHeight);
-    }
-
-    // Get buffer from pool
-    CVReturn status =
-        CVPixelBufferPoolCreatePixelBuffer(NULL, _i420BufferPool, &pixelBuffer);
-    if (status != kCVReturnSuccess) {
-      NSLog(@"[FFmpegDecoder] Failed to get buffer from pool: %d", status);
-      return NULL;
-    }
-
-    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
-
-    // Copy Y plane (full resolution)
-    uint8_t *yDest =
-        (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
-    int yDestStride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
-    for (int row = 0; row < frame->height; row++) {
-      memcpy(yDest + row * yDestStride,
-             frame->data[0] + row * frame->linesize[0], frame->width);
-    }
-
-    // Copy U plane (half resolution)
-    uint8_t *uDest =
-        (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
-    int uDestStride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
-    int uvHeight = frame->height / 2;
-    int uvWidth = frame->width / 2;
-    for (int row = 0; row < uvHeight; row++) {
-      memcpy(uDest + row * uDestStride,
-             frame->data[1] + row * frame->linesize[1], uvWidth);
-    }
-
-    // Copy V plane (half resolution)
-    uint8_t *vDest =
-        (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 2);
-    int vDestStride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 2);
-    for (int row = 0; row < uvHeight; row++) {
-      memcpy(vDest + row * vDestStride,
-             frame->data[2] + row * frame->linesize[2], uvWidth);
-    }
-
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-    return pixelBuffer;
-  }
-
-  // Handle 10-bit YUV420P10LE - output as P010 to preserve HDR data
-  // Optimized version using row-wise processing for cache efficiency
-  if (frame->format == AV_PIX_FMT_YUV420P10LE) {
-    // Use CVPixelBufferPool for efficient P010 buffer reuse
-    // This is critical for 4K HDR content to avoid massive memory churn
-    // Lazy initialization: only create P010 pool when first HDR frame is
-    // detected
-    if (!_hasCreatedP010Pool || !_p010BufferPool ||
-        _poolWidth != frame->width || _poolHeight != frame->height) {
-      if (_p010BufferPool) {
-        CVPixelBufferPoolRelease(_p010BufferPool);
-        _p010BufferPool = NULL;
-      }
-
-      NSDictionary *poolAttributes =
-          @{(__bridge NSString *)kCVPixelBufferPoolMinimumBufferCountKey : @2};
-
-      NSDictionary *pixelBufferAttributes = @{
-        (__bridge NSString *)kCVPixelBufferWidthKey : @(frame->width),
-        (__bridge NSString *)kCVPixelBufferHeightKey : @(frame->height),
-        (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey :
-            @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
-        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{}
-      };
-
-      CVReturn status = CVPixelBufferPoolCreate(
-          kCFAllocatorDefault, (__bridge CFDictionaryRef)poolAttributes,
-          (__bridge CFDictionaryRef)pixelBufferAttributes, &_p010BufferPool);
-
-      if (status != kCVReturnSuccess) {
-        NSLog(@"[FFmpegDecoder] Failed to create P010 pixel buffer pool");
-        return NULL;
-      }
-
-      _poolWidth = frame->width;
-      _poolHeight = frame->height;
-      _hasCreatedP010Pool = YES;
-      NSLog(@"[FFmpegDecoder] Lazy-created P010 buffer pool: %dx%d", _poolWidth,
-            _poolHeight);
-    }
-
-    // Get buffer from pool
-    CVReturn status =
-        CVPixelBufferPoolCreatePixelBuffer(NULL, _p010BufferPool, &pixelBuffer);
-    if (status != kCVReturnSuccess) {
-      NSLog(@"[FFmpegDecoder] Failed to get P010 buffer from pool: %d", status);
-      return NULL;
-    }
-
-    CVPixelBufferLockBaseAddress(pixelBuffer, 0);
-
-    // Y plane - optimized row-wise copy with shift
-    uint16_t *yDest =
-        (uint16_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
-    size_t yDestBytesPerRow =
-        CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
-    uint16_t *ySrc = (uint16_t *)frame->data[0];
-    int ySrcStride = frame->linesize[0] / 2;
-
-    for (int row = 0; row < frame->height; row++) {
-      uint16_t *srcRow = ySrc + row * ySrcStride;
-      uint16_t *dstRow =
-          (uint16_t *)((uint8_t *)yDest + row * yDestBytesPerRow);
-      // Unrolled loop for better performance
-      int col = 0;
-      int width = frame->width;
-      for (; col + 4 <= width; col += 4) {
-        dstRow[col] = srcRow[col] << 6;
-        dstRow[col + 1] = srcRow[col + 1] << 6;
-        dstRow[col + 2] = srcRow[col + 2] << 6;
-        dstRow[col + 3] = srcRow[col + 3] << 6;
-      }
-      for (; col < width; col++) {
-        dstRow[col] = srcRow[col] << 6;
-      }
-    }
-
-    // UV plane - interleave U and V with shift
-    uint16_t *uvDest =
-        (uint16_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
-    size_t uvDestBytesPerRow =
-        CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
-    uint16_t *uSrc = (uint16_t *)frame->data[1];
-    uint16_t *vSrc = (uint16_t *)frame->data[2];
-    int uSrcStride = frame->linesize[1] / 2;
-    int vSrcStride = frame->linesize[2] / 2;
-    int uvHeight = frame->height / 2;
-    int uvWidth = frame->width / 2;
-
-    for (int row = 0; row < uvHeight; row++) {
-      uint16_t *uRow = uSrc + row * uSrcStride;
-      uint16_t *vRow = vSrc + row * vSrcStride;
-      uint16_t *dstRow =
-          (uint16_t *)((uint8_t *)uvDest + row * uvDestBytesPerRow);
-      for (int col = 0; col < uvWidth; col++) {
-        dstRow[col * 2] = uRow[col] << 6;
-        dstRow[col * 2 + 1] = vRow[col] << 6;
-      }
-    }
-
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-    return pixelBuffer;
-  }
-
-  // For other formats (NV12, YUV422, etc.), use sws_scale to convert to NV12
-  // This is a fallback path - most software decoding outputs YUV420P
-  if (!_swsContext) {
-    _swsContext = sws_getContext(frame->width, frame->height,
-                                 (enum AVPixelFormat)frame->format,
-                                 frame->width, frame->height, AV_PIX_FMT_NV12,
-                                 SWS_BILINEAR, NULL, NULL, NULL);
-    if (!_swsContext) {
-      NSLog(@"[FFmpegDecoder] Failed to create sws context");
-      return NULL;
-    }
-  }
-
-  NSDictionary *nv12Attributes =
-      @{(__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{}};
-
-  CVReturn status = CVPixelBufferCreate(
-      kCFAllocatorDefault, frame->width, frame->height,
-      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, // NV12
-      (__bridge CFDictionaryRef)nv12Attributes, &pixelBuffer);
-
-  if (status != kCVReturnSuccess) {
-    return NULL;
-  }
-
-  CVPixelBufferLockBaseAddress(pixelBuffer, 0);
-
-  uint8_t *yPlane =
-      (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
-  uint8_t *uvPlane =
-      (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
-  int yStride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
-  int uvStride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
-
-  uint8_t *destData[2] = {yPlane, uvPlane};
-  int destLinesize[2] = {yStride, uvStride};
-
-  sws_scale(_swsContext, (const uint8_t *const *)frame->data, frame->linesize,
-            0, frame->height, destData, destLinesize);
-
-  CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
-
-  return pixelBuffer;
+  return [_pixelFormatConverter convertFrame:frame];
 }
 
 #pragma mark - Seeking
 
+/// Creates a video frame from the currently decoded frame in _frame.
+/// @param pts Presentation timestamp in seconds
+/// @return A new FFmpegVideoFrame or nil if pixel buffer creation fails
+- (nullable FFmpegVideoFrame *)createVideoFrameFromDecodedFrame:(double)pts {
+  CVPixelBufferRef pixelBuffer = NULL;
+  if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
+    pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
+  } else {
+    pixelBuffer = [self convertFrameToPixelBuffer:_frame];
+  }
+  
+  if (!pixelBuffer) {
+    return nil;
+  }
+  
+  FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
+  videoFrame.type = FFmpegFrameTypeVideo;
+  videoFrame.pixelBuffer = pixelBuffer;
+  videoFrame.presentationTime = pts;
+  videoFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+  return videoFrame;
+}
+
+/// Seeks to the specified time in the video.
+///
+/// Uses a two-phase strategy:
+/// 1. Fast seek to nearest keyframe before target using avformat_seek_file
+/// 2. If accurate=YES, decode frames until reaching target PTS
+///
+/// When seek optimization is enabled, non-reference frames are skipped during
+/// the catch-up phase (from keyframe to ~15 frames before target) for better performance.
+///
+/// @param seconds Target time in seconds
+/// @param accurate If YES, decode frames for precise positioning; if NO, return nearest keyframe
+/// @return The frame at or after the target time, or nil on failure
 - (nullable FFmpegVideoFrame *)seekToTime:(double)seconds accurate:(BOOL)accurate {
   if (!_formatContext || _videoStreamIndex < 0) {
     return nil;
@@ -1250,11 +814,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   // Phase 2: Frame-accurate seek - decode frames until we reach target PTS
   double targetPTS = seconds;
-  double tolerance = 0.001; // 1ms tolerance for floating point comparison
 
   // Optimization: Skip non-reference frames when catching up from far away
   enum AVDiscard originalSkipFrame = _codecContext->skip_frame;
   BOOL optimizationActive = NO;
+  // Calculate adaptive threshold: ~15 frames before target, proportional to frame rate
+  double adaptiveThreshold = kSeekOptimizationFrameCount / _videoInfo.frameRate;
 
   if (accurate && self.seekOptimizationEnabled) {
     _codecContext->skip_frame = AVDISCARD_NONREF;
@@ -1268,28 +833,18 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     if (readResult < 0) {
       // Handle EOF or error
       if (readResult == AVERROR_EOF) {
-        avcodec_send_packet(_codecContext, NULL); // Flush
+        int flushRet = avcodec_send_packet(_codecContext, NULL); // Flush
+        if (flushRet < 0 && flushRet != AVERROR_EOF) {
+          NSLog(@"[FFmpegDecoder] Warning: flush packet failed: %s", av_err2str(flushRet));
+        }
         while (avcodec_receive_frame(_codecContext, _frame) == 0) {
           double framePTS = 0.0;
           if (_frame->pts != AV_NOPTS_VALUE) {
             framePTS = (double)_frame->pts * av_q2d(stream->time_base);
           }
           
-          if (!accurate || framePTS >= targetPTS - tolerance) {
-            CVPixelBufferRef pixelBuffer = NULL;
-            if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
-              pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
-            } else {
-              pixelBuffer = [self convertFrameToPixelBuffer:_frame];
-            }
-            
-            if (pixelBuffer) {
-              resultFrame = [[FFmpegVideoFrame alloc] init];
-              resultFrame.type = FFmpegFrameTypeVideo;
-              resultFrame.pixelBuffer = pixelBuffer;
-              resultFrame.presentationTime = framePTS;
-              resultFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
-            }
+          if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
+            resultFrame = [self createVideoFrameFromDecodedFrame:framePTS];
             break;
           }
         }
@@ -1298,32 +853,18 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       break;
     }
 
-    // Audio Packet - Queue it for later consumption
-    if (_packet->stream_index == _audioStreamIndex && _audioCodecContext) {
+    // Audio Packet - Queue it for later consumption (only during accurate seeks)
+    if (_packet->stream_index == _audioStreamIndex && _audioCodecContext && accurate) {
       AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
       double audioPTS = (double)_packet->pts * av_q2d(audioStream->time_base);
       
       // Only queue audio packets that are close to or after our target time
       // Discard packets from the "catch-up" phase (between keyframe and target)
-      // Use a small negative tolerance (50ms) to ensure we don't miss the start of the audio segment
-      if (audioPTS >= targetPTS - 0.05) {
-          FFmpegPacketData *packetData = [[FFmpegPacketData alloc] init];
-          packetData.streamIndex = _packet->stream_index;
-          packetData.pts = _packet->pts;
-          packetData.dts = _packet->dts;
-          packetData.duration = _packet->duration;
-          packetData.flags = _packet->flags;
-          packetData.isAudio = YES;
-          packetData.isVideo = NO;
-          
-          if (_packet->data && _packet->size > 0) {
-            packetData.data = [NSData dataWithBytes:_packet->data length:_packet->size];
-            packetData.size = _packet->size;
-          } else {
-            packetData.data = [NSData data];
-            packetData.size = 0;
-          }
-          
+      // Use a small negative tolerance to ensure we don't miss the start of the audio segment
+      if (audioPTS >= targetPTS - kAudioQueueTolerance && _queuedPackets.count < kMaxQueuedAudioPackets) {
+          FFmpegPacketData *packetData = [self createPacketDataFromAVPacket:_packet
+                                                                    isVideo:NO
+                                                                    isAudio:YES];
           [_queuedPackets addObject:packetData];
       }
       av_packet_unref(_packet);
@@ -1334,7 +875,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     if (_packet->stream_index == _videoStreamIndex && _codecContext) {
       if (optimizationActive) {
         double packetPTS = (double)_packet->pts * av_q2d(stream->time_base);
-        if (packetPTS >= targetPTS - 0.5) {
+        if (packetPTS >= targetPTS - adaptiveThreshold) {
           _codecContext->skip_frame = originalSkipFrame;
           optimizationActive = NO;
         }
@@ -1359,21 +900,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
         // If not accurate, return the first frame we find (keyframe)
         // If accurate, wait for target
-        if (!accurate || framePTS >= targetPTS - tolerance) {
-          CVPixelBufferRef pixelBuffer = NULL;
-          if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
-            pixelBuffer = [self extractPixelBufferFromHardwareFrame:_frame];
-          } else {
-            pixelBuffer = [self convertFrameToPixelBuffer:_frame];
-          }
-
-          if (pixelBuffer) {
-            resultFrame = [[FFmpegVideoFrame alloc] init];
-            resultFrame.type = FFmpegFrameTypeVideo;
-            resultFrame.pixelBuffer = pixelBuffer;
-            resultFrame.presentationTime = framePTS;
-            resultFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
-          }
+        if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
+          resultFrame = [self createVideoFrameFromDecodedFrame:framePTS];
           break; // Found it
         }
       }
@@ -1456,25 +984,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _hwDeviceCtx = NULL;
   }
 
-  if (_i420BufferPool) {
-    // Flush all aged buffers from the pool before releasing
-    CVPixelBufferPoolFlush(_i420BufferPool,
-                           kCVPixelBufferPoolFlushExcessBuffers);
-    CVPixelBufferPoolRelease(_i420BufferPool);
-    _i420BufferPool = NULL;
-    _poolWidth = 0;
-    _poolHeight = 0;
-    NSLog(@"[FFmpegDecoder] I420 buffer pool flushed and released");
-  }
-
-  if (_p010BufferPool) {
-    CVPixelBufferPoolFlush(_p010BufferPool,
-                           kCVPixelBufferPoolFlushExcessBuffers);
-    CVPixelBufferPoolRelease(_p010BufferPool);
-    _p010BufferPool = NULL;
-    _hasCreatedP010Pool = NO;
-    NSLog(@"[FFmpegDecoder] P010 buffer pool flushed and released");
-  }
+  // Cleanup pixel format converter (handles I420 and P010 buffer pools)
+  [_pixelFormatConverter cleanup];
+  _pixelFormatConverter = nil;
 
   _usingHardwareDecoder = NO;
   NSLog(@"[FFmpegDecoder] close() completed - all resources freed");
