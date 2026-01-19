@@ -36,6 +36,11 @@ public struct VideoInfo {
     /// Whether the video is HDR content (PQ or HLG transfer function).
     public let isHDR: Bool
     
+    /// Specific decoder used (e.g. "VideoToolbox", "h264").
+    public let decoderName: String?
+    /// Description of the decoder implementation.
+    public let decoderDescription: String?
+    
     // MARK: - Color Metadata
     
     /// Color primaries (FFmpeg AVCOL_PRI_*: 1=BT.709, 9=BT.2020).
@@ -108,7 +113,9 @@ public struct VideoInfo {
         isHardwareAccelerated: Bool, isHDR: Bool = false,
         colorPrimaries: Int = 0, colorTransfer: Int = 0, colorSpace: Int = 0,
         colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false,
-        audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil
+
+        audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
+        decoderName: String? = nil, decoderDescription: String? = nil
     ) {
         self.width = width
         self.height = height
@@ -125,7 +132,10 @@ public struct VideoInfo {
         self.isDolbyVision = isDolbyVision
         self.audioCodecName = audioCodecName
         self.audioSampleRate = audioSampleRate
+
         self.audioChannels = audioChannels
+        self.decoderName = decoderName
+        self.decoderDescription = decoderDescription
     }
 }
 
@@ -220,7 +230,9 @@ public class VideoDecoder {
             isDolbyVision: info.isDolbyVision,
             audioCodecName: info.audioCodecName,
             audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
-            audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil
+            audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,
+            decoderName: info.decoderName,
+            decoderDescription: info.decoderDescription
         )
     }
 

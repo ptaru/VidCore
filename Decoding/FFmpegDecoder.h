@@ -26,6 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, copy) NSString *codecName;
 /// Whether the stream uses hardware acceleration.
 @property(nonatomic, assign) BOOL isHardwareAccelerated;
+/// Name of the specific decoder used (e.g. "videotoolbox", "h264").
+@property(nonatomic, copy) NSString *decoderName;
+/// Description of the decoder implementation.
+@property(nonatomic, copy) NSString *decoderDescription;
 /// Color primaries (AVCOL_PRI_*: 1=BT.709, 9=BT.2020).
 @property(nonatomic, assign) int colorPrimaries;
 /// Transfer characteristics (AVCOL_TRC_*: 1=BT.709, 16=PQ/SMPTE2084, 18=HLG).

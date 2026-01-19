@@ -8,11 +8,8 @@
 import Foundation
 import Observation
 import QuartzCore
-import os
 
-private let logger = Logger(subsystem: "com.vidcore", category: "player")
 
-private let deallocationLogger = Logger(subsystem: "com.vidcore", category: "memory")
 
 // MARK: - Timing Constants
 private enum PlaybackTiming {
@@ -136,14 +133,17 @@ public class VideoPlayer {
     /// - Throws: `VideoPlayerError` if the file cannot be loaded.
     public func load(url: URL) async throws {
         state = .loading
-        logger.info("[VideoPlayer] Loading video: \(url.lastPathComponent)")
+        state = .loading
+
         
         do {
             decoder = try VideoDecoder(url: url)
             if let decoder = decoder {
                 duration = decoder.videoInfo.duration
                 videoInfo = decoder.videoInfo
-                logger.info("[VideoPlayer] Video loaded: \(decoder.videoInfo.width)x\(decoder.videoInfo.height), duration: \(self.duration)s")
+                duration = decoder.videoInfo.duration
+                videoInfo = decoder.videoInfo
+
                 
 
                 while !Task.isCancelled {
@@ -159,8 +159,9 @@ public class VideoPlayer {
                 }
             }
             state = .ready
+            state = .ready
         } catch {
-            logger.error("[VideoPlayer] Failed to load video: \(error.localizedDescription)")
+
             state = .error(.decoderInitFailed(error.localizedDescription))
             throw VideoPlayerError.decoderInitFailed(error.localizedDescription)
         }
@@ -210,7 +211,7 @@ public class VideoPlayer {
 
         startTasks()
         
-        logger.debug("[VideoPlayer] Playback started")
+
     }
     
     /// Pause playback.
@@ -319,7 +320,7 @@ public class VideoPlayer {
                     state = .paused
                 }
             } catch {
-                logger.error("[VideoPlayer] Seek failed: \(error.localizedDescription)")
+
                 // Restore to paused state on error
                 state = .paused
             }
@@ -331,7 +332,7 @@ public class VideoPlayer {
     
     /// Close the player and release resources.
     public func close() async {
-        logger.debug("[VideoPlayer] Closing VideoPlayer")
+
         
         if isPlaying {
             pause()
@@ -356,7 +357,9 @@ public class VideoPlayer {
         
         state = .idle
         
-        logger.info("[VideoPlayer] Closed")
+        state = .idle
+        
+
     }
     
     // MARK: - Task Management
@@ -432,7 +435,7 @@ public class VideoPlayer {
                     continue
                 }
                 
-                logger.debug("[VideoPlayer] Decode reached end of packets, flushing decoder")
+
                 
                 await decoder.flushVideoDecoder()
                 
@@ -444,7 +447,7 @@ public class VideoPlayer {
                     await frameBuffer.pushWithBackpressure(frame)
                     drainedCount += 1
                 }
-                logger.debug("[VideoPlayer] Drained \(drainedCount) remaining frames from decoder")
+
                 
                 await frameBuffer.close()
                 break
@@ -488,7 +491,7 @@ public class VideoPlayer {
                 if !Task.isCancelled && state == .playing {
                     await MainActor.run {
                         state = .finished
-                        logger.info("[VideoPlayer] Playback finished")
+
                     }
                 }
                 break
@@ -528,7 +531,7 @@ public class VideoPlayer {
                     if abs(drift) > SyncTiming.severeDriftThreshold 
                         && consecutiveDriftCount >= SyncTiming.severeDriftCountThreshold {
                         
-                        logger.warning("[VideoPlayer] Severe A/V drift (\(Int(abs(drift) * 1000))ms) - triggering hard resync")
+
                         consecutiveDriftCount = 0
                         
                         let audioPosition = audioPlayer.mediaTime
@@ -546,11 +549,15 @@ public class VideoPlayer {
                     if abs(drift) > SyncTiming.driftCorrectionThreshold 
                         && consecutiveDriftCount >= SyncTiming.consecutiveDriftCountThreshold {
                         
+                    if abs(drift) > SyncTiming.driftCorrectionThreshold 
+                        && consecutiveDriftCount >= SyncTiming.consecutiveDriftCountThreshold {
+                        
                         if drift > 0 {
-                            logger.debug("[VideoPlayer] A/V sync: video ahead by \(Int(drift * 1000))ms, waiting for audio")
+
                         } else {
-                            logger.debug("[VideoPlayer] A/V sync: video behind by \(Int(-drift * 1000))ms, will drop late frames")
+
                         }
+                    }
                     }
                 } else {
                     consecutiveDriftCount = 0
@@ -567,7 +574,7 @@ public class VideoPlayer {
                 let frameDuration = 1.0 / (videoInfo?.frameRate ?? 30.0)
                 if waitTime < -frameDuration {
                     _ = await frameBuffer.pop()
-                    logger.debug("[VideoPlayer] Dropped late frame: \(Int(waitTime * -1000))ms behind")
+
                     continue
                 }
             }
@@ -593,7 +600,7 @@ public class VideoPlayer {
     /// Releases heavy resources (decoder, audio engine, renderer cache) immediately.
     /// Tasks are cancelled but not awaited - they will terminate naturally.
     public nonisolated func closeSync() {
-        deallocationLogger.info("[VideoPlayer] closeSync() - releasing resources")
+
 
         // Cancel all running tasks
         cancelAllTasks()
@@ -619,7 +626,6 @@ public class VideoPlayer {
                 currentSeekTask = nil
 
                 renderingEngine?.flush()
-
                 state = .idle
 
                 let pq = packetQueue
@@ -627,7 +633,6 @@ public class VideoPlayer {
                 Task.detached(priority: .high) {
                     await pq.reset()
                     await fb.reset()
-                    deallocationLogger.info("[VideoPlayer] Buffers reset completed")
                 }
             }
         } else {
@@ -658,17 +663,17 @@ public class VideoPlayer {
                     Task.detached(priority: .high) {
                         await pq.reset()
                         await fb.reset()
-                        deallocationLogger.info("[VideoPlayer] Buffers reset completed")
+
                     }
                 }
             }
         }
 
-        deallocationLogger.info("[VideoPlayer] closeSync() completed")
+
     }
     
     nonisolated deinit {
-        deallocationLogger.info("[VideoPlayer] DEINIT - deallocating")
+
 
         cancelAllTasks()
     }

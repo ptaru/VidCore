@@ -114,7 +114,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     }
   }
   // Hardware format not available, return first software format as fallback
-  NSLog(@"[FFmpegDecoder] Hardware pixel format not available, using software");
+  // Hardware format not available, return first software format as fallback
+
   return pix_fmts[0];
 }
 
@@ -167,8 +168,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   int ret = av_hwdevice_ctx_create(&_hwDeviceCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
                                    NULL, NULL, 0);
   if (ret < 0) {
-    NSLog(@"[FFmpegDecoder] Failed to create VideoToolbox device context: %s",
-          av_err2str(ret));
+
     return NO;
   }
 
@@ -176,8 +176,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   for (int i = 0;; i++) {
     const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
     if (!config) {
-      NSLog(@"[FFmpegDecoder] Codec %s does not support VideoToolbox",
-            codec->name);
+
       av_buffer_unref(&_hwDeviceCtx);
       _hwDeviceCtx = NULL;
       return NO;
@@ -186,8 +185,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         config->device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
       _hwPixelFormat = config->pix_fmt;
       s_hwPixelFormat = _hwPixelFormat;
-      NSLog(@"[FFmpegDecoder] VideoToolbox supported for codec %s",
-            codec->name);
+
       break;
     }
   }
@@ -250,7 +248,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
     _codecContext->get_format = get_hw_format;
     _usingHardwareDecoder = YES;
-    NSLog(@"[FFmpegDecoder] Configured hardware decoding with VideoToolbox");
+    _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
+    _codecContext->get_format = get_hw_format;
+    _usingHardwareDecoder = YES;
+
   } else {
     // Enable multi-threaded decoding for software decode path
     // 0 = auto-detect optimal thread count based on CPU cores
@@ -258,18 +259,16 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     // Enable both frame threading (decode multiple frames in parallel) and
     // slice threading (decode slices of a single frame in parallel)
     _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    NSLog(@"[FFmpegDecoder] Using software decoding with multi-threading (auto "
-          @"threads)");
+
   }
 
   // Open codec
   int ret = avcodec_open2(_codecContext, codec, NULL);
   if (ret < 0) {
     // If hardware decoding failed to open, try falling back to software
+    // If hardware decoding failed to open, try falling back to software
     if (_usingHardwareDecoder) {
-      NSLog(@"[FFmpegDecoder] Hardware codec open failed, falling back to "
-            @"software: %s",
-            av_err2str(ret));
+
 
       // Reset hardware state
       av_buffer_unref(&_hwDeviceCtx);
@@ -302,12 +301,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         if (avcodec_parameters_to_context(_audioCodecContext,
                                           audioStream->codecpar) >= 0) {
           if (avcodec_open2(_audioCodecContext, audioCodec, NULL) >= 0) {
-            NSLog(
-                @"[FFmpegDecoder] Opened audio stream: %s, %d Hz, %d channels",
-                audioCodec->name, _audioCodecContext->sample_rate,
-                _audioCodecContext->ch_layout.nb_channels);
+
           } else {
-            NSLog(@"[FFmpegDecoder] Failed to open audio codec");
+
             avcodec_free_context(&_audioCodecContext);
             _audioCodecContext = NULL;
             _audioStreamIndex = -1;
@@ -320,7 +316,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       }
     }
   } else {
-    NSLog(@"[FFmpegDecoder] No audio stream found");
+
   }
 
   // Allocate frames
@@ -355,6 +351,15 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _videoInfo.height = _codecContext->height;
   _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
   _videoInfo.isHardwareAccelerated = _usingHardwareDecoder;
+  
+  // Set decoder details
+  if (_usingHardwareDecoder) {
+      _videoInfo.decoderName = @"VideoToolbox";
+      _videoInfo.decoderDescription = @"Hardware Acceleration (GPU)";
+  } else {
+      _videoInfo.decoderName = [NSString stringWithFormat:@"%s", codec->name];
+      _videoInfo.decoderDescription = @"Software Decoding (CPU)";
+  }
 
   // Extract color metadata for HDR detection
   _videoInfo.colorPrimaries = _codecContext->color_primaries;
@@ -404,13 +409,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
   }
 
-  NSLog(
-      @"[FFmpegDecoder] Opened video: %dx%d, %.2f fps, %.2f sec, codec: %s, "
-      @"hardware: %@, HDR: %@, bits: %d",
-      _videoInfo.width, _videoInfo.height, _videoInfo.frameRate,
-      _videoInfo.duration, codec->name, _usingHardwareDecoder ? @"YES" : @"NO",
-      _videoInfo.isDolbyVision ? @"DOVI" : (_videoInfo.isHDR ? @"YES" : @"NO"),
-      _videoInfo.bitsPerComponent);
+
 
   return YES;
 }
@@ -631,7 +630,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Send NULL packet to signal end of stream
   // This tells the decoder to output all remaining buffered frames
   avcodec_send_packet(_codecContext, NULL);
-  NSLog(@"[FFmpegDecoder] Video decoder flushed for draining");
+
 }
 
 - (nullable FFmpegVideoFrame *)drainVideoFrame {
@@ -644,7 +643,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   if (ret == AVERROR_EOF) {
     // No more frames - decoder is fully drained
-    NSLog(@"[FFmpegDecoder] Video decoder fully drained");
+
     return nil;
   }
 
@@ -680,7 +679,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         (enum AVSampleFormat)frame->format, frame->sample_rate, 0, NULL);
 
     if (ret < 0 || swr_init(_swrContext) < 0) {
-      NSLog(@"[FFmpegDecoder] Failed to initialize SwrContext");
+
       if (_swrContext)
         swr_free(&_swrContext);
       return nil;
@@ -692,7 +691,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   int ret = swr_convert_frame(_swrContext, _swrOutputFrame, frame);
 
   if (ret < 0) {
-    NSLog(@"[FFmpegDecoder] Audio conversion failed");
+
     return nil;
   }
 
@@ -738,7 +737,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return pixelBuffer;
   }
 
-  NSLog(@"[FFmpegDecoder] Failed to extract CVPixelBuffer from hardware frame");
+
   return NULL;
 }
 

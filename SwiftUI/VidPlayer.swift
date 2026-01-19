@@ -142,7 +142,11 @@ public struct VidPlayer<Overlay: View>: View {
             
             // Debug info overlay (top-left corner)
             if showDebugInfo, let frame = activePlayer.currentFrame {
-                VidPlayerDebugOverlay(frame: frame, videoInfo: activePlayer.videoInfo)
+                VidPlayerDebugOverlay(
+                    frame: frame,
+                    videoInfo: activePlayer.videoInfo,
+                    renderingEngine: activePlayer.renderingEngine
+                )
             }
             
             // User overlay
@@ -326,6 +330,7 @@ private struct VidPlayerErrorView: View {
 private struct VidPlayerDebugOverlay: View {
     let frame: VideoFrame
     let videoInfo: VideoInfo?
+    let renderingEngine: RenderingEngine?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -345,7 +350,20 @@ private struct VidPlayerDebugOverlay: View {
                 debugRow("Resolution", "\(info.width)×\(info.height)")
                 debugRow("Frame Rate", String(format: "%.2f fps", info.frameRate))
                 debugRow("Codec", info.codecName.uppercased())
-                debugRow("HW Accel", info.isHardwareAccelerated ? "VideoToolbox" : "Software")
+                
+                // Detailed decoder info
+                if let decoderName = info.decoderName {
+                    debugRow("Decoder", decoderName)
+                }
+                debugRow("HW Accel", info.isHardwareAccelerated ? "Yes (VideoToolbox)" : "No (Software)")
+            }
+            
+            // Rendering Info
+            if let engine = renderingEngine {
+                Divider().background(Color.white.opacity(0.3))
+                
+                debugRow("Pipeline", engine.currentRenderMode)
+                debugRow("Display Peak", String(format: "%.0f nits", engine.currentDisplayPeakNits))
             }
             
             // Pixel Format & Bit Depth
@@ -378,8 +396,10 @@ private struct VidPlayerDebugOverlay: View {
                 debugRow("Source Range", String(format: "%.3f - %.3f PQ", dovi.sourceMinPQ, dovi.sourceMaxPQ))
                 
                 // L1 Scene Brightness
-                if let sceneMax = dovi.sceneMaxPQ {
-                    debugRow("L1 Scene Max", String(format: "%.3f PQ (%.0f nits)", sceneMax, pqToNits(sceneMax)))
+                if let l1Max = renderingEngine?.lastL1SceneMaxNits {
+                    debugRow("L1 Scene Max", String(format: "%.0f nits", l1Max))
+                } else if let sceneMax = dovi.sceneMaxPQ {
+                     debugRow("L1 Scene Max", String(format: "%.3f PQ (%.0f nits)", sceneMax, pqToNits(sceneMax)))
                 }
                 if let sceneAvg = dovi.sceneAvgPQ {
                     debugRow("L1 Scene Avg", String(format: "%.3f PQ (%.0f nits)", sceneAvg, pqToNits(sceneAvg)))
