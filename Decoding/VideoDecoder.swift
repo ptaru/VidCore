@@ -105,7 +105,7 @@ public struct VideoInfo {
         case 6: return "SMPTE 170M"
         case 9: return "BT.2020nc"
         case 10: return "BT.2020c"
-        default: return colorSpace > 0 ? "Unknown (\(colorSpace))" : "YCbCr"
+        default: return colorSpace > 0 ? "Unspecified (\(colorSpace))" : "YCbCr"
         }
     }
     public init(

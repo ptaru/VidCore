@@ -86,7 +86,7 @@ public class RenderingEngine {
 
     // HDR pipelines (rgba16Float, PQ conversion)
     private var hdrNV12PipelineState: MTLRenderPipelineState?
-    private var hdrI420PipelineState: MTLRenderPipelineState?
+
     
     // DoVi Profile 5 (IPTPQc2)
     private var doviNV12PipelineState: MTLRenderPipelineState?
@@ -148,7 +148,6 @@ public class RenderingEngine {
             PipelineConfig(fragmentFunction: "i420FullRangeFragmentShader", pixelFormat: .bgra8Unorm, keyPath: \.i420FullRangePipelineState),
             PipelineConfig(fragmentFunction: "bgraFragmentShader", pixelFormat: .bgra8Unorm, keyPath: \.bgraPipelineState),
             PipelineConfig(fragmentFunction: "hdrNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.hdrNV12PipelineState),
-            PipelineConfig(fragmentFunction: "hdrI420FragmentShader", pixelFormat: .rgba16Float, keyPath: \.hdrI420PipelineState),
             PipelineConfig(fragmentFunction: "nv12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.nv12Float16PipelineState),
             PipelineConfig(fragmentFunction: "i420FragmentShader", pixelFormat: .rgba16Float, keyPath: \.i420Float16PipelineState),
             PipelineConfig(fragmentFunction: "doviNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.doviNV12PipelineState),
@@ -215,19 +214,14 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 8) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.uv, index: 1)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: drawable.texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.uv]
+        ) else { return false }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -252,20 +246,14 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let textures = createI420Textures(from: pixelBuffer) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.u, index: 1)
-        encoder.setFragmentTexture(textures.v, index: 2)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: drawable.texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.u, textures.v]
+        ) else { return false }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -286,18 +274,14 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let texture = createTexture(from: pixelBuffer, plane: 0, format: .bgra8Unorm, width: width, height: height) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(texture, index: 0)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: drawable.texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [texture]
+        ) else { return false }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -398,7 +382,7 @@ public class RenderingEngine {
         if let doviMetadata = frame.doviMetadata {
             if isFloat16Layer {
                 // EDR display
-                currentRenderMode = "Dolby Vision (EDR)"
+                currentRenderMode = "Dolby Vision"
                 let peak = ToneMapping.getCurrentScreenPeakNits(for: drawable.layer)
                 self.currentDisplayPeakNits = peak
                 if let sceneMax = doviMetadata.sceneMaxPQ {
@@ -422,7 +406,7 @@ public class RenderingEngine {
                 // EDR display
                 let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits(for: drawable.layer)
                 self.currentDisplayPeakNits = currentDisplayPeak
-                self.currentRenderMode = "HDR10 (EDR)"
+                self.currentRenderMode = "HDR10"
                 
                 if renderHDRToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak) {
                     if let commandBuffer = commandQueue.makeCommandBuffer() {
@@ -471,11 +455,6 @@ public class RenderingEngine {
         renderPixelBufferWithCoreImage(pixelBuffer, to: drawable)
     }
 
-    
-    
-    /// GPU-accelerated 10-bit P010 (HDR NV12) rendering with tone mapping to SDR
-
-
     /// GPU-accelerated 10-bit P010 (HDR NV12) rendering with PQ->Linear conversion for EDR
     private func renderHDRToTexture(
         _ pixelBuffer: CVPixelBuffer, to texture: MTLTexture, targetPeakNits: Float
@@ -487,18 +466,7 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: texture.width, targetHeight: texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.uv, index: 1)
-
+        
         // Tone mapping params
         var params = ToneMappingParams(
             inputMin: 0.0,
@@ -506,13 +474,18 @@ public class RenderingEngine {
             outputMin: 0.0,
             outputMax: targetPeakNits
         )
-        encoder.setFragmentBytes(&params, length: MemoryLayout<ToneMappingParams>.size, index: 0)
-
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
         
-        // Only present if it's a drawable? No, we are rendering to texture.
-        // Caller handles present if needed.
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.uv],
+            configureEncoder: { encoder in
+                encoder.setFragmentBytes(&params, length: MemoryLayout<ToneMappingParams>.size, index: 0)
+            }
+        ) else { return false }
+        
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
@@ -531,46 +504,40 @@ public class RenderingEngine {
             return false
         }
         
-        // currentRenderMode updated by caller if needed
-        
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         guard width > 0 && height > 0 else { return false }
         
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-        
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-        
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: texture.width, targetHeight: texture.height)
-        
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.uv, index: 1)
         
         // DoVi parameters
         var doviParams = DoViParamsBuffer(from: metadata)
-        encoder.setFragmentBytes(&doviParams, length: MemoryLayout<DoViParamsBuffer>.size, index: 0)
         
         // Reshape components (buffers 1-3)
         var compI = DoViReshapeComponentBuffer(from: metadata.components[0])
         var compP = DoViReshapeComponentBuffer(from: metadata.components[1])
         var compT = DoViReshapeComponentBuffer(from: metadata.components[2])
-        encoder.setFragmentBytes(&compI, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 1)
-        encoder.setFragmentBytes(&compP, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 2)
-        encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
         
         // Tone mapping params
         let dynamicPeakPQ = metadata.sceneMaxPQ ?? metadata.sourceMaxPQ
         let dynamicPeakNits = ToneMapping.pqToNits(dynamicPeakPQ)
         
         var toneParams = ToneMappingParams(inputMin: 0.0, inputMax: dynamicPeakNits, outputMin: 0.0, outputMax: targetPeakNits)
-        encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 4)
         
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.uv],
+            configureEncoder: { encoder in
+                encoder.setFragmentBytes(&doviParams, length: MemoryLayout<DoViParamsBuffer>.size, index: 0)
+                encoder.setFragmentBytes(&compI, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 1)
+                encoder.setFragmentBytes(&compP, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 2)
+                encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
+                encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 4)
+            }
+        ) else { return false }
         
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted() // Ensure completion for consistency
@@ -585,36 +552,23 @@ public class RenderingEngine {
     private func renderToneMap(from sourceTexture: MTLTexture, to destinationTexture: MTLTexture) -> Bool {
         guard let pipelineState = toneMapPipelineState else { return false }
         
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-        
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: destinationTexture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-        
-        // Full screen quad, source size matches dest size usually, or scale
-        let viewport = Viewport(imageWidth: sourceTexture.width, imageHeight: sourceTexture.height, targetWidth: destinationTexture.width, targetHeight: destinationTexture.height)
-        
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(sourceTexture, index: 0)
-        
-        // Params for Tone Mapping shader
-        // inputMax: Content peak (approximate, since we don't have exact pixel max here, but shader might use it? 
-        // Actually toneMapSDRFragmentShader uses 'processHDROutput' which uses 'toneMapBT2390'.
-        // toneMapBT2390 needs inputMax and outputMax.
-        // inputMax shoud be the PEAK brightness of the source content (nits).
-        // We can use self.contentPeakNits.
-        // outputMax = 100.0 (SDR).
-        
         var params = ToneMappingParams(
             inputMin: 0.0,
             inputMax: contentPeakNits,
             outputMin: 0.0,
             outputMax: ToneMapping.sdrPeakNits
         )
-        encoder.setFragmentBytes(&params, length: MemoryLayout<ToneMappingParams>.size, index: 0)
         
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: destinationTexture,
+            viewportWidth: sourceTexture.width,
+            viewportHeight: sourceTexture.height,
+            textures: [sourceTexture],
+            configureEncoder: { encoder in
+                encoder.setFragmentBytes(&params, length: MemoryLayout<ToneMappingParams>.size, index: 0)
+            }
+        ) else { return false }
         
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
@@ -639,19 +593,14 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 8) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.uv, index: 1)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: drawable.texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.uv]
+        ) else { return false }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -671,20 +620,14 @@ public class RenderingEngine {
         guard width > 0 && height > 0 else { return false }
 
         guard let textures = createI420Textures(from: pixelBuffer) else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
-
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(viewport.mtlViewport)
-        encoder.setFragmentTexture(textures.y, index: 0)
-        encoder.setFragmentTexture(textures.u, index: 1)
-        encoder.setFragmentTexture(textures.v, index: 2)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: drawable.texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.u, textures.v]
+        ) else { return false }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -821,22 +764,14 @@ public class RenderingEngine {
         }
 
         guard let pipeline = pipelineState else { return false }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-
-        let renderPassDescriptor = createBasicRenderPassDescriptor(for: texture)
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
-
-        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: texture.width, targetHeight: texture.height)
-
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setViewport(viewport.mtlViewport)
-
-        for (index, tex) in textures.enumerated() {
-            encoder.setFragmentTexture(tex, index: index)
-        }
-
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        encoder.endEncoding()
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipeline,
+            targetTexture: texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: textures
+        ) else { return false }
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
@@ -1010,6 +945,42 @@ private extension RenderingEngine {
         }
     }
     
+    /// Perform a generic render pass with the given configuration
+    func performRenderPass(
+        pipelineState: MTLRenderPipelineState,
+        targetTexture: MTLTexture,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        textures: [MTLTexture],
+        configureEncoder: ((MTLRenderCommandEncoder) -> Void)? = nil
+    ) -> MTLCommandBuffer? {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+        
+        let renderPassDescriptor = createBasicRenderPassDescriptor(for: targetTexture)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return nil }
+        
+        let viewport = Viewport(
+            imageWidth: viewportWidth,
+            imageHeight: viewportHeight,
+            targetWidth: targetTexture.width,
+            targetHeight: targetTexture.height
+        )
+        
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setViewport(viewport.mtlViewport)
+        
+        for (index, texture) in textures.enumerated() {
+            encoder.setFragmentTexture(texture, index: index)
+        }
+        
+        configureEncoder?(encoder)
+        
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        
+        return commandBuffer
+    }
+
     /// Creates a basic render pass descriptor for a texture target
     func createBasicRenderPassDescriptor(for texture: MTLTexture) -> MTLRenderPassDescriptor {
         let descriptor = MTLRenderPassDescriptor()
