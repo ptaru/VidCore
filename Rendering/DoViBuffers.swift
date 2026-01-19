@@ -172,11 +172,6 @@ internal struct DoViParamsBuffer {
         nonlinearMatrix = metadata.nonlinearMatrix
         
         // Combine HPE LMS→RGB inverse with rgb_to_lms from metadata
-        // Matrix is row-major, so we specify rows here
-        // Row 0: { 3.06441879, -2.16597676, 0.10155818}
-        // Row 1: {-0.65612108, 1.78554118, -0.12943749}
-        // Row 2: { 0.01736321, -0.04725154, 1.03004253}
-        // Swift matrix_float3x3(columns:) takes columns, so we transpose
         let hpeLms2Rgb = matrix_float3x3(columns: (
             SIMD3<Float>(3.06441879, -0.65612108, 0.01736321),   // Column 0 = row values at col 0
             SIMD3<Float>(-2.16597676, 1.78554118, -0.04725154), // Column 1 = row values at col 1  

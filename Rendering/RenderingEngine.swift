@@ -568,7 +568,7 @@ public class RenderingEngine {
         encoder.setFragmentTexture(textures.uv, index: 1)
 
         // Calculate dynamic peak brightness
-        let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits()
+        let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits(for: drawable.layer)
 
         // Log peak brightness change
         struct LogState { static var lastPeak: Float = -1.0 }
@@ -636,7 +636,7 @@ public class RenderingEngine {
         encoder.setFragmentBytes(&compT, length: MemoryLayout<DoViReshapeComponentBuffer>.size, index: 3)
         
         // Encode tone mapping params (buffer 4) - use L1 scene brightness if available
-        let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits()
+        let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits(for: drawable.layer)
         let dynamicPeakPQ = metadata.sceneMaxPQ ?? metadata.sourceMaxPQ
         let dynamicPeakNits = ToneMapping.pqToNits(dynamicPeakPQ)
         

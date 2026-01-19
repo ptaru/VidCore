@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import QuartzCore
 
 // MARK: - Tone Mapping Parameters
 
@@ -52,14 +53,26 @@ public enum ToneMapping {
     // MARK: - Display Detection
 
     /// Detects the maximum potential brightness of the current screen in nits.
+    /// - Parameter layer: Optional CAMetalLayer to help identify the screen the content is on.
     /// - Returns: The peak brightness in nits. Returns 100.0 (SDR) if EDR is unavailable.
-    public static func getCurrentScreenPeakNits() -> Float {
-        guard let screen = NSScreen.main else { return 100.0 }
+    public static func getCurrentScreenPeakNits(for layer: CAMetalLayer? = nil) -> Float {
+        var screen: NSScreen?
+
+        if let layer = layer,
+           let view = layer.delegate as? NSView,
+           let window = view.window,
+           let windowScreen = window.screen {
+            screen = windowScreen
+        } else {
+            screen = NSScreen.main
+        }
+
+        guard let targetScreen = screen else { return 100.0 }
 
         // maximumExtendedDynamicRangeColorComponentValue:
         // 1.0 = SDR white (100 nits).
         // e.g. 16.0 = 1600 nits.
-        let scalingFactor = Float(screen.maximumExtendedDynamicRangeColorComponentValue)
+        let scalingFactor = Float(targetScreen.maximumExtendedDynamicRangeColorComponentValue)
 
         // Clamp to reasonable limits
         return max(100.0, scalingFactor * 100.0)
