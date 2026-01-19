@@ -32,13 +32,35 @@ constant float2 quadTexCoords[] = {
     float2(1, 0)
 };
 
-// BT.709 color matrix for YUV to RGB conversion (HDTV standard)
-// Assumes video range Y[16-235], UV[16-240]
-constant float3x3 bt709Matrix = float3x3(
-    float3(1.164,  1.164, 1.164),
-    float3(0.0,   -0.213, 2.112),
-    float3(1.793, -0.533, 0.0)
+// BT.709 Full Range matrix for YUV to RGB conversion
+// Used when YUV has already been scaled to full range [0,1]
+constant float3x3 bt709FullRangeMatrix = float3x3(
+    float3(1.0,    1.0,    1.0),
+    float3(0.0,   -0.1873, 1.8556),
+    float3(1.5748, -0.4681, 0.0)
 );
+
+// MARK: - Video Range Conversion Helpers
+
+// 8-bit video range Y: [16, 235] -> [0, 1]
+inline float videoRangeY8(float y) {
+    return (y - 16.0/256.0) * (256.0/219.0);
+}
+
+// 8-bit video range UV: [16, 240] centered at 128 -> [-0.5, 0.5]
+inline float videoRangeUV8(float uv) {
+    return (uv - 128.0/256.0) * (256.0/224.0);
+}
+
+// 10-bit video range Y: [64, 940] -> [0, 1]
+inline float videoRangeY10(float y) {
+    return (y - 64.0/1024.0) * (1024.0/876.0);
+}
+
+// 10-bit video range UV: [64, 960] centered at 512 -> [-0.5, 0.5]
+inline float videoRangeUV10(float uv) {
+    return (uv - 512.0/1024.0) * (1024.0/896.0);
+}
 
 // MARK: - Vertex Shaders
 
@@ -64,14 +86,9 @@ fragment float4 nv12FragmentShader(
     float y = yTexture.sample(textureSampler, in.texCoord).r;
     float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
     
-    // Convert from video range to full range
-    y = (y - 16.0/255.0) * (255.0/219.0);
-    float u = (uv.x - 128.0/255.0) * (255.0/224.0);
-    float v = (uv.y - 128.0/255.0) * (255.0/224.0);
-    
-    // BT.709 YUV to RGB conversion
-    float3 yuv = float3(y, u, v);
-    float3 rgb = bt709Matrix * yuv;
+    // Convert from video range to full range using helpers
+    float3 yuv = float3(videoRangeY8(y), videoRangeUV8(uv.x), videoRangeUV8(uv.y));
+    float3 rgb = bt709FullRangeMatrix * yuv;
     
     rgb = saturate(rgb);
     
@@ -122,14 +139,9 @@ fragment float4 i420FragmentShader(
     float u = uTexture.sample(textureSampler, in.texCoord).r;
     float v = vTexture.sample(textureSampler, in.texCoord).r;
     
-    // Convert from video range to full range
-    y = (y - 16.0/255.0) * (255.0/219.0);
-    u = (u - 128.0/255.0) * (255.0/224.0); // U is 0-255 in texture, but represents chroma
-    v = (v - 128.0/255.0) * (255.0/224.0);
-    
-    // BT.709 YUV to RGB conversion
-    float3 yuv = float3(y, u, v);
-    float3 rgb = bt709Matrix * yuv;
+    // Convert from video range to full range using helpers
+    float3 yuv = float3(videoRangeY8(y), videoRangeUV8(u), videoRangeUV8(v));
+    float3 rgb = bt709FullRangeMatrix * yuv;
     
     rgb = saturate(rgb);
     
@@ -200,9 +212,9 @@ constant float3x3 bt2020NCMatrix = float3x3(
 
 // BT.2020 → Display P3 color gamut mapping matrix
 constant float3x3 bt2020ToDisplayP3 = float3x3(
-    float3( 1.2249,  -0.0420,  -0.0197),
-    float3(-0.2247,   1.0424,  -0.0786),
-    float3(-0.0002,  -0.0004,   1.0983)
+    float3( 1.3435783, -0.0652975,  0.0028218),
+    float3(-0.2821797,  1.0757879, -0.0195985),
+    float3(-0.0613986, -0.0104905,  1.0167767)
 );
 
 // PQ constants
@@ -330,6 +342,33 @@ float3 toneMapBT2390(float3 linearRGB, constant ToneMappingParams& params) {
     return pqToLinear(pqToneMapped);
 }
 
+// MARK: - HDR Processing Helper
+
+// Processes PQ-encoded BT.2020 RGB through tone mapping and gamut conversion
+// sdrOutput: false = EDR output (linear/100), true = SDR output (gamma 2.2)
+inline float4 processHDROutput(float3 rgbPQ, constant ToneMappingParams& params, bool sdrOutput) {
+    // Clamp negative values from YUV matrix
+    rgbPQ = max(rgbPQ, 0.0);
+    
+    // Convert PQ to linear for tone mapping
+    float3 linearSrc = pqToLinear(rgbPQ);
+    
+    // Apply BT.2390 tone mapping
+    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
+    
+    // Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
+    
+    if (sdrOutput) {
+        // SDR: normalize to 100 nits and apply gamma 2.2
+        float3 sRGB = pow(saturate(linearDisplayP3 / 100.0), 1.0 / 2.2);
+        return float4(sRGB, 1.0);
+    }
+    
+    // EDR: output linear where 1.0 = 100 nits
+    return float4(linearDisplayP3 / 100.0, 1.0);
+}
+
 // MARK: - HDR Fragment Shaders
 
 // HDR Fragment shader for NV12/P010 10-bit bi-planar
@@ -342,32 +381,15 @@ fragment float4 hdrNV12FragmentShader(
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // Sample 10-bit YUV
-    float y = yTexture.sample(textureSampler, in.texCoord).r;
+    // Sample 10-bit YUV and convert from video range
+    float y = videoRangeY10(yTexture.sample(textureSampler, in.texCoord).r);
     float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
+    float u = videoRangeUV10(uv.x);
+    float v = videoRangeUV10(uv.y);
     
-    // 10-bit video range conversion
-    y = (y - 64.0/1023.0) * (1023.0/876.0);
-    float u = (uv.x - 512.0/1023.0) * (1023.0/896.0);
-    float v = (uv.y - 512.0/1023.0) * (1023.0/896.0);
-    
-    // BT.2020 YUV to RGB (result is still PQ-encoded, [0,1] range roughly)
+    // BT.2020 YUV to RGB PQ, then HDR processing
     float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
-    rgbPQ = max(rgbPQ, 0.0); // Clamp negative only
-
-    // Pipeline: rgbPQ -> Linear -> ToneMap -> Linear Result.
-    // Note: toneMapBT2390 accepts linear input for compatibility, even though it processes in PQ space.
-    
-    float3 linearSrc = pqToLinear(rgbPQ);
-    
-    // Apply Tone Mapping
-    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
-    
-    // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
-    
-    // Output for macOS EDR (1.0 = 100 nits)
-    return float4(linearDisplayP3 / 100.0, 1.0);
+    return processHDROutput(rgbPQ, params, false);
 }
 
 // HDR Fragment shader for I420/YUV420P10 10-bit tri-planar
@@ -380,30 +402,14 @@ fragment float4 hdrI420FragmentShader(
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // Sample 10-bit YUV
-    float y = yTexture.sample(textureSampler, in.texCoord).r;
-    float u = uTexture.sample(textureSampler, in.texCoord).r;
-    float v = vTexture.sample(textureSampler, in.texCoord).r;
+    // Sample 10-bit YUV and convert from video range
+    float y = videoRangeY10(yTexture.sample(textureSampler, in.texCoord).r);
+    float u = videoRangeUV10(uTexture.sample(textureSampler, in.texCoord).r);
+    float v = videoRangeUV10(vTexture.sample(textureSampler, in.texCoord).r);
     
-    // 10-bit video range conversion
-    y = (y - 64.0/1023.0) * (1023.0/876.0);
-    u = (u - 512.0/1023.0) * (1023.0/896.0);
-    v = (v - 512.0/1023.0) * (1023.0/896.0);
-    
-    // BT.2020 YUV to RGB PQ
+    // BT.2020 YUV to RGB PQ, then HDR processing
     float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
-    rgbPQ = max(rgbPQ, 0.0);
-    
-    // Convert to Linear
-    float3 linearSrc = pqToLinear(rgbPQ);
-    
-    // Tone Map
-    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
-    
-    // Gamut mapping
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
-    
-    return float4(linearDisplayP3 / 100.0, 1.0);
+    return processHDROutput(rgbPQ, params, false);
 }
 
 // HDR10 to SDR Fragment shader for NV12/P010 10-bit bi-planar
@@ -416,33 +422,15 @@ fragment float4 hdrNV12SDRFragmentShader(
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // Sample 10-bit YUV
-    float y = yTexture.sample(textureSampler, in.texCoord).r;
+    // Sample 10-bit YUV and convert from video range
+    float y = videoRangeY10(yTexture.sample(textureSampler, in.texCoord).r);
     float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
+    float u = videoRangeUV10(uv.x);
+    float v = videoRangeUV10(uv.y);
     
-    // 10-bit video range conversion
-    y = (y - 64.0/1023.0) * (1023.0/876.0);
-    float u = (uv.x - 512.0/1023.0) * (1023.0/896.0);
-    float v = (uv.y - 512.0/1023.0) * (1023.0/896.0);
-    
-    // BT.2020 YUV to RGB (result is still PQ-encoded)
+    // BT.2020 YUV to RGB PQ, then HDR processing with SDR output
     float3 rgbPQ = bt2020NCMatrix * float3(y, u, v);
-    rgbPQ = max(rgbPQ, 0.0);
-
-    // Convert PQ to linear
-    float3 linearSrc = pqToLinear(rgbPQ);
-    
-    // Apply BT.2390 tone mapping (params.outputMax should be 100 for SDR)
-    float3 linearToneMapped = toneMapBT2390(linearSrc, params);
-    
-    // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
-    
-    // For SDR: normalize to 100 nits and apply gamma for sRGB
-    float3 normalizedRGB = linearDisplayP3 / 100.0;
-    float3 sRGB = pow(saturate(normalizedRGB), 1.0 / 2.2);
-    
-    return float4(sRGB, 1.0);
+    return processHDROutput(rgbPQ, params, true);
 }
 
 // =============================================================================
@@ -583,28 +571,14 @@ fragment float4 doviNV12FragmentShader(
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
     // Sample 10-bit IPT (Profile 5 is ALWAYS full range)
-    // IPT values are all in [0,1] range after normalization
     float I = yTexture.sample(textureSampler, in.texCoord).r;
     float2 PT = uvTexture.sample(textureSampler, in.texCoord).rg;
     
-    // IPT signal: all channels normalized to [0,1]
-    // Do NOT subtract 0.5 from P/T like YCbCr - DoVi IPT is not chroma-centered!
-    float3 ipt = float3(I, PT.x, PT.y);
-    
     // DoVi processing → outputs PQ-encoded RGB in BT.2020
-    float3 rgbPQ = processDoVi(ipt, doviParams, compI, compP, compT);
+    float3 rgbPQ = processDoVi(float3(I, PT.x, PT.y), doviParams, compI, compP, compT);
     
-    // Convert to linear for tone mapping
-    float3 linearSrc = pqToLinear(rgbPQ);
-    
-    // Apply BT.2390 tone mapping
-    float3 linearToneMapped = toneMapBT2390(linearSrc, toneParams);
-    
-    // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
-    
-    // Output for macOS EDR (1.0 = 100 nits)
-    return float4(linearDisplayP3 / 100.0, 1.0);
+    // HDR processing with EDR output
+    return processHDROutput(rgbPQ, toneParams, false);
 }
 
 // DoVi Profile 5 Fragment shader for SDR output (thumbnail generation)
@@ -625,24 +599,9 @@ fragment float4 doviNV12SDRFragmentShader(
     float I = yTexture.sample(textureSampler, in.texCoord).r;
     float2 PT = uvTexture.sample(textureSampler, in.texCoord).rg;
     
-    float3 ipt = float3(I, PT.x, PT.y);
-    
     // DoVi processing → outputs PQ-encoded RGB in BT.2020
-    float3 rgbPQ = processDoVi(ipt, doviParams, compI, compP, compT);
+    float3 rgbPQ = processDoVi(float3(I, PT.x, PT.y), doviParams, compI, compP, compT);
     
-    // Convert to linear for tone mapping
-    float3 linearSrc = pqToLinear(rgbPQ);
-    
-    // Apply BT.2390 tone mapping (tone map to SDR range - 100 nits max)
-    float3 linearToneMapped = toneMapBT2390(linearSrc, toneParams);
-    
-    // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
-    
-    // For SDR output: normalize to 100 nits and apply gamma for sRGB display
-    // Simple gamma 2.2 approximation for SDR
-    float3 normalizedRGB = linearDisplayP3 / 100.0;
-    float3 sRGB = pow(saturate(normalizedRGB), 1.0 / 2.2);
-    
-    return float4(sRGB, 1.0);
+    // HDR processing with SDR output
+    return processHDROutput(rgbPQ, toneParams, true);
 }

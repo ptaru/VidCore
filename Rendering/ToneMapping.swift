@@ -56,10 +56,10 @@ public enum ToneMapping {
     public static func getCurrentScreenPeakNits() -> Float {
         guard let screen = NSScreen.main else { return 100.0 }
 
-        // maximumPotentialExtendedDynamicRangeColorComponentValue:
+        // maximumExtendedDynamicRangeColorComponentValue:
         // 1.0 = SDR white (100 nits).
         // e.g. 16.0 = 1600 nits.
-        let scalingFactor = Float(screen.maximumPotentialExtendedDynamicRangeColorComponentValue)
+        let scalingFactor = Float(screen.maximumExtendedDynamicRangeColorComponentValue)
 
         // Clamp to reasonable limits
         return max(100.0, scalingFactor * 100.0)

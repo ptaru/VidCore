@@ -506,102 +506,31 @@ public class RenderingEngine {
     private func renderHDRNV12PixelBufferSDR(
         _ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable
     ) -> Bool {
-        guard let pipelineState = hdrNV12SDRPipelineState,
-              let textureCache = textureCache
-        else {
-            return false
-        }
+        guard let pipelineState = hdrNV12SDRPipelineState else { return false }
         
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-        
         guard width > 0 && height > 0 else { return false }
         
-        // Create Y texture (plane 0, r16Unorm for 10-bit)
-        var yTextureCv: CVMetalTexture?
-        var result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pixelBuffer,
-            nil,
-            .r16Unorm,
-            width,
-            height,
-            0,
-            &yTextureCv
-        )
-        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
-              let yTexture = CVMetalTextureGetTexture(yTextureCv)
-        else {
-            return false
-        }
-        
-        // Create UV texture (plane 1, rg16Unorm for 10-bit)
-        var uvTextureCv: CVMetalTexture?
-        result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pixelBuffer,
-            nil,
-            .rg16Unorm,
-            width / 2,
-            height / 2,
-            1,
-            &uvTextureCv
-        )
-        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
-              let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
-        else {
-            return false
-        }
-        
+        guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
         
-        // Setup render pass
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
         
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
-        else {
-            return false
-        }
-        
-        // Calculate viewport for aspect-fit scaling
-        let drawableWidth = Float(drawable.texture.width)
-        let drawableHeight = Float(drawable.texture.height)
-        let imageWidth = Float(width)
-        let imageHeight = Float(height)
-        
-        let scaleX = drawableWidth / imageWidth
-        let scaleY = drawableHeight / imageHeight
-        let scale = min(scaleX, scaleY)
-        
-        let scaledWidth = imageWidth * scale
-        let scaledHeight = imageHeight * scale
-        let offsetX = (drawableWidth - scaledWidth) / 2
-        let offsetY = (drawableHeight - scaledHeight) / 2
+        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
         
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(MTLViewport(
-            originX: Double(offsetX),
-            originY: Double(offsetY),
-            width: Double(scaledWidth),
-            height: Double(scaledHeight),
-            znear: 0, zfar: 1
-        ))
-        
-        encoder.setFragmentTexture(yTexture, index: 0)
-        encoder.setFragmentTexture(uvTexture, index: 1)
+        encoder.setViewport(viewport.mtlViewport)
+        encoder.setFragmentTexture(textures.y, index: 0)
+        encoder.setFragmentTexture(textures.uv, index: 1)
         
         // Tone mapping params - map to SDR (100 nits)
         var toneParams = ToneMappingParams(
             inputMin: 0.0,
             inputMax: contentPeakNits,
             outputMin: 0.0,
-            outputMax: ToneMapping.sdrPeakNits  // SDR output - 100 nits max
+            outputMax: ToneMapping.sdrPeakNits
         )
         encoder.setFragmentBytes(&toneParams, length: MemoryLayout<ToneMappingParams>.size, index: 0)
         
@@ -619,102 +548,26 @@ public class RenderingEngine {
     private func renderHDRNV12PixelBuffer(
         _ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable
     ) -> Bool {
-        guard let pipelineState = hdrNV12PipelineState,
-            let textureCache = textureCache
-        else {
-            return false
-        }
+        guard let pipelineState = hdrNV12PipelineState else { return false }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
         guard width > 0 && height > 0 else { return false }
 
-        // Create Y texture (plane 0, r16Unorm for 10-bit)
-        var yTextureCv: CVMetalTexture?
-        var result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pixelBuffer,
-            nil,
-            .r16Unorm,  // 10-bit needs 16-bit texture
-            width,
-            height,
-            0,  // Y plane
-            &yTextureCv
-        )
-        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
-            let yTexture = CVMetalTextureGetTexture(yTextureCv)
-        else {
-            return false
-        }
+        guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
-        // Create UV texture (plane 1, rg16Unorm for 10-bit, half resolution)
-        var uvTextureCv: CVMetalTexture?
-        result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pixelBuffer,
-            nil,
-            .rg16Unorm,  // 10-bit needs 16-bit texture
-            width / 2,
-            height / 2,
-            1,  // UV plane
-            &uvTextureCv
-        )
-        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
-            let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
-        else {
-            return false
-        }
+        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            return false
-        }
-
-        // Setup render pass
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0, green: 0, blue: 0, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
-        else {
-            return false
-        }
-
-        // Calculate viewport for aspect-fit scaling
-        let drawableWidth = Float(drawable.texture.width)
-        let drawableHeight = Float(drawable.texture.height)
-        let imageWidth = Float(width)
-        let imageHeight = Float(height)
-
-        let scaleX = drawableWidth / imageWidth
-        let scaleY = drawableHeight / imageHeight
-        let scale = min(scaleX, scaleY)
-
-        let scaledWidth = imageWidth * scale
-        let scaledHeight = imageHeight * scale
-        let offsetX = (drawableWidth - scaledWidth) / 2
-        let offsetY = (drawableHeight - scaledHeight) / 2
+        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
 
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(
-            MTLViewport(
-                originX: Double(offsetX),
-                originY: Double(offsetY),
-                width: Double(scaledWidth),
-                height: Double(scaledHeight),
-                znear: 0,
-                zfar: 1
-            ))
-        encoder.setFragmentTexture(yTexture, index: 0)
-        encoder.setFragmentTexture(uvTexture, index: 1)
+        encoder.setViewport(viewport.mtlViewport)
+        encoder.setFragmentTexture(textures.y, index: 0)
+        encoder.setFragmentTexture(textures.uv, index: 1)
 
         // Calculate dynamic peak brightness
-        // Current macOS EDR head room can change based on brightness slider and ambient light
         let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits()
 
         // Log peak brightness change
@@ -922,66 +775,24 @@ public class RenderingEngine {
     private func renderNV12PixelBufferFloat16(
         _ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable
     ) -> Bool {
-        guard let pipelineState = nv12Float16PipelineState,
-            let textureCache = textureCache
-        else {
-            return false
-        }
+        guard let pipelineState = nv12Float16PipelineState else { return false }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
         guard width > 0 && height > 0 else { return false }
 
-        // Create Y texture
-        var yTextureCv: CVMetalTexture?
-        var result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .r8Unorm, width, height, 0, &yTextureCv
-        )
-        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
-            let yTexture = CVMetalTextureGetTexture(yTextureCv)
-        else { return false }
-
-        // Create UV texture
-        var uvTextureCv: CVMetalTexture?
-        result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .rg8Unorm, width / 2, height / 2, 1, &uvTextureCv
-        )
-        guard result == kCVReturnSuccess, let uvTextureCv = uvTextureCv,
-            let uvTexture = CVMetalTextureGetTexture(uvTextureCv)
-        else { return false }
-
+        guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 8) else { return false }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0, green: 0, blue: 0, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
-        else { return false }
-
-        let drawableWidth = Float(drawable.texture.width)
-        let drawableHeight = Float(drawable.texture.height)
-        let scaleX = drawableWidth / Float(width)
-        let scaleY = drawableHeight / Float(height)
-        let scale = min(scaleX, scaleY)
-        let scaledWidth = Float(width) * scale
-        let scaledHeight = Float(height) * scale
-        let offsetX = (drawableWidth - scaledWidth) / 2
-        let offsetY = (drawableHeight - scaledHeight) / 2
+        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
 
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(
-            MTLViewport(
-                originX: Double(offsetX), originY: Double(offsetY),
-                width: Double(scaledWidth), height: Double(scaledHeight), znear: 0, zfar: 1))
-        encoder.setFragmentTexture(yTexture, index: 0)
-        encoder.setFragmentTexture(uvTexture, index: 1)
+        encoder.setViewport(viewport.mtlViewport)
+        encoder.setFragmentTexture(textures.y, index: 0)
+        encoder.setFragmentTexture(textures.uv, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
@@ -994,75 +805,25 @@ public class RenderingEngine {
     private func renderI420PixelBufferFloat16(
         _ pixelBuffer: CVPixelBuffer, to drawable: CAMetalDrawable
     ) -> Bool {
-        guard let pipelineState = i420Float16PipelineState,
-            let textureCache = textureCache
-        else {
-            return false
-        }
+        guard let pipelineState = i420Float16PipelineState else { return false }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
         guard width > 0 && height > 0 else { return false }
 
-        // Create Y, U, V textures
-        var yTextureCv: CVMetalTexture?
-        var result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .r8Unorm, width, height, 0, &yTextureCv
-        )
-        guard result == kCVReturnSuccess, let yTextureCv = yTextureCv,
-            let yTexture = CVMetalTextureGetTexture(yTextureCv)
-        else { return false }
-
-        var uTextureCv: CVMetalTexture?
-        result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .r8Unorm, width / 2, height / 2, 1, &uTextureCv
-        )
-        guard result == kCVReturnSuccess, let uTextureCv = uTextureCv,
-            let uTexture = CVMetalTextureGetTexture(uTextureCv)
-        else { return false }
-
-        var vTextureCv: CVMetalTexture?
-        result = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .r8Unorm, width / 2, height / 2, 2, &vTextureCv
-        )
-        guard result == kCVReturnSuccess, let vTextureCv = vTextureCv,
-            let vTexture = CVMetalTextureGetTexture(vTextureCv)
-        else { return false }
-
+        guard let textures = createI420Textures(from: pixelBuffer) else { return false }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0, green: 0, blue: 0, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        let renderPassDescriptor = createBasicRenderPassDescriptor(for: drawable.texture)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return false }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
-        else { return false }
-
-        let drawableWidth = Float(drawable.texture.width)
-        let drawableHeight = Float(drawable.texture.height)
-        let scaleX = drawableWidth / Float(width)
-        let scaleY = drawableHeight / Float(height)
-        let scale = min(scaleX, scaleY)
-        let scaledWidth = Float(width) * scale
-        let scaledHeight = Float(height) * scale
-        let offsetX = (drawableWidth - scaledWidth) / 2
-        let offsetY = (drawableHeight - scaledHeight) / 2
+        let viewport = Viewport(imageWidth: width, imageHeight: height, targetWidth: drawable.texture.width, targetHeight: drawable.texture.height)
 
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setViewport(
-            MTLViewport(
-                originX: Double(offsetX), originY: Double(offsetY),
-                width: Double(scaledWidth), height: Double(scaledHeight), znear: 0, zfar: 1))
-        encoder.setFragmentTexture(yTexture, index: 0)
-        encoder.setFragmentTexture(uTexture, index: 1)
-        encoder.setFragmentTexture(vTexture, index: 2)
+        encoder.setViewport(viewport.mtlViewport)
+        encoder.setFragmentTexture(textures.y, index: 0)
+        encoder.setFragmentTexture(textures.u, index: 1)
+        encoder.setFragmentTexture(textures.v, index: 2)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
