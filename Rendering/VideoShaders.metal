@@ -278,10 +278,8 @@ float3 toneMapBT2390(float3 pq, constant ToneMappingParams& params) {
     float minLum = (pqOutputMin - pqInputMin) / (pqInputMax - pqInputMin);
     float maxLum = (pqOutputMax - pqInputMin) / (pqInputMax - pqInputMin);
     
-    // knee_offset default 1.0 (hardcoded in ks calculation below) 
-    // Calculate knee point (ks) based on maxLum.
-    // Using default offset = 1.0: ks = (1 + offset) * maxLum - offset = 2.0 * maxLum - 1.0
-    float ks = (2.0 * maxLum) - 1.0; 
+    // knee_offset
+    float ks = (1.5 * maxLum) - 0.5; 
     
     float bp = minLum > 0 ? min(1.0 / minLum, 4.0) : 4.0;
     
