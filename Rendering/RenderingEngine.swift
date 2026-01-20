@@ -93,8 +93,8 @@ public class RenderingEngine {
     // DoVi Profile 5 (IPTPQc2)
     private var doviNV12PipelineState: MTLRenderPipelineState?
 
-    // Generic Tone Mapping
-    private var toneMapPipelineState: MTLRenderPipelineState?
+    // Generic Tone Mapping (RGBA8 for CGImage export)
+    private var toneMapRGBA8PipelineState: MTLRenderPipelineState?
 
     // MARK: - Initialization
 
@@ -154,7 +154,7 @@ public class RenderingEngine {
             PipelineConfig(fragmentFunction: "nv12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.nv12Float16PipelineState),
             PipelineConfig(fragmentFunction: "i420FragmentShader", pixelFormat: .rgba16Float, keyPath: \.i420Float16PipelineState),
             PipelineConfig(fragmentFunction: "doviNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.doviNV12PipelineState),
-            PipelineConfig(fragmentFunction: "toneMapSDRFragmentShader", pixelFormat: .bgra8Unorm, keyPath: \.toneMapPipelineState)
+            PipelineConfig(fragmentFunction: "toneMapRGBA8FragmentShader", pixelFormat: .rgba8Unorm, keyPath: \.toneMapRGBA8PipelineState)
         ]
 
         for config in configs {
@@ -603,13 +603,22 @@ public class RenderingEngine {
     
     // MARK: - Tone Mapping (Pass 2)
     
-    /// Renders an intermediate EDR texture (Linear P3) to SDR (BGRA8) using generic tone mapping
-    private func renderToneMap(from sourceTexture: MTLTexture, to destinationTexture: MTLTexture) -> Bool {
-        guard let pipelineState = toneMapPipelineState else { return false }
+    /// Creates an intermediate EDR texture for 2-pass HDR→SDR rendering
+    private func createIntermediateEDRTexture(width: Int, height: Int) -> MTLTexture? {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        return device.makeTexture(descriptor: desc)
+    }
+    
+    /// Tone maps EDR to RGBA8 (for CGImage export, avoids CPU byte swizzle)
+    private func renderToneMapRGBA8(from sourceTexture: MTLTexture, to destinationTexture: MTLTexture, contentPeak: Float) -> Bool {
+        guard let pipelineState = toneMapRGBA8PipelineState else { return false }
         
         var params = ToneMappingParams(
             inputMin: 0.0,
-            inputMax: contentPeakNits,
+            inputMax: contentPeak,
             outputMin: 0.0,
             outputMax: ToneMapping.sdrPeakNits
         )
@@ -627,7 +636,6 @@ public class RenderingEngine {
         
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-        
         return true
     }
     
@@ -706,92 +714,41 @@ public class RenderingEngine {
         let pixelBuffer = frame.pixelBuffer
         let sourceWidth = CVPixelBufferGetWidth(pixelBuffer)
         let sourceHeight = CVPixelBufferGetHeight(pixelBuffer)
-
         guard sourceWidth > 0, sourceHeight > 0 else { return nil }
 
-        // Output size
-        let outputWidth: Int
-        let outputHeight: Int
-        if let size = targetSize {
-            outputWidth = Int(size.width)
-            outputHeight = Int(size.height)
-        } else {
-            outputWidth = sourceWidth
-            outputHeight = sourceHeight
-        }
-
+        let outputWidth = targetSize.map { Int($0.width) } ?? sourceWidth
+        let outputHeight = targetSize.map { Int($0.height) } ?? sourceHeight
         guard outputWidth > 0, outputHeight > 0 else { return nil }
 
-        // Offscreen target
-        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: outputWidth,
-            height: outputHeight,
-            mipmapped: false
-        )
-        textureDescriptor.usage = [.renderTarget, .shaderRead]
-        textureDescriptor.storageMode = .shared  // Needed for CPU readback
+        // Create RGBA8 output texture (for direct CGImage export without byte swizzle)
+        let outputDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
+        outputDesc.usage = [.renderTarget, .shaderRead]
+        outputDesc.storageMode = .shared
+        guard let outputTexture = device.makeTexture(descriptor: outputDesc) else { return nil }
 
-        guard let outputTexture = device.makeTexture(descriptor: textureDescriptor) else {
-            return nil
+        // SDR path: direct render (no tone mapping needed)
+        guard frame.isHDR || frame.doviMetadata != nil else {
+            guard renderPixelBufferToTexture(pixelBuffer, to: outputTexture) else { return nil }
+            return createCGImage(from: outputTexture)
         }
 
-        // DoVi pipeline
-            // DoVi pipeline (2-pass)
+        // HDR/DoVi: 2-pass (EDR intermediate → tone-mapped RGBA8)
+        guard let intermediateTexture = createIntermediateEDRTexture(width: outputWidth, height: outputHeight) else { return nil }
+
+        let contentPeak: Float
         if let doviMetadata = frame.doviMetadata {
-            // Create intermediate EDR texture
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: outputWidth, height: outputHeight, mipmapped: false)
-            desc.usage = [.renderTarget, .shaderRead]
-            desc.storageMode = .private
-            guard let intermediateTexture = device.makeTexture(descriptor: desc) else { return nil }
-            
-            // Pass 1: DoVi -> EDR (Linear P3)
-            // Use high peak nits to avoid tone mapping in the first pass
-            if renderDoViToTexture(pixelBuffer, metadata: doviMetadata, to: intermediateTexture, targetPeakNits: 10000.0) {
-                 // Pass 2: EDR -> SDR (Tone Mapped)
-                 if renderToneMap(from: intermediateTexture, to: outputTexture) {
-                     // Success
-                 } else { return nil }
-            } else { return nil }
-        } else if frame.isHDR {
-            // Check for HLG (colorTransfer == 18)
-            let isHLG = frame.colorTransfer == 18
-            
-            // HDR pipeline (2-pass)
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: outputWidth, height: outputHeight, mipmapped: false)
-            desc.usage = [.renderTarget, .shaderRead]
-            desc.storageMode = .private
-            guard let intermediateTexture = device.makeTexture(descriptor: desc) else { return nil }
-            
-            if isHLG {
-                // HLG -> 2-pass (Reference + Tone Map to SDR)
-                if renderHLGToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.hlgDefaultPeakNits) {
-                    let prevPeak = self.contentPeakNits
-                    self.contentPeakNits = ToneMapping.hlgDefaultPeakNits
-                    if renderToneMap(from: intermediateTexture, to: outputTexture) {
-                        self.contentPeakNits = prevPeak
-                        // Success
-                    } else {
-                        self.contentPeakNits = prevPeak
-                        return nil
-                    }
-                } else { return nil }
-            } else {
-                // PQ/HDR10 path
-                if renderHDRToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: 10000.0) {
-                    if renderToneMap(from: intermediateTexture, to: outputTexture) {
-                        // Success
-                    } else { return nil }
-                } else { return nil }
-            }
-        } else {
-            // Render pixel buffer (SDR)
-            if !renderPixelBufferToTexture(pixelBuffer, to: outputTexture) {
-                return nil
-            }
+            guard renderDoViToTexture(pixelBuffer, metadata: doviMetadata, to: intermediateTexture, targetPeakNits: ToneMapping.passthroughPeakNits) else { return nil }
+            contentPeak = ToneMapping.pqToNits(doviMetadata.sceneMaxPQ ?? doviMetadata.sourceMaxPQ)
+        } else if frame.colorTransfer == 18 {  // HLG
+            guard renderHLGToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.hlgDefaultPeakNits) else { return nil }
+            contentPeak = ToneMapping.hlgDefaultPeakNits
+        } else {  // PQ/HDR10
+            guard renderHDRToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.passthroughPeakNits) else { return nil }
+            contentPeak = self.contentPeakNits
         }
 
-        // Create CGImage
+        guard renderToneMapRGBA8(from: intermediateTexture, to: outputTexture, contentPeak: contentPeak) else { return nil }
         return createCGImage(from: outputTexture)
     }
 
@@ -923,11 +880,11 @@ public class RenderingEngine {
         return true
     }
 
-    /// Creates a CGImage from a Metal texture
+    /// Creates a CGImage from a Metal texture (expects RGBA8 format)
     private func createCGImage(from texture: MTLTexture) -> CGImage? {
         let width = texture.width
         let height = texture.height
-        let bytesPerRow = width * 4  // 4 bpp
+        let bytesPerRow = width * 4
 
         var pixelData = [UInt8](repeating: 0, count: bytesPerRow * height)
 
@@ -940,13 +897,7 @@ public class RenderingEngine {
             mipmapLevel: 0
         )
 
-        // Convert BGRA to RGBA
-        for i in stride(from: 0, to: pixelData.count, by: 4) {
-            let b = pixelData[i]
-            let r = pixelData[i + 2]
-            pixelData[i] = r
-            pixelData[i + 2] = b
-        }
+        // No byte swizzle needed — texture is already RGBA8
 
         let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)

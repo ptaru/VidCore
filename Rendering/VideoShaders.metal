@@ -615,27 +615,20 @@ fragment float4 doviNV12FragmentShader(
     return processHDROutput(rgbPQ, toneParams, false);
 }
 
-// Generic Tone Mapping Shader (Linear P3 -> SDR)
-// Takes an EDR texture (Linear P3, where 1.0 = 100 nits) and tone maps to SDR (BGRA8)
-fragment float4 toneMapSDRFragmentShader(
+// RGBA8 Tone Mapping Shader (for CGImage export)
+// Same as toneMapSDRFragmentShader but swaps B↔R for direct CGImage compatibility
+fragment float4 toneMapRGBA8FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> inputTexture [[texture(0)]],
     constant ToneMappingParams& toneParams [[buffer(0)]]
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     
-    // 1. Sample Linear P3 EDR input
     float4 rgba = inputTexture.sample(textureSampler, in.texCoord);
-    float3 linearP3 = rgba.rgb; // 1.0 = 100 nits
-    
-    // 2. Convert to Linear BT.2020 (required for PQ conversion)
+    float3 linearP3 = rgba.rgb;
     float3 linearBT2020 = displayP3ToBT2020Matrix * linearP3;
-    
-    // 3. Convert to PQ BT.2020 (0-1 range) for tone mapping
-    // linearToPQ expects input in 10000 nits scale, so multiply by 100
-    // (since our EDR is normalized to 100 nits = 1.0)
     float3 pqBT2020 = linearToPQ(linearBT2020 * 100.0);
     
-    // 4. Run through standard HDR output processing with sdrOutput=true
+    // Process with SDR output — no swap needed since rgba8Unorm preserves RGB order
     return processHDROutput(pqBT2020, toneParams, true);
 }

@@ -88,4 +88,7 @@ public enum ToneMapping {
     
     /// Default HLG reference peak brightness in nits (1000 nits).
     public static let hlgDefaultPeakNits: Float = 1000.0
+    
+    /// Sentinel value for "no tone mapping" in first pass (10000 nits = max PQ).
+    public static let passthroughPeakNits: Float = 10000.0
 }
