@@ -433,7 +433,8 @@ inline float4 processHLGOutput(float3 rgbHLG, constant ToneMappingParams& params
     rgbHLG = max(rgbHLG, 0.0);
     
     // 1. Render to 1000-nit REFERENCE (consistent gamma)
-    float3 linearReference = hlgToLinear(rgbHLG, 1000.0);
+    // Use params.inputMax to control the HLG reference peak (default 1000, 203 for graphics/thumbnails)
+    float3 linearReference = hlgToLinear(rgbHLG, params.inputMax);
     
     // 2. Convert to PQ domain for BT.2390 tone mapping
     float3 pqReference = linearToPQ(linearReference);

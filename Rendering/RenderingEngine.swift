@@ -415,7 +415,8 @@ public class RenderingEngine {
                 
                 if isHLG {
                     self.currentRenderMode = "HLG"
-                    if renderHLGToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak) {
+                    // Use standard 1000 nits reference for playback
+                    if renderHLGToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak, contentPeakNits: ToneMapping.hlgDefaultPeakNits) {
                         if let commandBuffer = commandQueue.makeCommandBuffer() {
                             commandBuffer.present(drawable)
                             commandBuffer.commit()
@@ -512,7 +513,7 @@ public class RenderingEngine {
     
     /// GPU-accelerated HLG rendering with proper OETF^-1, OOTF, and BT.2390 tone mapping
     private func renderHLGToTexture(
-        _ pixelBuffer: CVPixelBuffer, to texture: MTLTexture, targetPeakNits: Float
+        _ pixelBuffer: CVPixelBuffer, to texture: MTLTexture, targetPeakNits: Float, contentPeakNits: Float
     ) -> Bool {
         guard let pipelineState = hlgNV12PipelineState else { return false }
         
@@ -522,10 +523,10 @@ public class RenderingEngine {
         
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
         
-        // HLG uses 1000-nit reference; BT.2390 maps to display peak
+        // HLG uses variable reference; BT.2390 maps to display peak
         var params = ToneMappingParams(
             inputMin: 0.0,
-            inputMax: ToneMapping.hlgDefaultPeakNits,  // 1000.0
+            inputMax: contentPeakNits,
             outputMin: 0.0,
             outputMax: targetPeakNits
         )
@@ -741,8 +742,10 @@ public class RenderingEngine {
             guard renderDoViToTexture(pixelBuffer, metadata: doviMetadata, to: intermediateTexture, targetPeakNits: ToneMapping.passthroughPeakNits) else { return nil }
             contentPeak = ToneMapping.pqToNits(doviMetadata.sceneMaxPQ ?? doviMetadata.sourceMaxPQ)
         } else if frame.colorTransfer == 18 {  // HLG
-            guard renderHLGToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.hlgDefaultPeakNits) else { return nil }
-            contentPeak = ToneMapping.hlgDefaultPeakNits
+            // Use 203 nits (graphics white) for CGImage/thumbnail exports to avoid blown-out look
+            let hlgPeak: Float = 203.0 
+            guard renderHLGToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.passthroughPeakNits, contentPeakNits: hlgPeak) else { return nil }
+            contentPeak = hlgPeak
         } else {  // PQ/HDR10
             guard renderHDRToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.passthroughPeakNits) else { return nil }
             contentPeak = self.contentPeakNits
