@@ -404,13 +404,6 @@ constant float hlg_a = 0.17883277;
 constant float hlg_b = 0.28466892;
 constant float hlg_c = 0.55991073;
 
-// HLG-specific tone mapping parameters
-struct HLGToneMappingParams {
-    float displayPeakNits;  // Actual display peak
-    float contentPeakNits;  // Always 1000 for HLG reference
-    float outputPeakNits;   // Target output (same as displayPeak for EDR)
-};
-
 // HLG OETF^-1: HLG signal [0,1] -> Scene-linear [0,1]
 float3 hlgOETFInverse(float3 hlg) {
     return mix(
@@ -436,34 +429,23 @@ float3 hlgToLinear(float3 hlg, float displayPeak) {
 
 // Processes HLG-encoded BT.2020 RGB using "Reference + Tone Map" strategy:
 // 1. Render to fixed 1000-nit reference (consistent gamma across displays)
-// 2. For EDR output, we skip additional tone mapping (done in shader output)
-// Note: The actual tone mapping from 1000 nits to display peak is handled
-// by passing the output peak in HLGToneMappingParams for the BT.2390 shader
-inline float4 processHLGOutput(float3 rgbHLG, constant HLGToneMappingParams& params, bool sdrOutput) {
+// 2. Convert to PQ and apply BT.2390 tone mapping
+// 3. Gamut map to Display P3
+inline float4 processHLGOutput(float3 rgbHLG, constant ToneMappingParams& params, bool sdrOutput) {
     rgbHLG = max(rgbHLG, 0.0);
     
     // 1. Render to 1000-nit REFERENCE (consistent gamma)
     float3 linearReference = hlgToLinear(rgbHLG, 1000.0);
     
-    // 2. For EDR, we output the 1000-nit reference and let display handle it
-    // For SDR, we need to compress to 100 nits
-    // The BT.2390 tone mapping is applied when outputPeakNits < 1000
-    // Since we can't call toneMapBT2390 directly (address space issue),
-    // we use a simplified approach for HLG:
-    // - For EDR displays (outputPeakNits >= 100), output linear scaled
-    // - For SDR (outputPeakNits < 100 or sdrOutput), compress to SDR
+    // 2. Convert to PQ domain for BT.2390 tone mapping
+    float3 pqReference = linearToPQ(linearReference);
     
-    // Simple compression for when display peak < content peak
-    if (params.outputPeakNits < 1000.0 && params.outputPeakNits > 0.0) {
-        // Scale to display peak (simple linear compression for now)
-        // A more sophisticated approach would use BT.2390 but that requires
-        // passing constant buffer which isn't possible inline
-        float scale = params.outputPeakNits / 1000.0;
-        linearReference *= scale;
-    }
+    // 3. Apply BT.2390 tone mapping (returns linear nits)
+    //    params.inputMax = 1000.0 (HLG reference), params.outputMax = display peak
+    float3 linearToneMapped = toneMapBT2390(pqReference, params);
     
-    // Gamut mapping: BT.2020 → Display P3
-    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearReference;
+    // 4. Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearToneMapped;
     
     if (sdrOutput) {
         return float4(pow(saturate(linearDisplayP3 / 100.0), 1.0 / 2.2), 1.0);
@@ -476,7 +458,7 @@ fragment float4 hlgNV12FragmentShader(
     VertexOut in [[stage_in]],
     texture2d<float> yTexture [[texture(0)]],
     texture2d<float> uvTexture [[texture(1)]],
-    constant HLGToneMappingParams& params [[buffer(0)]]
+    constant ToneMappingParams& params [[buffer(0)]]
 ) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     float y = videoRangeY10(yTexture.sample(textureSampler, in.texCoord).r);

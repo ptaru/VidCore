@@ -509,17 +509,8 @@ public class RenderingEngine {
         return true
     }
     
-    // MARK: - HLG Rendering
     
-    /// HLG tone mapping parameters - must match Metal struct layout
-    struct HLGToneMappingParams {
-        var displayPeakNits: Float
-        var contentPeakNits: Float
-        var outputPeakNits: Float
-        var padding: Float = 0  // 16-byte alignment
-    }
-    
-    /// GPU-accelerated HLG rendering with proper OETF^-1 and OOTF (Reference + Tone Map strategy)
+    /// GPU-accelerated HLG rendering with proper OETF^-1, OOTF, and BT.2390 tone mapping
     private func renderHLGToTexture(
         _ pixelBuffer: CVPixelBuffer, to texture: MTLTexture, targetPeakNits: Float
     ) -> Bool {
@@ -531,11 +522,12 @@ public class RenderingEngine {
         
         guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
         
-        // Reference + Tone Map: render to 1000-nit reference, then tone map to display
-        var params = HLGToneMappingParams(
-            displayPeakNits: targetPeakNits,
-            contentPeakNits: ToneMapping.hlgDefaultPeakNits,  // 1000.0
-            outputPeakNits: targetPeakNits
+        // HLG uses 1000-nit reference; BT.2390 maps to display peak
+        var params = ToneMappingParams(
+            inputMin: 0.0,
+            inputMax: ToneMapping.hlgDefaultPeakNits,  // 1000.0
+            outputMin: 0.0,
+            outputMax: targetPeakNits
         )
         
         guard let commandBuffer = performRenderPass(
@@ -545,7 +537,7 @@ public class RenderingEngine {
             viewportHeight: height,
             textures: [textures.y, textures.uv],
             configureEncoder: { encoder in
-                encoder.setFragmentBytes(&params, length: MemoryLayout<HLGToneMappingParams>.size, index: 0)
+                encoder.setFragmentBytes(&params, length: MemoryLayout<ToneMappingParams>.size, index: 0)
             }
         ) else { return false }
         
