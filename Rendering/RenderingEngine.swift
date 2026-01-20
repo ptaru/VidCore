@@ -311,7 +311,7 @@ public class RenderingEngine {
             return
         }
 
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
         let drawableSize = CGSize(
@@ -887,7 +887,7 @@ public class RenderingEngine {
 
         guard imageWidth > 0, imageHeight > 0 else { return false }
 
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
         let drawableSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
@@ -948,7 +948,7 @@ public class RenderingEngine {
             pixelData[i + 2] = b
         }
 
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
 
         guard let provider = CGDataProvider(data: Data(pixelData) as CFData) else {
