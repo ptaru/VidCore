@@ -396,6 +396,98 @@ fragment float4 hdrI420FragmentShader(
 
 
 // =============================================================================
+// MARK: - HLG (Hybrid Log-Gamma / ARIB STD-B67 / BT.2100 HLG)
+// =============================================================================
+
+// HLG constants from ITU-R BT.2100
+constant float hlg_a = 0.17883277;
+constant float hlg_b = 0.28466892;
+constant float hlg_c = 0.55991073;
+
+// HLG-specific tone mapping parameters
+struct HLGToneMappingParams {
+    float displayPeakNits;  // Actual display peak
+    float contentPeakNits;  // Always 1000 for HLG reference
+    float outputPeakNits;   // Target output (same as displayPeak for EDR)
+};
+
+// HLG OETF^-1: HLG signal [0,1] -> Scene-linear [0,1]
+float3 hlgOETFInverse(float3 hlg) {
+    return mix(
+        hlg * hlg / 3.0,
+        (exp((hlg - hlg_c) / hlg_a) + hlg_b) / 12.0,
+        step(0.5, hlg)
+    );
+}
+
+// HLG OOTF: Scene-linear -> Display-linear
+// Uses precise BT.2100 Table 5 formula with log10
+float3 hlgOOTF(float3 sceneLinear, float displayPeak) {
+    float gamma = 1.2 + 0.42 * log10(displayPeak / 1000.0);
+    float Ys = dot(float3(0.2627, 0.6780, 0.0593), sceneLinear);
+    return displayPeak * pow(max(Ys, 1e-6), gamma - 1.0) * sceneLinear;
+}
+
+// Combined HLG to linear: OETF^-1 then OOTF
+float3 hlgToLinear(float3 hlg, float displayPeak) {
+    float3 sceneLinear = hlgOETFInverse(hlg);
+    return hlgOOTF(sceneLinear, displayPeak);
+}
+
+// Processes HLG-encoded BT.2020 RGB using "Reference + Tone Map" strategy:
+// 1. Render to fixed 1000-nit reference (consistent gamma across displays)
+// 2. For EDR output, we skip additional tone mapping (done in shader output)
+// Note: The actual tone mapping from 1000 nits to display peak is handled
+// by passing the output peak in HLGToneMappingParams for the BT.2390 shader
+inline float4 processHLGOutput(float3 rgbHLG, constant HLGToneMappingParams& params, bool sdrOutput) {
+    rgbHLG = max(rgbHLG, 0.0);
+    
+    // 1. Render to 1000-nit REFERENCE (consistent gamma)
+    float3 linearReference = hlgToLinear(rgbHLG, 1000.0);
+    
+    // 2. For EDR, we output the 1000-nit reference and let display handle it
+    // For SDR, we need to compress to 100 nits
+    // The BT.2390 tone mapping is applied when outputPeakNits < 1000
+    // Since we can't call toneMapBT2390 directly (address space issue),
+    // we use a simplified approach for HLG:
+    // - For EDR displays (outputPeakNits >= 100), output linear scaled
+    // - For SDR (outputPeakNits < 100 or sdrOutput), compress to SDR
+    
+    // Simple compression for when display peak < content peak
+    if (params.outputPeakNits < 1000.0 && params.outputPeakNits > 0.0) {
+        // Scale to display peak (simple linear compression for now)
+        // A more sophisticated approach would use BT.2390 but that requires
+        // passing constant buffer which isn't possible inline
+        float scale = params.outputPeakNits / 1000.0;
+        linearReference *= scale;
+    }
+    
+    // Gamut mapping: BT.2020 → Display P3
+    float3 linearDisplayP3 = bt2020ToDisplayP3 * linearReference;
+    
+    if (sdrOutput) {
+        return float4(pow(saturate(linearDisplayP3 / 100.0), 1.0 / 2.2), 1.0);
+    }
+    return float4(linearDisplayP3 / 100.0, 1.0);
+}
+
+// HLG NV12 (10-bit Bi-planar)
+fragment float4 hlgNV12FragmentShader(
+    VertexOut in [[stage_in]],
+    texture2d<float> yTexture [[texture(0)]],
+    texture2d<float> uvTexture [[texture(1)]],
+    constant HLGToneMappingParams& params [[buffer(0)]]
+) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    float y = videoRangeY10(yTexture.sample(textureSampler, in.texCoord).r);
+    float2 uv = uvTexture.sample(textureSampler, in.texCoord).rg;
+    float3 rgbHLG = bt2020NCMatrix * float3(y, videoRangeUV10(uv.x), videoRangeUV10(uv.y));
+    return processHLGOutput(rgbHLG, params, false);
+}
+
+
+
+// =============================================================================
 // MARK: - Dolby Vision Profile 5 (IPTPQc2) Implementation
 // =============================================================================
 

@@ -317,7 +317,8 @@ public class VideoDecoder {
                                 pixelBuffer: ffmpegFrame.pixelBuffer,
                                 presentationTime: ffmpegFrame.presentationTime,
                                 isHDR: self.videoInfo.isHDR,
-                                doviMetadata: doviMetadata
+                                doviMetadata: doviMetadata,
+                                colorTransfer: self.videoInfo.colorTransfer
                             )
                             results.append(.video(frame))
                         }
@@ -396,7 +397,8 @@ public class VideoDecoder {
                     pixelBuffer: videoFrameObj.pixelBuffer,
                     presentationTime: videoFrameObj.presentationTime,
                     isHDR: self.videoInfo.isHDR,
-                    doviMetadata: doviMetadata
+                    doviMetadata: doviMetadata,
+                    colorTransfer: self.videoInfo.colorTransfer
                 )
                 continuation.resume(returning: frame)
             }
@@ -448,7 +450,8 @@ public class VideoDecoder {
                          pixelBuffer: ffmpegFrame.pixelBuffer,
                          presentationTime: ffmpegFrame.presentationTime,
                          isHDR: self.videoInfo.isHDR,
-                         doviMetadata: doviMetadata
+                         doviMetadata: doviMetadata,
+                         colorTransfer: self.videoInfo.colorTransfer
                      )
                      continuation.resume(returning: frame)
                 } else {

@@ -85,4 +85,7 @@ public enum ToneMapping {
 
     /// Default HDR10 content peak brightness in nits (1000 nits).
     public static let hdr10DefaultPeakNits: Float = 1000.0
+    
+    /// Default HLG reference peak brightness in nits (1000 nits).
+    public static let hlgDefaultPeakNits: Float = 1000.0
 }

@@ -87,6 +87,8 @@ public class RenderingEngine {
     // HDR pipelines (rgba16Float, PQ conversion)
     private var hdrNV12PipelineState: MTLRenderPipelineState?
 
+    // HLG pipelines (rgba16Float)
+    private var hlgNV12PipelineState: MTLRenderPipelineState?
     
     // DoVi Profile 5 (IPTPQc2)
     private var doviNV12PipelineState: MTLRenderPipelineState?
@@ -148,6 +150,7 @@ public class RenderingEngine {
             PipelineConfig(fragmentFunction: "i420FullRangeFragmentShader", pixelFormat: .bgra8Unorm, keyPath: \.i420FullRangePipelineState),
             PipelineConfig(fragmentFunction: "bgraFragmentShader", pixelFormat: .bgra8Unorm, keyPath: \.bgraPipelineState),
             PipelineConfig(fragmentFunction: "hdrNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.hdrNV12PipelineState),
+            PipelineConfig(fragmentFunction: "hlgNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.hlgNV12PipelineState),
             PipelineConfig(fragmentFunction: "nv12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.nv12Float16PipelineState),
             PipelineConfig(fragmentFunction: "i420FragmentShader", pixelFormat: .rgba16Float, keyPath: \.i420Float16PipelineState),
             PipelineConfig(fragmentFunction: "doviNV12FragmentShader", pixelFormat: .rgba16Float, keyPath: \.doviNV12PipelineState),
@@ -406,14 +409,28 @@ public class RenderingEngine {
                 // EDR display
                 let currentDisplayPeak = ToneMapping.getCurrentScreenPeakNits(for: drawable.layer)
                 self.currentDisplayPeakNits = currentDisplayPeak
-                self.currentRenderMode = "HDR10"
                 
-                if renderHDRToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak) {
-                    if let commandBuffer = commandQueue.makeCommandBuffer() {
-                        commandBuffer.present(drawable)
-                        commandBuffer.commit()
+                // Check for HLG (colorTransfer == 18)
+                let isHLG = frame.colorTransfer == 18
+                
+                if isHLG {
+                    self.currentRenderMode = "HLG"
+                    if renderHLGToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak) {
+                        if let commandBuffer = commandQueue.makeCommandBuffer() {
+                            commandBuffer.present(drawable)
+                            commandBuffer.commit()
+                        }
+                        return
                     }
-                    return
+                } else {
+                    self.currentRenderMode = "HDR10"
+                    if renderHDRToTexture(frame.pixelBuffer, to: drawable.texture, targetPeakNits: currentDisplayPeak) {
+                        if let commandBuffer = commandQueue.makeCommandBuffer() {
+                            commandBuffer.present(drawable)
+                            commandBuffer.commit()
+                        }
+                        return
+                    }
                 }
                 // Fallback to Float16 SDR
                 renderPixelBufferFloat16(frame.pixelBuffer, to: drawable)
@@ -489,6 +506,52 @@ public class RenderingEngine {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
+        return true
+    }
+    
+    // MARK: - HLG Rendering
+    
+    /// HLG tone mapping parameters - must match Metal struct layout
+    struct HLGToneMappingParams {
+        var displayPeakNits: Float
+        var contentPeakNits: Float
+        var outputPeakNits: Float
+        var padding: Float = 0  // 16-byte alignment
+    }
+    
+    /// GPU-accelerated HLG rendering with proper OETF^-1 and OOTF (Reference + Tone Map strategy)
+    private func renderHLGToTexture(
+        _ pixelBuffer: CVPixelBuffer, to texture: MTLTexture, targetPeakNits: Float
+    ) -> Bool {
+        guard let pipelineState = hlgNV12PipelineState else { return false }
+        
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        guard width > 0 && height > 0 else { return false }
+        
+        guard let textures = createNV12Textures(from: pixelBuffer, bitDepth: 10) else { return false }
+        
+        // Reference + Tone Map: render to 1000-nit reference, then tone map to display
+        var params = HLGToneMappingParams(
+            displayPeakNits: targetPeakNits,
+            contentPeakNits: ToneMapping.hlgDefaultPeakNits,  // 1000.0
+            outputPeakNits: targetPeakNits
+        )
+        
+        guard let commandBuffer = performRenderPass(
+            pipelineState: pipelineState,
+            targetTexture: texture,
+            viewportWidth: width,
+            viewportHeight: height,
+            textures: [textures.y, textures.uv],
+            configureEncoder: { encoder in
+                encoder.setFragmentBytes(&params, length: MemoryLayout<HLGToneMappingParams>.size, index: 0)
+            }
+        ) else { return false }
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
         return true
     }
 
@@ -699,17 +762,36 @@ public class RenderingEngine {
                  } else { return nil }
             } else { return nil }
         } else if frame.isHDR {
-             // HDR pipeline (2-pass)
+            // Check for HLG (colorTransfer == 18)
+            let isHLG = frame.colorTransfer == 18
+            
+            // HDR pipeline (2-pass)
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: outputWidth, height: outputHeight, mipmapped: false)
             desc.usage = [.renderTarget, .shaderRead]
             desc.storageMode = .private
             guard let intermediateTexture = device.makeTexture(descriptor: desc) else { return nil }
             
-            if renderHDRToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: 10000.0) {
-                if renderToneMap(from: intermediateTexture, to: outputTexture) {
-                    // Success
+            if isHLG {
+                // HLG -> 2-pass (Reference + Tone Map to SDR)
+                if renderHLGToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: ToneMapping.hlgDefaultPeakNits) {
+                    let prevPeak = self.contentPeakNits
+                    self.contentPeakNits = ToneMapping.hlgDefaultPeakNits
+                    if renderToneMap(from: intermediateTexture, to: outputTexture) {
+                        self.contentPeakNits = prevPeak
+                        // Success
+                    } else {
+                        self.contentPeakNits = prevPeak
+                        return nil
+                    }
                 } else { return nil }
-            } else { return nil }
+            } else {
+                // PQ/HDR10 path
+                if renderHDRToTexture(pixelBuffer, to: intermediateTexture, targetPeakNits: 10000.0) {
+                    if renderToneMap(from: intermediateTexture, to: outputTexture) {
+                        // Success
+                    } else { return nil }
+                } else { return nil }
+            }
         } else {
             // Render pixel buffer (SDR)
             if !renderPixelBufferToTexture(pixelBuffer, to: outputTexture) {
