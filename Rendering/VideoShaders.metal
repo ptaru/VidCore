@@ -320,7 +320,7 @@ float3 toneMapBT2390(float3 pq, constant ToneMappingParams& params) {
     // Apply gain to RGB
     // ratio = newMax / oldMax
     float ratio = pqMapped / maxSig;
-    float3 pqToneMapped = pq * ratio;
+    float3 pqToneMapped = clamp(pq * ratio, 0.0, 1.0);
     
     return pqToLinear(pqToneMapped);
 }
