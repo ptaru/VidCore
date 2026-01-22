@@ -373,6 +373,30 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
   _videoInfo.isDolbyVision = (doviSideData != NULL);
 
+  // Extract Content Light Level metadata (MaxCLL/MaxFALL) for HDR tone mapping
+  const AVPacketSideData *cllSideData = av_packet_side_data_get(
+      videoStream->codecpar->coded_side_data,
+      videoStream->codecpar->nb_coded_side_data,
+      AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
+  if (cllSideData && cllSideData->size >= sizeof(AVContentLightMetadata)) {
+    const AVContentLightMetadata *cll = (const AVContentLightMetadata *)cllSideData->data;
+    _videoInfo.maxContentLightLevel = cll->MaxCLL;
+    _videoInfo.maxFrameAverageLightLevel = cll->MaxFALL;
+  }
+
+  // Extract Mastering Display metadata for HDR tone mapping
+  const AVPacketSideData *mdSideData = av_packet_side_data_get(
+      videoStream->codecpar->coded_side_data,
+      videoStream->codecpar->nb_coded_side_data,
+      AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
+  if (mdSideData && mdSideData->size >= sizeof(AVMasteringDisplayMetadata)) {
+    const AVMasteringDisplayMetadata *md = (const AVMasteringDisplayMetadata *)mdSideData->data;
+    if (md->has_luminance) {
+      _videoInfo.masteringDisplayMaxLuminance = (float)av_q2d(md->max_luminance);
+      _videoInfo.masteringDisplayMinLuminance = (float)av_q2d(md->min_luminance);
+    }
+  }
+
   // Calculate bits per component from pixel format
   const AVPixFmtDescriptor *pixFmtDesc =
       av_pix_fmt_desc_get(_codecContext->pix_fmt);

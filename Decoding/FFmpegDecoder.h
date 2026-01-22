@@ -42,6 +42,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int bitsPerComponent;
 /// Whether the content is HDR (PQ or HLG transfer function).
 @property(nonatomic, readonly) BOOL isHDR;
+/// Maximum Content Light Level in cd/m² (MaxCLL), 0 if not present in metadata.
+@property(nonatomic, assign) unsigned int maxContentLightLevel;
+/// Maximum Frame-Average Light Level in cd/m² (MaxFALL), 0 if not present.
+@property(nonatomic, assign) unsigned int maxFrameAverageLightLevel;
+/// Mastering display maximum luminance in cd/m², 0 if not present.
+@property(nonatomic, assign) float masteringDisplayMaxLuminance;
+/// Mastering display minimum luminance in cd/m², 0 if not present.
+@property(nonatomic, assign) float masteringDisplayMinLuminance;
 /// Whether the content is Dolby Vision.
 @property(nonatomic, assign) BOOL isDolbyVision;
 /// Audio codec name (e.g., "aac", "opus"), nil if no audio stream.

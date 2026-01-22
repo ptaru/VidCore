@@ -19,6 +19,7 @@ extern "C" {
 #import <libavutil/dovi_meta.h>
 #import <libavutil/hwcontext.h>
 #import <libavutil/imgutils.h>
+#import <libavutil/mastering_display_metadata.h>
 #import <libswresample/swresample.h>
 #import <libswscale/swscale.h>
 

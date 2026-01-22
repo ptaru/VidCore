@@ -56,6 +56,17 @@ public struct VideoInfo {
     /// Whether the content is Dolby Vision.
     public let isDolbyVision: Bool
     
+    // MARK: - HDR Static Metadata
+    
+    /// Maximum Content Light Level in nits (MaxCLL), nil if not present in metadata.
+    public let maxContentLightLevel: UInt?
+    /// Maximum Frame-Average Light Level in nits (MaxFALL), nil if not present.
+    public let maxFrameAverageLightLevel: UInt?
+    /// Mastering display maximum luminance in nits, nil if not present.
+    public let masteringDisplayMaxLuminance: Float?
+    /// Mastering display minimum luminance in nits, nil if not present.
+    public let masteringDisplayMinLuminance: Float?
+    
     // MARK: - Audio Info
     
     /// Audio codec name (e.g., "aac", "opus", "flac"), nil if no audio.
@@ -108,12 +119,28 @@ public struct VideoInfo {
         default: return colorSpace > 0 ? "Unspecified (\(colorSpace))" : "YCbCr"
         }
     }
+    
+    /// The recommended content peak nits for HDR tone mapping.
+    ///
+    /// Uses MaxCLL if available, falls back to mastering display max luminance,
+    /// then defaults to 1000 nits (standard HDR10).
+    public var contentPeakNits: Float {
+        if let maxCLL = maxContentLightLevel, maxCLL > 0 {
+            return Float(maxCLL)
+        }
+        if let mdMax = masteringDisplayMaxLuminance, mdMax > 0 {
+            return mdMax
+        }
+        return 1000.0 // HDR10 default
+    }
+    
     public init(
         width: Int, height: Int, frameRate: Double, duration: Double, codecName: String,
         isHardwareAccelerated: Bool, isHDR: Bool = false,
         colorPrimaries: Int = 0, colorTransfer: Int = 0, colorSpace: Int = 0,
         colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false,
-
+        maxContentLightLevel: UInt? = nil, maxFrameAverageLightLevel: UInt? = nil,
+        masteringDisplayMaxLuminance: Float? = nil, masteringDisplayMinLuminance: Float? = nil,
         audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
         decoderName: String? = nil, decoderDescription: String? = nil
     ) {
@@ -130,9 +157,12 @@ public struct VideoInfo {
         self.colorRange = colorRange
         self.bitsPerComponent = bitsPerComponent
         self.isDolbyVision = isDolbyVision
+        self.maxContentLightLevel = maxContentLightLevel
+        self.maxFrameAverageLightLevel = maxFrameAverageLightLevel
+        self.masteringDisplayMaxLuminance = masteringDisplayMaxLuminance
+        self.masteringDisplayMinLuminance = masteringDisplayMinLuminance
         self.audioCodecName = audioCodecName
         self.audioSampleRate = audioSampleRate
-
         self.audioChannels = audioChannels
         self.decoderName = decoderName
         self.decoderDescription = decoderDescription
@@ -228,6 +258,10 @@ public class VideoDecoder {
             colorRange: Int(info.colorRange),
             bitsPerComponent: Int(info.bitsPerComponent),
             isDolbyVision: info.isDolbyVision,
+            maxContentLightLevel: info.maxContentLightLevel > 0 ? UInt(info.maxContentLightLevel) : nil,
+            maxFrameAverageLightLevel: info.maxFrameAverageLightLevel > 0 ? UInt(info.maxFrameAverageLightLevel) : nil,
+            masteringDisplayMaxLuminance: info.masteringDisplayMaxLuminance > 0 ? info.masteringDisplayMaxLuminance : nil,
+            masteringDisplayMinLuminance: info.masteringDisplayMinLuminance > 0 ? info.masteringDisplayMinLuminance : nil,
             audioCodecName: info.audioCodecName,
             audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
             audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,

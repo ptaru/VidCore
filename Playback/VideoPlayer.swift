@@ -143,8 +143,11 @@ public class VideoPlayer {
                 videoInfo = decoder.videoInfo
                 duration = decoder.videoInfo.duration
                 videoInfo = decoder.videoInfo
-
                 
+                // Configure HDR tone mapping based on video metadata
+                if decoder.videoInfo.isHDR {
+                    renderingEngine?.contentPeakNits = decoder.videoInfo.contentPeakNits
+                }
 
                 while !Task.isCancelled {
                     guard let packet = await decoder.demuxNextPacket() else { break }

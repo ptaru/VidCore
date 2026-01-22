@@ -386,6 +386,24 @@ private struct VidPlayerDebugOverlay: View {
             let isHDRContent = frame.isHDR || (videoInfo?.isDolbyVision ?? false) || frame.doviMetadata != nil
             if isHDRContent {
                 debugRow("HDR", "Yes")
+                
+                // HDR Static Metadata
+                if let info = videoInfo {
+                    if let maxCLL = info.maxContentLightLevel {
+                        debugRow("MaxCLL", "\(maxCLL) nits")
+                    }
+                    if let maxFALL = info.maxFrameAverageLightLevel {
+                        debugRow("MaxFALL", "\(maxFALL) nits")
+                    }
+                    if let mdMax = info.masteringDisplayMaxLuminance {
+                        debugRow("Mastering Max", String(format: "%.0f nits", mdMax))
+                    }
+                    if let mdMin = info.masteringDisplayMinLuminance {
+                        debugRow("Mastering Min", String(format: "%.4f nits", mdMin))
+                    }
+                    // Show the computed content peak being used for tone mapping
+                    debugRow("Content Peak", String(format: "%.0f nits", info.contentPeakNits))
+                }
             } else {
                 debugRow("HDR", "No (SDR)")
             }
