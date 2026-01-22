@@ -10,7 +10,7 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 
 - **FFmpeg + dav1d Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
-- **HDR Support**: Full HDR10 support with BT.2020 color primaries, PQ (SMPTE ST 2084) transfer function, and 10-bit color depth
+- **HDR Support**: Full HDR10 and HLG support with BT.2020 color primaries, PQ/HLG transfer functions, and 10-bit color depth
 - **Dolby Vision**: Profile 5 support with IPTPQc2 colorspace, dynamic reshape metadata, and L1 scene brightness
 - **Tone Mapping**: Automatic BT.2390 tone mapping with scene-adaptive L1 metadata for HDR content
 - **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for SDR, HDR10, and Dolby Vision
@@ -76,7 +76,7 @@ import VidCore
 
 struct ContentView: View {
     var body: some View {
-        VidPlayerURL(url: videoURL)  // Loads and plays automatically
+        VidPlayer(url: videoURL)  // Loads and plays automatically
     }
 }
 ```
@@ -103,15 +103,16 @@ struct PlayerView: View {
 
 ### SwiftUI Integration
 
-VidCore provides two SwiftUI views for easy integration:
+VidCore provides `VidPlayer` for SwiftUI integration with multiple initialization options:
 
-#### VidPlayerURL (Self-Contained)
+#### VidPlayer with URL (Self-Contained)
 
-For simple playback with no external control needed:
+For simple playback where the player manages its own lifecycle:
 
 ```swift
-VidPlayerURL(url: videoURL)                    // Auto-plays
-VidPlayerURL(url: videoURL, autoPlay: false)   // Load only, manual play
+VidPlayer(url: videoURL)                              // Auto-plays
+VidPlayer(url: videoURL, autoPlay: false)             // Load only, manual play
+VidPlayer(url: videoURL, allowsDebugMenu: true)       // With debug overlay
 ```
 
 #### VidPlayer (Controlled)
@@ -362,7 +363,7 @@ Access detailed color information from the decoder:
 
 - **Pixel Formats**: P010 (10-bit bi-planar), YUV420P10LE (10-bit tri-planar)
 - **Color Primaries**: BT.2020 (wide color gamut) with automatic mapping to Display P3
-- **Transfer Function**: PQ/SMPTE ST 2084 (HDR10)
+- **Transfer Function**: PQ/SMPTE ST 2084 (HDR10) and HLG/ARIB STD-B67
 - **Bit Depth**: 10-bit color depth
 - **Output**: Linear light values for EDR displays
 
@@ -487,9 +488,6 @@ Enable the debug overlay to inspect video playback in real-time:
 ```swift
 // Enable debug menu via right-click context menu
 VidPlayer(player: player, allowsDebugMenu: true)
-
-// Also works with URL-based player
-VidPlayerURL(url: videoURL, allowsDebugMenu: true)
 ```
 
 When enabled, right-click on the video to toggle the debug overlay, which displays:
@@ -502,14 +500,6 @@ When enabled, right-click on the video to toggle the debug overlay, which displa
 | **HDR** | HDR status, Dolby Vision profile, L1 scene brightness |
 | **Audio** | Codec, sample rate, channel count |
 | **Timing** | Current PTS, frame number |
-
-### VidPlayerURL
-
-Self-contained SwiftUI view for simple playback.
-
-```swift
-VidPlayerURL(url: URL, autoPlay: Bool = true)
-```
 
 ### VideoDecoder
 
@@ -540,11 +530,25 @@ Video stream metadata with color information and HDR detection.
 | `codecName` | `String` | Codec identifier (e.g., "h264") |
 | `isHardwareAccelerated` | `Bool` | Using VideoToolbox |
 | `isHDR` | `Bool` | Whether content is HDR (PQ or HLG) |
+| `isDolbyVision` | `Bool` | Whether content is Dolby Vision |
 | `colorPrimaries` | `Int` | Color primaries (1=BT.709, 9=BT.2020) |
 | `colorTransfer` | `Int` | Transfer function (1=BT.709, 16=PQ, 18=HLG) |
 | `colorSpace` | `Int` | YUV color matrix (1=BT.709, 9=BT.2020nc) |
 | `colorRange` | `Int` | Video range (1=limited/16-235, 2=full/0-255) |
 | `bitsPerComponent` | `Int` | Bit depth (8, 10, or 12 bits) |
+| `decoderName` | `String?` | Specific decoder used (e.g., "VideoToolbox") |
+| `decoderDescription` | `String?` | Description of the decoder implementation |
+| `maxContentLightLevel` | `UInt?` | MaxCLL in nits, nil if not present |
+| `maxFrameAverageLightLevel` | `UInt?` | MaxFALL in nits, nil if not present |
+| `masteringDisplayMaxLuminance` | `Float?` | Mastering display max luminance in nits |
+| `masteringDisplayMinLuminance` | `Float?` | Mastering display min luminance in nits |
+| `audioCodecName` | `String?` | Audio codec (e.g., "aac", "opus"), nil if no audio |
+| `audioSampleRate` | `Int?` | Audio sample rate in Hz (e.g., 48000) |
+| `audioChannels` | `Int?` | Number of audio channels |
+| `contentPeakNits` | `Float` | Computed: recommended content peak for tone mapping |
+| `transferFunctionName` | `String` | Computed: human-readable transfer function |
+| `colorPrimariesName` | `String` | Computed: human-readable color primaries |
+| `colorSpaceName` | `String` | Computed: human-readable color space |
 
 ### VideoFrame
 
@@ -555,8 +559,7 @@ A decoded video frame with pixel data and timing information.
 | `pixelBuffer` | `CVPixelBuffer` | Raw pixel data (NV12, I420, P010, or BGRA) |
 | `presentationTime` | `Double` | PTS in seconds |
 | `isHDR` | `Bool` | Whether frame contains HDR content |
-| `width` | `Int` | Frame width |
-| `height` | `Int` | Frame height |
+| `colorTransfer` | `Int` | Color transfer characteristics (1=BT.709, 16=PQ, 18=HLG) |
 | `doviMetadata` | `DoViMetadata?` | Dolby Vision metadata for this frame (Profile 5 only) |
 
 **Supported Pixel Formats:**
@@ -583,27 +586,34 @@ Dolby Vision metadata for a single frame (Profile 5 IPTPQc2).
 
 GPU-accelerated frame rendering with HDR support.
 
-| Method | Description |
-|--------|-------------|
-| `init?()` | Initialize Metal context |
-| `renderVideoFrame(_:to:)` | Render VideoFrame with HDR awareness |
-| `renderPixelBuffer(_:to:)` | Render CVPixelBuffer to drawable (SDR) |
-| `renderHDRPixelBuffer(_:to:)` | Render 10-bit HDR content with PQ EOTF |
-| `renderToCGImage(_:targetSize:)` | Render VideoFrame to CGImage for thumbnail generation |
-| `targetDisplayPeakNits` | `Float` | Target display peak brightness in nits (auto-detected usually) |
+| Property/Method | Type | Description |
+|-----------------|------|-------------|
+| `init?()` | | Initialize Metal context |
+| `device` | `MTLDevice` | The Metal device used for rendering |
+| `commandQueue` | `MTLCommandQueue` | The command queue for render commands |
+| `ciContext` | `CIContext` | Core Image context for fallback rendering |
+| `targetDisplayPeakNits` | `Float` | Target display peak brightness in nits |
 | `contentPeakNits` | `Float` | Content peak brightness in nits (default 1000.0) |
-| `flush()` | Flush texture cache |
+| `currentDisplayPeakNits` | `Float` | Current detected display peak (read-only) |
+| `currentRenderMode` | `String` | Current rendering pipeline name (read-only) |
+| `lastL1SceneMaxNits` | `Float?` | Last Dolby Vision L1 scene max (read-only) |
+| `renderVideoFrame(_:to:)` | | Render VideoFrame with HDR awareness |
+| `renderPixelBuffer(_:to:)` | | Render CVPixelBuffer to drawable (SDR) |
+| `renderToCGImage(_:targetSize:)` | `CGImage?` | Render VideoFrame to CGImage for thumbnails |
+| `flush()` | | Flush texture cache to release GPU memory |
 
 **HDR Rendering:**
 - Automatically detects drawable format (bgra8Unorm vs rgba16Float)
-- For HDR content on EDR-capable layers, uses PQ→Linear conversion
+- For HDR content on EDR-capable layers, uses PQ→Linear or HLG→Linear conversion
 - Supports both P010 (bi-planar) and YUV420P10LE (tri-planar) 10-bit formats
 - Falls back to SDR rendering if layer doesn't support EDR
 - Full-range and video-range YUV variants for proper color levels
 
 **Shader Pipelines:**
 - **SDR NV12/I420**: Video-range and full-range BT.709 YUV→RGB
-- **HDR NV12/I420**: 10-bit BT.2020 YUV→Linear with PQ EOTF
+- **HDR10 NV12**: 10-bit BT.2020 YUV→Linear with PQ EOTF
+- **HLG NV12**: 10-bit BT.2020 YUV→Linear with HLG OETF⁻¹ and OOTF
+- **Dolby Vision**: Profile 5 IPTPQc2 with reshape processing
 - **Float16 Output**: For EDR displays (rgba16Float, 1.0 = 100 nits)
 
 ---
