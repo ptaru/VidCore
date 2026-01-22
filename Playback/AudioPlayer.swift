@@ -97,6 +97,11 @@ public class AudioPlayer: ObservableObject {
         totalSamplesEnqueued = 0
     }
     
+    /// Whether audio buffers have been enqueued since last reset
+    public var hasBufferedAudio: Bool {
+        totalSamplesEnqueued > 0
+    }
+    
     /// Current sample-based time (legacy)
     public var currentTime: TimeInterval {
         guard let nodeTime = playerNode.lastRenderTime,

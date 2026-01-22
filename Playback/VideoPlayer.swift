@@ -508,9 +508,9 @@ public class VideoPlayer {
                 hasStarted = true
             }
             
-            // Audio is master clock when available; only update currentTime when playing to avoid race with seek
+            // Audio is master clock when available and stable; fall back to video clock during audio re-sync
             let currentPlaybackTime: Double
-            if hasAudio && audioPlayer.isPlaying {
+            if hasAudio && audioPlayer.isPlaying && audioPlayer.hasBufferedAudio {
                 currentPlaybackTime = audioPlayer.mediaTime
             } else {
                 currentPlaybackTime = (CACurrentMediaTime() - playbackStartTime) + firstFramePTS
