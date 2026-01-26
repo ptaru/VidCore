@@ -362,16 +362,40 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   // Extract color metadata for HDR detection
+  // Extract color metadata for HDR detection
+  // Prefer codec context (bitstream), fallback to container (stream)
   _videoInfo.colorPrimaries = _codecContext->color_primaries;
+  if (_videoInfo.colorPrimaries == AVCOL_PRI_UNSPECIFIED && videoStream->codecpar->color_primaries != AVCOL_PRI_UNSPECIFIED) {
+      _videoInfo.colorPrimaries = videoStream->codecpar->color_primaries;
+  }
+
   _videoInfo.colorTransfer = _codecContext->color_trc;
+  if (_videoInfo.colorTransfer == AVCOL_TRC_UNSPECIFIED && videoStream->codecpar->color_trc != AVCOL_TRC_UNSPECIFIED) {
+      _videoInfo.colorTransfer = videoStream->codecpar->color_trc;
+  }
+
   _videoInfo.colorSpace = _codecContext->colorspace;
+  if (_videoInfo.colorSpace == AVCOL_SPC_UNSPECIFIED && videoStream->codecpar->color_space != AVCOL_SPC_UNSPECIFIED) {
+      _videoInfo.colorSpace = videoStream->codecpar->color_space;
+  }
+
   _videoInfo.colorRange = _codecContext->color_range;
+  if (_videoInfo.colorRange == AVCOL_RANGE_UNSPECIFIED && videoStream->codecpar->color_range != AVCOL_RANGE_UNSPECIFIED) {
+      _videoInfo.colorRange = videoStream->codecpar->color_range;
+  }
 
   // Check for Dolby Vision side data in the stream
   const AVPacketSideData *doviSideData = av_packet_side_data_get(
       videoStream->codecpar->coded_side_data,
       videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
-  _videoInfo.isDolbyVision = (doviSideData != NULL);
+  if (doviSideData && doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
+      _videoInfo.isDolbyVision = YES;
+      const AVDOVIDecoderConfigurationRecord *doviConf = (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
+      _videoInfo.doviProfile = doviConf->dv_profile;
+  } else {
+      _videoInfo.isDolbyVision = NO;
+      _videoInfo.doviProfile = 0;
+  }
 
   // Extract Content Light Level metadata (MaxCLL/MaxFALL) for HDR tone mapping
   const AVPacketSideData *cllSideData = av_packet_side_data_get(
@@ -797,6 +821,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   videoFrame.pixelBuffer = pixelBuffer;
   videoFrame.presentationTime = pts;
   videoFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
+  videoFrame.doviProfile = _videoInfo.doviProfile;
   return videoFrame;
 }
 

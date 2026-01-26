@@ -23,44 +23,30 @@
   const AVDOVIMetadata *metadata = (AVDOVIMetadata *)sd->data;
   const AVDOVIRpuDataHeader *header = av_dovi_get_header(metadata);
 
-  // CRITICAL: Only process Profile 5 (IPTPQc2)
-  // Profile 5 uses full range video (bl_video_full_range_flag = 1)
-  // Profile 8.x uses limited range with HDR10/HLG-compatible base layer
-  // Applying IPTPQc2 pipeline to Profile 8 causes severe color corruption
-  //
-  // Note: Profile 5 is distinguished by:
-  // - bl_video_full_range_flag = 1 (always full range)
-  // - Single layer (disable_residual_flag = 1)
-  // Profile 8 typically has:
-  // - bl_video_full_range_flag = 0 (limited range, HDR10-compatible)
-  // - disable_residual_flag = 1 (single layer variant)
-
-  // Single-layer only (no enhancement layer)
-  if (!header->disable_residual_flag) {
-    static BOOL loggedEnhancementLayer = NO;
-    if (!loggedEnhancementLayer) {
-      NSLog(@"[DoViMetadataExtractor] Enhancement layer present, not supported");
-      loggedEnhancementLayer = YES;
-    }
-    return nil;
-  }
-
-  // Profile 5 heuristic: full range video
-  if (!header->bl_video_full_range_flag) {
-    static BOOL loggedOnce = NO;
-    if (!loggedOnce) {
-      NSLog(@"[DoViMetadataExtractor] Limited range (Profile 8-like), using "
-            @"standard HDR pipeline");
-      loggedOnce = YES;
-    }
-    return nil;
-  }
+  // Process RPU metadata regardless of profile
+  // Note: Profile 5 is single-layer (disable_residual_flag = 1)
+  // Profile 7 is dual-layer (disable_residual_flag = 0), but the RPU is still
+  // valid for the base layer. Profile 8 is single-layer.
 
   // Log only once per session to avoid spam
-  static BOOL loggedDoViDetection = NO;
-  if (!loggedDoViDetection) {
-    NSLog(@"[DoViMetadataExtractor] Processing DoVi Profile 5 metadata");
-    loggedDoViDetection = YES;
+  static int lastLoggedProfile = -1;
+  
+  // Infer profile for logging (5=Full Range, 7=Dual Layer, 8=Limited Range Single Layer)
+  int inferredProfile = 0;
+  if (header->bl_video_full_range_flag) {
+      inferredProfile = 5;
+  } else if (header->disable_residual_flag == 0) {
+      inferredProfile = 7;
+  } else {
+      inferredProfile = 8;
+  }
+
+  if (inferredProfile != lastLoggedProfile) {
+    NSLog(@"[DoViMetadataExtractor] Processing DoVi Profile %d metadata (%@ Range%@)",
+          inferredProfile, 
+          header->bl_video_full_range_flag ? @"Full" : @"Limited",
+          header->disable_residual_flag ? @"" : @", Dual Layer");
+    lastLoggedProfile = inferredProfile;
   }
 
   const AVDOVIDataMapping *mapping = av_dovi_get_mapping(metadata);

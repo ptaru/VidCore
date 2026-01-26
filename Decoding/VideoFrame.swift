@@ -33,41 +33,24 @@ public struct VideoFrame {
     public let doviMetadata: DoViMetadata?
     /// Color transfer characteristics (1=BT.709, 16=PQ, 18=HLG).
     public let colorTransfer: Int
+    /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
+    public let doviProfile: Int
 
-    /// Creates a video frame (SDR content).
-    public init(pixelBuffer: CVPixelBuffer, presentationTime: Double) {
-        self.pixelBuffer = pixelBuffer
-        self.presentationTime = presentationTime
-        self.isHDR = false
-        self.doviMetadata = nil
-        self.colorTransfer = 1 // BT.709 default for SDR
-    }
-    
-    /// Creates a video frame with HDR flag.
-    public init(pixelBuffer: CVPixelBuffer, presentationTime: Double, isHDR: Bool) {
-        self.pixelBuffer = pixelBuffer
-        self.presentationTime = presentationTime
-        self.isHDR = isHDR
-        self.doviMetadata = nil
-        self.colorTransfer = isHDR ? 16 : 1 // Default to PQ for HDR
-    }
-    
-    /// Creates a video frame with Dolby Vision metadata.
-    public init(pixelBuffer: CVPixelBuffer, presentationTime: Double, isHDR: Bool, doviMetadata: DoViMetadata?) {
+    /// Creates a video frame with full control over metadata and color characteristics.
+    public init(
+        pixelBuffer: CVPixelBuffer,
+        presentationTime: Double,
+        isHDR: Bool = false,
+        doviMetadata: DoViMetadata? = nil,
+        colorTransfer: Int? = nil,
+        doviProfile: Int = 0
+    ) {
         self.pixelBuffer = pixelBuffer
         self.presentationTime = presentationTime
         self.isHDR = isHDR
         self.doviMetadata = doviMetadata
-        self.colorTransfer = isHDR ? 16 : 1 // Default to PQ for HDR
-    }
-    
-    /// Creates a video frame with explicit color transfer characteristics.
-    public init(pixelBuffer: CVPixelBuffer, presentationTime: Double, isHDR: Bool, doviMetadata: DoViMetadata?, colorTransfer: Int) {
-        self.pixelBuffer = pixelBuffer
-        self.presentationTime = presentationTime
-        self.isHDR = isHDR
-        self.doviMetadata = doviMetadata
-        self.colorTransfer = colorTransfer
+        self.colorTransfer = colorTransfer ?? (isHDR ? 16 : 1)
+        self.doviProfile = doviProfile
     }
 }
 

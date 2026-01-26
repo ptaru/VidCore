@@ -55,6 +55,8 @@ public struct VideoInfo {
     public let bitsPerComponent: Int
     /// Whether the content is Dolby Vision.
     public let isDolbyVision: Bool
+    /// Dolby Vision Profile ID (e.g. 5, 7, 8), nil if not Dolby Vision.
+    public let doviProfile: Int?
     
     // MARK: - HDR Static Metadata
     
@@ -82,11 +84,9 @@ public struct VideoInfo {
     public var transferFunctionName: String {
         switch colorTransfer {
         case 1: return "BT.709"
-        case 16: return isDolbyVision ? "PQ (DoVi)" : "PQ (HDR10)"
+        case 16: return "PQ"
         case 18: return "HLG"
         default:
-            // DoVi content may not have standard FFmpeg color metadata
-            if isDolbyVision { return "PQ (DoVi)" }
             return colorTransfer > 0 ? "Unknown (\(colorTransfer))" : "Unspecified"
         }
     }
@@ -97,19 +97,12 @@ public struct VideoInfo {
         case 1: return "BT.709"
         case 9: return "BT.2020"
         default:
-            // DoVi content is always BT.2020
-            if isDolbyVision { return "BT.2020 (IPT)" }
             return colorPrimaries > 0 ? "Unknown (\(colorPrimaries))" : "Unspecified"
         }
     }
     
     /// Human-readable color space/matrix name
     public var colorSpaceName: String {
-        // DoVi Profile 5 uses IPTPQc2 color space
-        if isDolbyVision {
-            return "IPTPQc2"
-        }
-        
         switch colorSpace {
         case 1: return "BT.709"
         case 5: return "BT.470bg"
@@ -138,7 +131,7 @@ public struct VideoInfo {
         width: Int, height: Int, frameRate: Double, duration: Double, codecName: String,
         isHardwareAccelerated: Bool, isHDR: Bool = false,
         colorPrimaries: Int = 0, colorTransfer: Int = 0, colorSpace: Int = 0,
-        colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false,
+        colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false, doviProfile: Int? = nil,
         maxContentLightLevel: UInt? = nil, maxFrameAverageLightLevel: UInt? = nil,
         masteringDisplayMaxLuminance: Float? = nil, masteringDisplayMinLuminance: Float? = nil,
         audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
@@ -157,6 +150,7 @@ public struct VideoInfo {
         self.colorRange = colorRange
         self.bitsPerComponent = bitsPerComponent
         self.isDolbyVision = isDolbyVision
+        self.doviProfile = doviProfile
         self.maxContentLightLevel = maxContentLightLevel
         self.maxFrameAverageLightLevel = maxFrameAverageLightLevel
         self.masteringDisplayMaxLuminance = masteringDisplayMaxLuminance
@@ -258,6 +252,7 @@ public class VideoDecoder {
             colorRange: Int(info.colorRange),
             bitsPerComponent: Int(info.bitsPerComponent),
             isDolbyVision: info.isDolbyVision,
+            doviProfile: info.isDolbyVision ? Int(info.doviProfile) : nil,
             maxContentLightLevel: info.maxContentLightLevel > 0 ? UInt(info.maxContentLightLevel) : nil,
             maxFrameAverageLightLevel: info.maxFrameAverageLightLevel > 0 ? UInt(info.maxFrameAverageLightLevel) : nil,
             masteringDisplayMaxLuminance: info.masteringDisplayMaxLuminance > 0 ? info.masteringDisplayMaxLuminance : nil,
@@ -352,7 +347,8 @@ public class VideoDecoder {
                                 presentationTime: ffmpegFrame.presentationTime,
                                 isHDR: self.videoInfo.isHDR,
                                 doviMetadata: doviMetadata,
-                                colorTransfer: self.videoInfo.colorTransfer
+                                colorTransfer: self.videoInfo.colorTransfer,
+                                doviProfile: Int(ffmpegFrame.doviProfile)
                             )
                             results.append(.video(frame))
                         }
@@ -432,7 +428,8 @@ public class VideoDecoder {
                     presentationTime: videoFrameObj.presentationTime,
                     isHDR: self.videoInfo.isHDR,
                     doviMetadata: doviMetadata,
-                    colorTransfer: self.videoInfo.colorTransfer
+                    colorTransfer: self.videoInfo.colorTransfer,
+                    doviProfile: Int(videoFrameObj.doviProfile)
                 )
                 continuation.resume(returning: frame)
             }
@@ -485,7 +482,8 @@ public class VideoDecoder {
                          presentationTime: ffmpegFrame.presentationTime,
                          isHDR: self.videoInfo.isHDR,
                          doviMetadata: doviMetadata,
-                         colorTransfer: self.videoInfo.colorTransfer
+                         colorTransfer: self.videoInfo.colorTransfer,
+                         doviProfile: Int(ffmpegFrame.doviProfile)
                      )
                      continuation.resume(returning: frame)
                 } else {

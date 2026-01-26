@@ -176,4 +176,47 @@ public struct DoViMetadata {
             self.components[i] = comp
         }
     }
+    
+    // MARK: - Helpers
+    
+    /// Convert PQ value [0-1] to Nits [0-10000] using ST.2084 EOTF
+    public static func pqToNits(_ pq: Float) -> Int {
+        // ST.2084 EOTF Constants
+        let m1: Float = 2610.0 / 4096.0 / 4.0
+        let m2: Float = 2523.0 / 4096.0 * 128.0
+        let c1: Float = 3424.0 / 4096.0
+        let c2: Float = 2413.0 / 4096.0 * 32.0
+        let c3: Float = 2392.0 / 4096.0 * 32.0
+        
+        // Safe pow
+        let N = pow(pq, 1.0 / m2)
+        let numerator = max(N - c1, 0.0)
+        let denominator = c2 - c3 * N
+        
+        // Avoid division by zero
+        if denominator <= 0 { return 10000 }
+        
+        let L = pow(numerator / denominator, 1.0 / m1)
+        
+        return Int(L * 10000.0)
+    }
+    
+    /// Generates Content Light Level Info (MaxCLL/MaxFALL) data for kCVImageBufferContentLightLevelInfoKey
+    public func contentLightLevelData() -> Data? {
+        guard let maxPQ = sceneMaxPQ, let avgPQ = sceneAvgPQ else { return nil }
+        
+        let maxCLL = UInt16(min(Self.pqToNits(maxPQ), 65535))
+        let maxFALL = UInt16(min(Self.pqToNits(avgPQ), 65535))
+        
+        // Content Light Level Info SEI message payload (4 bytes, Big Endian)
+        // Bytes 0-1: MaxCLL
+        // Bytes 2-3: MaxFALL
+        var seiPayload = Data(count: 4)
+        seiPayload[0] = UInt8((maxCLL >> 8) & 0xFF)
+        seiPayload[1] = UInt8(maxCLL & 0xFF)
+        seiPayload[2] = UInt8((maxFALL >> 8) & 0xFF)
+        seiPayload[3] = UInt8(maxFALL & 0xFF)
+        
+        return seiPayload
+    }
 }

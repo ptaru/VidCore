@@ -1,16 +1,17 @@
 //
-//  DoViBuffers.swift
+//  DoViRenderingBuffers.swift
 //  VidCore
 //
-//  Internal Metal buffer structures for Dolby Vision processing
+//  Internal Metal buffer structures for Dolby Vision processing (System Renderer)
+//  Duplicated from MetalRenderer to maintain separation
 //
 
 import Foundation
 import simd
 
-/// Metal buffer struct matching DoViReshapeComponent in VideoShaders.metal
+/// Metal buffer struct matching SysDoViReshapeComponent in DoViRenderingShaders.metal
 /// Total size: 36 + 128 + 768 + 4 + 12 = 948 bytes (aligned to 960)
-internal struct DoViReshapeComponentBuffer {
+internal struct SysDoViReshapeComponentBuffer {
     // float pivots[9] - 36 bytes
     var pivot0: Float = 0
     var pivot1: Float = 0
@@ -152,10 +153,10 @@ internal struct DoViReshapeComponentBuffer {
     }
 }
 
-/// Metal struct layout for DoViParams:
+/// Metal struct layout for SysDoViParams:
 /// float3 (16 bytes aligned), float3x3 (48 bytes), float3x3 (48 bytes), float, float, float _padding[2]
 /// Total: 16 + 48 + 48 + 4 + 4 + 8 = 128 bytes
-internal struct DoViParamsBuffer {
+internal struct SysDoViParamsBuffer {
     // float3 in Metal is 16-byte aligned, use float4 for compatibility
     var nonlinearOffset: SIMD4<Float>  // Using float4 since Metal's float3 is 16-byte aligned
     var nonlinearMatrix: matrix_float3x3
@@ -173,9 +174,9 @@ internal struct DoViParamsBuffer {
         
         // Combine HPE LMS→RGB inverse with rgb_to_lms from metadata
         let hpeLms2Rgb = matrix_float3x3(columns: (
-            SIMD3<Float>(3.06441879, -0.65612108, 0.01736321),   // Column 0 = row values at col 0
-            SIMD3<Float>(-2.16597676, 1.78554118, -0.04725154), // Column 1 = row values at col 1  
-            SIMD3<Float>(0.10155818, -0.12943749, 1.03004253)   // Column 2 = row values at col 2
+            SIMD3<Float>( 3.06441879, -0.65612108,  0.01736321),
+            SIMD3<Float>(-2.16597676,  1.78554118, -0.04725154),
+            SIMD3<Float>( 0.10155818, -0.12943749,  1.03004253)
         ))
         // lms2rgb = hpeLms2Rgb * metadata.linearMatrix
         lms2rgbMatrix = hpeLms2Rgb * metadata.linearMatrix

@@ -61,7 +61,10 @@ public class VideoPlayer {
     public private(set) var hasAudio: Bool = false
     
     /// The rendering engine for displaying frames
-    public let renderingEngine: RenderingEngine?
+    
+    /// Real-time debug statistics
+    public private(set) var debugStats = PlayerDebugStats()
+
     
     // MARK: - Volume Control
     
@@ -120,7 +123,7 @@ public class VideoPlayer {
     ///   - frameBufferSize: Maximum frames to buffer (default: 3)
     ///   - packetQueueSize: Maximum packets to queue (default: 15)
     public init(frameBufferSize: Int = 3, packetQueueSize: Int = 15) {
-        self.renderingEngine = RenderingEngine()
+
         self.frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
         self.packetQueue = PacketQueue(maxSize: packetQueueSize)
     }
@@ -145,9 +148,7 @@ public class VideoPlayer {
                 videoInfo = decoder.videoInfo
                 
                 // Configure HDR tone mapping based on video metadata
-                if decoder.videoInfo.isHDR {
-                    renderingEngine?.contentPeakNits = decoder.videoInfo.contentPeakNits
-                }
+
 
                 while !Task.isCancelled {
                     guard let packet = await decoder.demuxNextPacket() else { break }
@@ -356,7 +357,7 @@ public class VideoPlayer {
         currentFrame = nil
         
         // Flush Metal texture cache to release GPU resources
-        renderingEngine?.flush()
+
         
         state = .idle
         
@@ -577,13 +578,29 @@ public class VideoPlayer {
                 let frameDuration = 1.0 / (videoInfo?.frameRate ?? 30.0)
                 if waitTime < -frameDuration {
                     _ = await frameBuffer.pop()
-
+                    await MainActor.run {
+                        debugStats.droppedFrameCount += 1
+                    }
                     continue
                 }
             }
             
             if let frame = await frameBuffer.pop() {
                 currentFrame = frame
+            }
+            
+            // Update debug stats
+            let pqCount = await packetQueue.count
+            let fbCount = await frameBuffer.count
+            let drift = hasAudio && audioPlayer.isPlaying ? waitTime : 0.0
+            
+            await MainActor.run {
+                debugStats.packetQueueCount = pqCount
+                debugStats.packetQueueMax = 15 // packets queue max size
+                debugStats.frameBufferCount = fbCount
+                debugStats.frameBufferMax = 3 // frame buffer max size
+                debugStats.avDrift = drift
+                debugStats.isHardwareDecoded = videoInfo?.isHardwareAccelerated ?? false
             }
         }
     }
@@ -628,7 +645,7 @@ public class VideoPlayer {
                 displayTask = nil
                 currentSeekTask = nil
 
-                renderingEngine?.flush()
+
                 state = .idle
 
                 let pq = packetQueue
@@ -657,7 +674,7 @@ public class VideoPlayer {
                     displayTask = nil
                     currentSeekTask = nil
 
-                    renderingEngine?.flush()
+
 
                     state = .idle
 
@@ -675,9 +692,34 @@ public class VideoPlayer {
 
     }
     
+    
+
+    
     nonisolated deinit {
 
 
         cancelAllTasks()
     }
+}
+
+/// Real-time debug statistics for the video player
+public struct PlayerDebugStats: Sendable {
+    /// Number of packets currently in the packet queue
+    public var packetQueueCount: Int = 0
+    /// Maximum capacity of the packet queue
+    public var packetQueueMax: Int = 0
+    
+    /// Number of frames currently in the frame buffer
+    public var frameBufferCount: Int = 0
+    /// Maximum capacity of the frame buffer
+    public var frameBufferMax: Int = 0
+    
+    /// Current A/V sync drift in seconds (positive = video ahead, negative = video behind)
+    public var avDrift: Double = 0.0
+    
+    /// Total number of frames dropped to catch up
+    public var droppedFrameCount: Int = 0
+    
+    /// Whether the current decoder is hardware accelerated
+    public var isHardwareDecoded: Bool = false
 }

@@ -52,6 +52,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) float masteringDisplayMinLuminance;
 /// Whether the content is Dolby Vision.
 @property(nonatomic, assign) BOOL isDolbyVision;
+/// Dolby Vision Profile ID (e.g., 5, 7, 8), 0 if not present.
+@property(nonatomic, assign) int doviProfile;
 /// Audio codec name (e.g., "aac", "opus"), nil if no audio stream.
 @property(nonatomic, copy, nullable) NSString *audioCodecName;
 /// Audio sample rate in Hz (e.g., 48000), 0 if no audio.
@@ -83,6 +85,8 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Dolby Vision Profile 5 metadata, if present (bridges to Swift as
 /// dictionary).
 @property(nonatomic, strong, nullable) NSDictionary *doviMetadata;
+/// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
+@property(nonatomic, assign) int doviProfile;
 @end
 
 /// A decoded audio frame.

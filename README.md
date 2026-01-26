@@ -4,16 +4,16 @@ A video decoding and rendering framework for macOS built on FFmpeg and Metal.
 
 ## Overview
 
-VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated decoding via VideoToolbox, and GPU-accelerated rendering via Metal.
+VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated decoding via VideoToolbox, and system-integrated rendering via `AVSampleBufferDisplayLayer` with custom Metal fallback for Dolby Vision.
 
 ## Features
 
-- **FFmpeg + dav1d Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
+- **FFmpeg Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
-- **HDR Support**: Full HDR10 and HLG support with BT.2020 color primaries, PQ/HLG transfer functions, and 10-bit color depth
-- **Dolby Vision**: Profile 5 support with IPTPQc2 colorspace, dynamic reshape metadata, and L1 scene brightness
-- **Tone Mapping**: Automatic BT.2390 tone mapping with scene-adaptive L1 metadata for HDR content
-- **Metal Rendering**: Zero-copy GPU YUV→RGB conversion with custom Metal shaders for SDR, HDR10, and Dolby Vision
+- **System-Integrated Rendering**: Uses `AVSampleBufferDisplayLayer` for power-efficient, color-perfect rendering of SDR, and HDR content
+- **Dolby Vision Support**: Custom Metal pipeline for Profile 5 (IPTPQc2) frames, converting them to HDR10 in real-time for system display
+- **HDR Support**: Full HDR10 and HLG support with BT.2020 color primaries and proper EDR signaling
+- **Tone Mapping**: Automatic system-level tone mapping using L1 scene brightness metadata extracted from Dolby Vision streams
 - **Audio Playback**: Synchronized audio via AVAudioEngine with A/V sync correction
 - **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
@@ -68,31 +68,57 @@ This creates universal static libraries (arm64 + x86_64) in `VidCore/Frameworks/
 
 ## Quick Start
 
-### Simplest Usage
+### Basic Playback
+The simplest way to play a video is using the `VidPlayer` view with a URL. This handles loading, playback, and error states automatically.
 
 ```swift
 import SwiftUI
 import VidCore
 
 struct ContentView: View {
+    let videoURL: URL
+    
     var body: some View {
-        VidPlayer(url: videoURL)  // Loads and plays automatically
+        // Auto-play with debug overlay enabled
+        VidPlayer(url: videoURL, allowsDebugMenu: true)
+            .edgesIgnoringSafeArea(.all)
     }
 }
 ```
 
-### With Player Control
+### Advanced Control
+For fine-grained control (play/pause, seek, metadata), create a `VideoPlayer` instance.
 
 ```swift
+import SwiftUI
+import VidCore
+
 struct PlayerView: View {
+    let videoURL: URL
     @State private var player = VideoPlayer()
     
     var body: some View {
-        VidPlayer(player: player)
-            .task {
-                try? await player.load(url: videoURL)
-                player.play()
+        VStack {
+            VidPlayer(player: player)
+                .task {
+                    // Load and play
+                    try? await player.load(url: videoURL)
+                    player.play()
+                }
+            
+            // Custom controls
+            HStack {
+                Button(player.isPlaying ? "Pause" : "Play") {
+                    player.togglePlayPause()
+                }
+                
+                if let info = player.videoInfo, info.isHDR {
+                    Text("HDR: \(info.transferFunctionName)")
+                        .foregroundStyle(.green)
+                }
             }
+            .padding()
+        }
     }
 }
 ```
@@ -185,12 +211,31 @@ player.duration           // Total duration in seconds
 player.isPlaying          // Convenience for state == .playing
 
 // Metadata
-player.videoInfo?.width
-player.videoInfo?.height
-player.videoInfo?.frameRate
-player.videoInfo?.codecName
-player.videoInfo?.isHardwareAccelerated
-player.hasAudio
+if let info = player.videoInfo {
+    // Basic
+    print("\(info.width)x\(info.height) @ \(info.frameRate)fps")
+    print("Duration: \(info.duration)s")
+    print("Codec: \(info.codecName) (HW accel: \(info.isHardwareAccelerated))")
+    
+    // HDR & Color
+    if info.isHDR {
+        print("HDR Type: \(info.transferFunctionName)") // PQ or HLG
+        print("Bit Depth: \(info.bitsPerComponent)-bit")
+        print("Color: \(info.colorPrimariesName) / \(info.colorSpaceName)")
+        
+        if info.isDolbyVision {
+             print("Dolby Vision Profile: \(info.doviProfile ?? 0)")
+        }
+        
+        // Tone Mapping helper
+        print("Content Peak: \(info.contentPeakNits) nits")
+    }
+    
+    // Audio
+    if let audioCodec = info.audioCodecName {
+        print("Audio: \(audioCodec) \(info.audioChannels ?? 0)ch @ \(info.audioSampleRate ?? 0)Hz")
+    }
+}
 
 // Cleanup
 await player.close()
@@ -199,23 +244,6 @@ await player.close()
 ---
 
 ### Low-Level API (Advanced)
-
-#### MetalVideoRenderer
-
-For custom rendering pipelines where you need direct control:
-
-```swift
-if let renderingEngine = player.renderingEngine {
-    MetalVideoRenderer(
-        renderingEngine: renderingEngine,
-        currentFrame: Binding(get: { player.currentFrame }, set: { _ in })
-    )
-    .aspectRatio(
-        CGSize(width: player.videoInfo?.width ?? 16, height: player.videoInfo?.height ?? 9),
-        contentMode: .fit
-    )
-}
-```
 
 #### VideoDecoder
 
@@ -270,11 +298,10 @@ decoder.close()
 
 #### Generating Thumbnails
 
-Use the decoder and rendering engine together to generate video thumbnails:
+You can use the `AVSystemVideoRenderer` helper to convert video frames (including complex Dolby Vision frames) to images:
 
 ```swift
 let decoder = try VideoDecoder(url: videoURL)
-let renderingEngine = RenderingEngine()
 
 // Seek to 10% into the video for a representative frame
 let seekTime = decoder.videoInfo.duration * 0.1
@@ -286,11 +313,10 @@ if let packet = await decoder.demuxNextPacket() {
     
     for frame in frames {
         if case .video(let videoFrame) = frame {
-            // Render to CGImage with optional scaling
-            let thumbnailSize = CGSize(width: 320, height: 180)
-            if let cgImage = renderingEngine?.renderToCGImage(videoFrame, targetSize: thumbnailSize) {
-                let nsImage = NSImage(cgImage: cgImage, size: thumbnailSize)
-                // Use the thumbnail...
+            // Convert to CGImage (handles DoVi -> HDR10 conversion automatically)
+            if let cgImage = AVSystemVideoRenderer.createCGImage(from: videoFrame) {
+                 let nsImage = NSImage(cgImage: cgImage, size: CGSize(width: 320, height: 180))
+                 // Use the thumbnail...
             }
             break
         }
@@ -304,118 +330,65 @@ decoder.close()
 
 ### HDR Playback
 
-VidCore provides full HDR10 support with automatic detection and rendering:
+VidCore leverages macOS's native EDR (Extended Dynamic Range) capabilities by integrating directly with `AVSampleBufferDisplayLayer`. This ensures power-efficient, accurate HDR playback that matches the system's own media handling.
+
+#### System-Integrated Rendering
+
+Unlike traditional players that use custom Metal shaders for all rendering, VidCore hands frame data directly to the OS compositor when possible:
+
+- **HDR10 (PQ)**: Passed as 10-bit buffers with BT.2020 primaries and SMPTE ST 2084 transfer function. macOS handles tone mapping to the display's capabilities.
+- **HLG**: Passed as 10-bit HLG buffers. macOS handles the OETF/OOTF processing.
+- **SDR**: Standard Rec.709 handling.
+
+This approach provides:
+- **Perfect Color Matching**: Identical to QuickTime Player and Safari.
+- **Power Efficiency**: Uses the dedicated hardware compositor.
+- **AirPlay Support**: Native HDR support over AirPlay.
+
+#### Dolby Vision Support (Profile 5)
+
+Since macOS does not natively support the Dolby Vision Profile 5 (IPTPQc2) colorspace in `AVSampleBufferDisplayLayer`, VidCore uses a specialized Metal pipeline to convert it in real-time.
+
+**The Pipeline:**
+1.  **Decode**: Frame is decoded to an NV12 buffer (software or hardware).
+2.  **Metadata Extraction**: VidCore parses the Dolby Vision RPU to extract:
+    -   Dynamic reshape curves (Polynomial/MMR)
+    -   Color transformation matrices
+    -   L1 scene brightness metadata (MaxCLL/MaxFALL)
+3.  **Compute Shader**: A custom Metal kernel (`DoViHDR10Converter`) processes the frame:
+    -   Applies nonlinear quantization.
+    -   Reshapes the signal (luma/chroma mapping).
+    -   Converts IPT color space to LMS, then to linear RGB.
+    -   Outputs a standard **HDR10** (PQ/BT.2020) frame.
+4.  **Display**: The converted HDR10 frame is handed to the system renderer, tagged with the original scene brightness metadata for accurate tone mapping.
 
 #### Automatic HDR Detection
+
+You can inspect the stream's HDR capabilities via `VideoInfo`:
 
 ```swift
 let decoder = try VideoDecoder(url: videoURL)
 
 if decoder.videoInfo.isHDR {
     print("HDR Content Detected!")
-    print("Color Primaries: \(decoder.videoInfo.colorPrimaries)")  // 9 = BT.2020
-    print("Transfer Function: \(decoder.videoInfo.colorTransfer)")  // 16 = PQ
     print("Bit Depth: \(decoder.videoInfo.bitsPerComponent)")      // 10-bit
-}
-```
-
-#### HDR Rendering Requirements
-
-For proper HDR display, configure your Metal layer for EDR:
-
-```swift
-import SwiftUI
-import MetalKit
-
-// In your MetalKit view setup:
-metalLayer.pixelFormat = .rgba16Float  // Required for EDR
-metalLayer.wantsExtendedDynamicRangeContent = true
-
-// VidCore will automatically:
-// 1. Detect the rgba16Float format
-// 2. Use PQ→Linear conversion shaders
-// 3. Output values where 1.0 = 100 nits (SDR white)
-// 4. Values > 1.0 represent HDR highlights
-```
-
-#### HDR Metadata
-
-Access detailed color information from the decoder:
-
-```swift
-// Color primaries (AVCOL_PRI_*)
-// 1 = BT.709 (SDR), 9 = BT.2020 (HDR)
-
-// Transfer function (AVCOL_TRC_*)
-// 1 = BT.709 (SDR)
-// 16 = SMPTE ST 2084 / PQ (HDR10)
-// 18 = ARIB STD-B67 (HLG)
-
-// Color space (AVCOL_SPC_*)
-// 1 = BT.709, 9 = BT.2020 non-constant luminance
-
-// Color range (AVCOL_RANGE_*)
-// 1 = Video/Limited (16-235)
-// 2 = Full (0-255)
-```
-
-#### Supported HDR Formats
-
-- **Pixel Formats**: P010 (10-bit bi-planar), YUV420P10LE (10-bit tri-planar)
-- **Color Primaries**: BT.2020 (wide color gamut) with automatic mapping to Display P3
-- **Transfer Function**: PQ/SMPTE ST 2084 (HDR10) and HLG/ARIB STD-B67
-- **Bit Depth**: 10-bit color depth
-- **Output**: Linear light values for EDR displays
-
-#### Dolby Vision Support (Profile 5)
-
-VidCore supports Dolby Vision Profile 5 (IPTPQc2) decoding and rendering:
-
-- **Metadata Parsing**: Extracts dynamic reshape metadata (pivot points, polynomial/MMR coefficients) from the bitstream.
-- **Reshape Pipeline**: Applies per-frame reshape curves in the Metal shader to reconstruct linear light.
-- **Color Conversion**: Performs IPTPQc2 → LMS → RGB conversion using dynamic color matrices.
-- **Automatic Fallback**: If DoVi metadata is missing or invalid, falls back to standard HDR10 rendering.
-
-#### L1 Scene Brightness Metadata
-
-VidCore extracts Dolby Vision L1 dynamic metadata for per-frame scene brightness. This enables more accurate tone mapping that adapts to scene content rather than using fixed mastering values:
-
-```swift
-if let frame = player.currentFrame, let dovi = frame.doviMetadata {
-    // Static mastering range (always present)
-    print("Mastering Min: \(dovi.sourceMinPQ) PQ")
-    print("Mastering Max: \(dovi.sourceMaxPQ) PQ")
     
-    // Dynamic scene brightness (L1, per-frame, nil if not present)
-    if let sceneMax = dovi.sceneMaxPQ {
-        print("Scene Max: \(sceneMax) PQ")  // Peak brightness in this scene
-    }
-    if let sceneAvg = dovi.sceneAvgPQ {
-        print("Scene Avg: \(sceneAvg) PQ")  // Average brightness in this scene
+    if decoder.videoInfo.isDolbyVision {
+        print("Dolby Vision Profile: \(decoder.videoInfo.doviProfile ?? 0)")
+    } else {
+        print("Transfer Function: \(decoder.videoInfo.transferFunctionName)") // PQ / HLG
     }
 }
 ```
 
-The rendering engine automatically uses L1 data when available—`sceneMaxPQ` is preferred over `sourceMaxPQ` for tone mapping, resulting in better highlight preservation in darker scenes and smoother rolloff in bright scenes.
+#### Dynamic Tone Mapping
 
-#### Tone Mapping (BT.2390)
+VidCore preserves dynamic metadata throughout the pipeline:
 
-For optimal HDR reproduction on screens with lower peak brightness (e.g., MacBook Air, older iPad Pro), VidCore implements BT.2390 tone mapping:
+- **HDR10**: Uses static MaxCLL/MaxFALL if present in the container.
+- **Dolby Vision**: Extracts **L1 Scene Brightness** (per-frame dynamic metadata) and attaches it to the converted HDR10 frames.
 
-- **Dynamic Headroom Detection**: Automatically detects the current screen's peak brightness (e.g., 500 nits vs 1600 nits).
-- **EETF**: Applies the BT.2390 Electrical-Electrical Transfer Function to roll off highlights smoothly.
-- **Configurable**: You can set the content peak and target display peak:
-
-```swift
-if let engine = player.renderingEngine {
-    // Override default target of 1000 nits
-    // (VidCore automatically detects screen peak, but you can force it)
-    engine.targetDisplayPeakNits = 600.0 
-    
-    // Set content peak (default 1000.0)
-    engine.contentPeakNits = 1000.0
-}
-```
+This allows the system renderer to adjust tone mapping on a scene-by-scene basis, preserving highlights in dark scenes and avoiding clipping in bright ones.
 
 ---
 
@@ -442,8 +415,8 @@ High-level playback orchestrator with A/V sync and state management.
 | `isMuted` | Whether muted |
 | `videoInfo` | Video metadata |
 | `currentFrame` | Current `VideoFrame` for rendering |
-| `renderingEngine` | Metal rendering context |
 | `hasAudio` | Whether video has audio track |
+| `debugStats` | Real-time playback statistics |
 
 ### PlaybackState
 
@@ -483,23 +456,16 @@ VidPlayer(player: VideoPlayer, showsBuiltInControls: Bool, allowsDebugMenu: Bool
 
 #### Debug Overlay
 
-Enable the debug overlay to inspect video playback in real-time:
-
-```swift
-// Enable debug menu via right-click context menu
-VidPlayer(player: player, allowsDebugMenu: true)
-```
-
-When enabled, right-click on the video to toggle the debug overlay, which displays:
+Enable the debug overlay to inspect video playback in real-time. When enabled (via `allowsDebugMenu: true`), right-click on the video to toggle the debug display:
 
 | Category | Information |
 |----------|-------------|
 | **Video** | Resolution, frame rate, codec, hardware acceleration |
-| **Format** | Pixel format (NV12, P010, etc.), bit depth (8/10-bit) |
+| **Format** | Pixel format, bit depth |
 | **Color** | Transfer function, primaries, color space, range |
-| **HDR** | HDR status, Dolby Vision profile, L1 scene brightness |
+| **HDR** | HDR status, Dolby Vision profile |
 | **Audio** | Codec, sample rate, channel count |
-| **Timing** | Current PTS, frame number |
+| **A/V Sync** | Current drift, dropped frames, queue health |
 
 ### VideoDecoder
 
@@ -561,12 +527,13 @@ A decoded video frame with pixel data and timing information.
 | `isHDR` | `Bool` | Whether frame contains HDR content |
 | `colorTransfer` | `Int` | Color transfer characteristics (1=BT.709, 16=PQ, 18=HLG) |
 | `doviMetadata` | `DoViMetadata?` | Dolby Vision metadata for this frame (Profile 5 only) |
+| `doviProfile` | `Int` | Dolby Vision Profile ID (e.g., 5, 8), 0 if not present |
 
 **Supported Pixel Formats:**
-- **NV12** (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) - 8-bit bi-planar, hardware decode
-- **I420** (`kCVPixelFormatType_420YpCbCr8Planar`) - 8-bit tri-planar, software decode
-- **P010** (`kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`) - 10-bit bi-planar, HDR hardware decode
-- **BGRA** (`kCVPixelFormatType_32BGRA`) - 8-bit packed, fallback format
+- **NV12**: 8-bit bi-planar (Standard, Hardware)
+- **I420**: 8-bit tri-planar (Software)
+- **P010**: 10-bit bi-planar (HDR Hardware)
+- **BGRA**: 8-bit packed (Fallback)
 
 ### DoViMetadata
 
@@ -582,39 +549,19 @@ Dolby Vision metadata for a single frame (Profile 5 IPTPQc2).
 | `linearMatrix` | `matrix_float3x3` | LMS to RGB transformation matrix |
 | `components` | `[DoViReshapeData]` | Reshape curves for I, P, T channels |
 
-### RenderingEngine
+### AVSystemVideoRenderer
 
-GPU-accelerated frame rendering with HDR support.
+A SwiftUI view wrapper for `AVSampleBufferDisplayLayer` that provides direct system integration for high-performance rendering.
 
-| Property/Method | Type | Description |
-|-----------------|------|-------------|
-| `init?()` | | Initialize Metal context |
-| `device` | `MTLDevice` | The Metal device used for rendering |
-| `commandQueue` | `MTLCommandQueue` | The command queue for render commands |
-| `ciContext` | `CIContext` | Core Image context for fallback rendering |
-| `targetDisplayPeakNits` | `Float` | Target display peak brightness in nits |
-| `contentPeakNits` | `Float` | Content peak brightness in nits (default 1000.0) |
-| `currentDisplayPeakNits` | `Float` | Current detected display peak (read-only) |
-| `currentRenderMode` | `String` | Current rendering pipeline name (read-only) |
-| `lastL1SceneMaxNits` | `Float?` | Last Dolby Vision L1 scene max (read-only) |
-| `renderVideoFrame(_:to:)` | | Render VideoFrame with HDR awareness |
-| `renderPixelBuffer(_:to:)` | | Render CVPixelBuffer to drawable (SDR) |
-| `renderToCGImage(_:targetSize:)` | `CGImage?` | Render VideoFrame to CGImage for thumbnails |
-| `flush()` | | Flush texture cache to release GPU memory |
+```swift
+// Render a video frame in SwiftUI
+AVSystemVideoRenderer(currentFrame: player.currentFrame)
 
-**HDR Rendering:**
-- Automatically detects drawable format (bgra8Unorm vs rgba16Float)
-- For HDR content on EDR-capable layers, uses PQ→Linear or HLG→Linear conversion
-- Supports both P010 (bi-planar) and YUV420P10LE (tri-planar) 10-bit formats
-- Falls back to SDR rendering if layer doesn't support EDR
-- Full-range and video-range YUV variants for proper color levels
-
-**Shader Pipelines:**
-- **SDR NV12/I420**: Video-range and full-range BT.709 YUV→RGB
-- **HDR10 NV12**: 10-bit BT.2020 YUV→Linear with PQ EOTF
-- **HLG NV12**: 10-bit BT.2020 YUV→Linear with HLG OETF⁻¹ and OOTF
-- **Dolby Vision**: Profile 5 IPTPQc2 with reshape processing
-- **Float16 Output**: For EDR displays (rgba16Float, 1.0 = 100 nits)
+// Generate a thumbnail (handles Dolby Vision Profile 5 automatically)
+if let cgImage = AVSystemVideoRenderer.createCGImage(from: videoFrame) {
+    let thumbnail = NSImage(cgImage: cgImage, size: size)
+}
+```
 
 ---
 
@@ -622,11 +569,15 @@ GPU-accelerated frame rendering with HDR support.
 
 VidCore includes several performance optimizations for efficient video playback:
 
-### GPU YUV Conversion
-- **Zero-copy rendering** via Metal texture cache, eliminating CPU overhead
-- **Direct GPU conversion** from YUV to RGB, avoiding FFmpeg's `sws_scale`
-- **Performance gain**: Eliminates 20-30ms per frame CPU overhead for 4K video
-- Supports YUV 4:2:0 subsampling with proper half-resolution U/V sampling
+### Efficient System Integration
+- **Direct System Pass-through**: Standard SDR and HDR content is passed directly to `AVSampleBufferDisplayLayer` without unnecessary copying or shader processing.
+- **Hardware Compositing**: Utilizes the macOS hardware compositor for power-efficient scaling and color management.
+
+### GPU YUV Conversion (Dolby Vision)
+- **Zero-copy texture path** via Metal texture cache for Profile 5 conversion.
+- **Compute-based Reshape**: Custom Metal kernel handles IPTPQc2 to HDR10 conversion entirely on the GPU.
+- **Performance gain**: Enables playback of complex Dolby Vision Profile 5 content that is otherwise unplayable on macOS system players.
+- Supports YUV 4:2:0 subsampling with proper half-resolution U/V sampling.
 
 ### CVPixelBufferPool Management
 - **Reusable buffer pools** for both SDR (I420) and HDR (P010) frames
@@ -668,7 +619,7 @@ graph TD
     subgraph VidCore [VidCore Framework]
         subgraph SwiftUI [SwiftUI Layer]
             VPV[VidPlayer]
-            MVR[MetalVideoRenderer]
+            ASVR[AVSystemVideoRenderer]
         end
 
         subgraph Playback [Playback Layer]
@@ -682,9 +633,7 @@ graph TD
         end
 
         subgraph Rendering [Rendering Layer]
-            RE[RenderingEngine]
-            TM[ToneMapping]
-            YS[YUV Shaders<br/>Metal]
+            DVC[DoViHDR10Converter<br/>Metal]
         end
     end
 
@@ -693,32 +642,23 @@ graph TD
         VT[VideoToolbox]
         MTL[Metal]
         AV[AVFoundation]
+        ASBDL[AVSampleBufferDisplayLayer]
     end
 
     UI --> VPV
     VPV --> VP
-    VPV --> MVR
-    MVR --> RE
+    VPV --> ASVR
+    ASVR --> ASBDL
+    ASVR -.-> DVC
 
     VP --> VD
     VP --> AP
-    VP --> RE
-
+    
     VD --> FD
     FD --> FF
     FD --> VT
 
-    FD --> VT
-    
-    RE --> TM
-    TM --> YS
-    YS --> MTL
-
     AP --> AV
+    
+    DVC --> MTL
 ```
-
----
-
-## License
-
-LGPL License
