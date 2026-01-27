@@ -300,11 +300,20 @@ static void outputCallback(void *decompressionOutputRefCon,
         (__bridge NSString *)kCVPixelBufferMetalCompatibilityKey: @YES
     }];
     
-    // For Dolby Vision Profile 5 (10-bit), request appropriate pixel format
+    // For Dolby Vision 10-bit content, request appropriate pixel format
+    // Profile 5 uses FULL range, while Profile 7/8 use video (limited) range
     if (_isDolbyVision && (_dolbyVisionProfile == 5 || _dolbyVisionProfile == 7 || _dolbyVisionProfile == 8)) {
-        destinationImageBufferAttributes[(__bridge NSString *)kCVPixelBufferPixelFormatTypeKey] = 
-            @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange);
-        NSLog(@"[VTDecoder] Requesting 10-bit pixel format for Dolby Vision");
+        if (_dolbyVisionProfile == 5) {
+            // Profile 5 (IPTPQc2) uses full range encoding
+            destinationImageBufferAttributes[(__bridge NSString *)kCVPixelBufferPixelFormatTypeKey] = 
+                @(kCVPixelFormatType_420YpCbCr10BiPlanarFullRange);
+            NSLog(@"[VTDecoder] Requesting 10-bit FULL range pixel format for Dolby Vision Profile 5");
+        } else {
+            // Profile 7/8 use video (limited) range
+            destinationImageBufferAttributes[(__bridge NSString *)kCVPixelBufferPixelFormatTypeKey] = 
+                @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange);
+            NSLog(@"[VTDecoder] Requesting 10-bit video range pixel format for Dolby Vision Profile %d", _dolbyVisionProfile);
+        }
     }
     
     OSStatus status = VTDecompressionSessionCreate(
