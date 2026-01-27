@@ -24,7 +24,7 @@ struct VidPlayerDebugOverlay: View {
                 if let stats = debugStats {
                     Group {
                         debugRow("State", "Playing") // Dynamic in future
-                        debugRow("Decoder", stats.isHardwareDecoded ? "Hardware (VT)" : "Software (FFmpeg)")
+                        debugRow("Decoder", stats.decoderName)
                         
                         // Buffer Health
                         let pqPct = Double(stats.packetQueueCount) / Double(max(1, stats.packetQueueMax)) * 100
@@ -115,17 +115,6 @@ struct VidPlayerDebugOverlay: View {
                     }
                 } else {
                     debugRow("Audio", "None", color: .gray)
-                }
-                
-                if let dovi = frame.doviMetadata {
-                    Divider().background(Color.white.opacity(0.3))
-                    header("DoVi Dynamic Data")
-                    if let sceneMax = dovi.sceneMaxPQ {
-                        debugRow("L1 Scene Max", String(format: "%.0f nits", pqToNits(sceneMax)))
-                    }
-                    if let sceneAvg = dovi.sceneAvgPQ {
-                        debugRow("L1 Scene Avg", String(format: "%.0f nits", pqToNits(sceneAvg)))
-                    }
                 }
             }
         }

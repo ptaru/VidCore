@@ -10,8 +10,8 @@
 #import "FFmpegBridge.h"
 #undef AVMediaType
 
+#import "VTDecoder.h"
 #import "FFmpegDecoder.h"
-#import "DoViMetadataExtractor.h"
 #import "PixelFormatConverter.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
@@ -57,6 +57,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) AVFormatContext *formatContext;
 @property(nonatomic, assign)
     AVCodecContext *codecContext; // Video codec context
+@property(nonatomic, strong) VTDecoder *vtDecoder;
 @property(nonatomic, assign)
     AVCodecContext *audioCodecContext; // Audio codec context
 @property(nonatomic, assign) SwsContext *swsContext;
@@ -230,7 +231,39 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   // Try to initialize hardware decoder
-  BOOL hwInitSuccess = [self initHardwareDecoder:codec error:nil];
+  // Try to initialize VTDecoder for supported codecs (HEVC)
+  // This bypasses FFmpeg's hardware decoder
+  if ([VTDecoder isCodecSupported:videoStream->codecpar->codec_id]) {
+      // Extract Dolby Vision config if present
+      NSData *doviConfigData = nil;
+      const AVPacketSideData *doviSideData = av_packet_side_data_get(
+          videoStream->codecpar->coded_side_data,
+          videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
+      if (doviSideData && doviSideData->size > 0) {
+          doviConfigData = [NSData dataWithBytes:doviSideData->data length:doviSideData->size];
+      }
+      
+      _vtDecoder = [[VTDecoder alloc] initWithCodecParameters:videoStream->codecpar
+                                                     timeBase:videoStream->time_base
+                                          dolbyVisionSideData:doviConfigData
+                                                        error:nil];
+      if (_vtDecoder) {
+          _usingHardwareDecoder = YES;
+          if (_vtDecoder.isDolbyVision) {
+              NSLog(@"[FFmpegDecoder] Using VTDecoder for Dolby Vision Profile %d", _vtDecoder.dolbyVisionProfile);
+          } else {
+              NSLog(@"[FFmpegDecoder] Using VTDecoder for HEVC");
+          }
+      }
+  }
+
+  // Initialize hardware decoder (only if manual VTDecoder didn't take over)
+  // And even if VTDecoder is used, we might want to open software codec for metadata?
+  // Actually, if _vtDecoder is used, we skip FFmpeg's HW init.
+  BOOL hwInitSuccess = NO;
+  if (!_vtDecoder) {
+      hwInitSuccess = [self initHardwareDecoder:codec error:nil];
+  }
 
   // Allocate codec context
   _codecContext = avcodec_alloc_context3(codec);
@@ -267,7 +300,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (ret < 0) {
     // If hardware decoding failed to open, try falling back to software
     // If hardware decoding failed to open, try falling back to software
-    if (_usingHardwareDecoder) {
+    if (_usingHardwareDecoder && !_vtDecoder) {
 
 
       // Reset hardware state
@@ -354,8 +387,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   
   // Set decoder details
   if (_usingHardwareDecoder) {
-      _videoInfo.decoderName = @"VideoToolbox";
-      _videoInfo.decoderDescription = @"Hardware Acceleration (GPU)";
+      if (_vtDecoder) {
+          _videoInfo.decoderName = [NSString stringWithFormat:@"VTDecoder (%s)", codec->name];
+          _videoInfo.decoderDescription = @"Hardware Acceleration (Manual Mapped)";
+      } else {
+          _videoInfo.decoderName = [NSString stringWithFormat:@"%s_videotoolbox", codec->name];
+          _videoInfo.decoderDescription = @"Hardware Acceleration (VideoToolbox)";
+      }
   } else {
       _videoInfo.decoderName = [NSString stringWithFormat:@"%s", codec->name];
       _videoInfo.decoderDescription = @"Software Decoding (CPU)";
@@ -604,6 +642,46 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
+  // Manual VTDecoder Path
+  if (_vtDecoder) {
+      NSError *error = nil;
+      // 1. Send packet to decoder (Push)
+      if (![_vtDecoder sendPacket:pkt error:&error]) {
+          if (error) NSLog(@"[FFmpegDecoder] VTDecoder sendPacket error: %@", error);
+          // Don't return nil yet, checking if any frames are ready to pop regardless of input failure
+      }
+      
+      NSMutableArray<FFmpegVideoFrame *> *frames = [NSMutableArray array];
+      
+      // 2. Retrieve all available frames (Pull)
+      CVPixelBufferRef pixelBuffer = NULL;
+      CMTime framePTS = kCMTimeInvalid;
+      
+      while ((pixelBuffer = [_vtDecoder popFrame:&framePTS])) {
+          // Calculate PTS from the frame's metadata
+          double pts = 0.0;
+          if (CMTIME_IS_VALID(framePTS)) {
+              pts = CMTimeGetSeconds(framePTS);
+          } else {
+              // Fallback if somehow invalid (shouldn't happen with valid packets)
+               if (pkt->pts != AV_NOPTS_VALUE) {
+                   AVStream *stream = _formatContext->streams[_videoStreamIndex];
+                   pts = (double)pkt->pts * av_q2d(stream->time_base);
+               }
+          }
+          
+          FFmpegVideoFrame *frame = [self createVideoFrameFromPixelBuffer:pixelBuffer pts:pts];
+          // Ownership of pixelBuffer is transferred to FFmpegVideoFrame, which releases it on dealloc.
+          // We do NOT release it here.
+          
+          if (frame) {
+              [frames addObject:frame];
+          }
+      }
+      
+      return frames.count > 0 ? frames : nil;
+  }
+
   if (avcodec_send_packet(_codecContext, pkt) < 0) {
     return nil;
   }
@@ -789,11 +867,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return NULL;
 }
 
-/// Extract Dolby Vision Profile 5 metadata from frame side data
-/// Returns nil for Profile 8 or non-DoVi content (fallback to standard HDR)
-- (nullable NSDictionary *)extractDoViMetadataFromFrame:(AVFrame *)frame {
-  return [DoViMetadataExtractor extractMetadataFromFrame:frame];
-}
+
 
 - (CVPixelBufferRef)convertFrameToPixelBuffer:(AVFrame *)frame {
   return [_pixelFormatConverter convertFrame:frame];
@@ -820,9 +894,19 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   videoFrame.type = FFmpegFrameTypeVideo;
   videoFrame.pixelBuffer = pixelBuffer;
   videoFrame.presentationTime = pts;
-  videoFrame.doviMetadata = [self extractDoViMetadataFromFrame:_frame];
   videoFrame.doviProfile = _videoInfo.doviProfile;
   return videoFrame;
+}
+
+- (nullable FFmpegVideoFrame *)createVideoFrameFromPixelBuffer:(CVPixelBufferRef)pixelBuffer pts:(double)pts {
+    if (!pixelBuffer) return nil;
+    
+    FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
+    videoFrame.type = FFmpegFrameTypeVideo;
+    videoFrame.pixelBuffer = pixelBuffer;
+    videoFrame.presentationTime = pts;
+    videoFrame.doviProfile = _videoInfo.doviProfile;
+    return videoFrame;
 }
 
 /// Seeks to the specified time in the video.
@@ -855,6 +939,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   // Flush codec buffers to reset decoder state
+  if (_vtDecoder) {
+      [_vtDecoder flush];
+  }
   avcodec_flush_buffers(_codecContext);
   if (_audioCodecContext) {
     avcodec_flush_buffers(_audioCodecContext);
@@ -920,13 +1007,35 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     }
 
     // Video Packet - Decode
-    if (_packet->stream_index == _videoStreamIndex && _codecContext) {
+    if (_packet->stream_index == _videoStreamIndex && (_codecContext || _vtDecoder)) {
       if (optimizationActive) {
         double packetPTS = (double)_packet->pts * av_q2d(stream->time_base);
         if (packetPTS >= targetPTS - adaptiveThreshold) {
           _codecContext->skip_frame = originalSkipFrame;
           optimizationActive = NO;
         }
+      }
+      
+      if (_vtDecoder) {
+          // Synchronous manual decode for seeking
+          NSError *vtError = nil;
+          CVPixelBufferRef pixelBuffer = [_vtDecoder decodePacket:_packet error:&vtError];
+          if (pixelBuffer) {
+              double framePTS = 0.0;
+              if (_packet->pts != AV_NOPTS_VALUE) {
+                  framePTS = (double)_packet->pts * av_q2d(stream->time_base);
+              }
+              
+              if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
+                  resultFrame = [self createVideoFrameFromPixelBuffer:pixelBuffer pts:framePTS];
+                  // Ownership transferred to resultFrame, do not release
+                  av_packet_unref(_packet);
+                  break; // Found it
+              }
+              CVPixelBufferRelease(pixelBuffer);
+          }
+          av_packet_unref(_packet);
+          continue;
       }
 
       if (avcodec_send_packet(_codecContext, _packet) < 0) {
@@ -1035,6 +1144,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Cleanup pixel format converter (handles I420 and P010 buffer pools)
   [_pixelFormatConverter cleanup];
   _pixelFormatConverter = nil;
+
+  if (_vtDecoder) {
+      [_vtDecoder flush]; // Ensure clean teardown if needed (though teardown handles it)
+      _vtDecoder = nil;
+  }
 
   _usingHardwareDecoder = NO;
   NSLog(@"[FFmpegDecoder] close() completed - all resources freed");

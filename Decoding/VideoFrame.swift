@@ -29,8 +29,6 @@ public struct VideoFrame {
     public let presentationTime: Double
     /// Whether this frame contains HDR content (PQ or HLG transfer function).
     public let isHDR: Bool
-    /// Dolby Vision Profile 5 metadata, if present.
-    public let doviMetadata: DoViMetadata?
     /// Color transfer characteristics (1=BT.709, 16=PQ, 18=HLG).
     public let colorTransfer: Int
     /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
@@ -41,14 +39,12 @@ public struct VideoFrame {
         pixelBuffer: CVPixelBuffer,
         presentationTime: Double,
         isHDR: Bool = false,
-        doviMetadata: DoViMetadata? = nil,
         colorTransfer: Int? = nil,
         doviProfile: Int = 0
     ) {
         self.pixelBuffer = pixelBuffer
         self.presentationTime = presentationTime
         self.isHDR = isHDR
-        self.doviMetadata = doviMetadata
         self.colorTransfer = colorTransfer ?? (isHDR ? 16 : 1)
         self.doviProfile = doviProfile
     }

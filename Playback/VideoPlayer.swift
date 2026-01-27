@@ -601,6 +601,7 @@ public class VideoPlayer {
                 debugStats.frameBufferMax = 3 // frame buffer max size
                 debugStats.avDrift = drift
                 debugStats.isHardwareDecoded = videoInfo?.isHardwareAccelerated ?? false
+                debugStats.decoderName = videoInfo?.decoderName ?? "Unknown"
             }
         }
     }
@@ -722,4 +723,7 @@ public struct PlayerDebugStats: Sendable {
     
     /// Whether the current decoder is hardware accelerated
     public var isHardwareDecoded: Bool = false
+    
+    /// Name of the current decoder
+    public var decoderName: String = "Unknown"
 }

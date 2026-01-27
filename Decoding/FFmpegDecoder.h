@@ -82,9 +82,6 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @interface FFmpegVideoFrame : FFmpegFrame
 /// The decoded pixel buffer (CVImageBuffer).
 @property(nonatomic, assign) CVPixelBufferRef pixelBuffer;
-/// Dolby Vision Profile 5 metadata, if present (bridges to Swift as
-/// dictionary).
-@property(nonatomic, strong, nullable) NSDictionary *doviMetadata;
 /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
 @property(nonatomic, assign) int doviProfile;
 @end

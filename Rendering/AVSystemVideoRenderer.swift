@@ -35,38 +35,21 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
     /// - Parameter frame: The video frame to convert
     /// - Returns: A CGImage representation of the frame, or nil if conversion fails.
     public static func createCGImage(from frame: VideoFrame) -> CGImage? {
-        var frameToProcess = frame
-        let doviConverter = DoViHDR10Converter()
+        let pixelBuffer = frame.pixelBuffer
         
-        // Check for Dolby Vision Profile 5 (which needs conversion)
-        if frame.doviProfile == 5 {
-            // "Profile 5" check: IPTPQc2 requires custom conversion
-            // Convert to HDR10 (RGBA16Float)
-            if let converted = doviConverter?.convert(frame: frame) {
-                frameToProcess = converted
-            }
-        }
-        
-        let pixelBuffer = frameToProcess.pixelBuffer
-        
-        if frameToProcess.isHDR {
+        if frame.isHDR {
             // Most HDR content is BT.2020
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
             
             // Transfer Function
             let transferFunction: CFString
-            if frameToProcess.colorTransfer == 18 { // HLG
+            if frame.colorTransfer == 18 { // HLG
                 transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
             } else { // PQ (ST 2084)
                 transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
             }
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
-            
-            // Apply Dolby Vision L1 metadata if present (Dynamic HDR10)
-            if let seiPayload = frameToProcess.doviMetadata?.contentLightLevelData() {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferContentLightLevelInfoKey, seiPayload as CFData, .shouldPropagate)
-            }
         }
         
         var cgImage: CGImage?
@@ -79,7 +62,6 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
 /// NSView wrapper for AVSampleBufferDisplayLayer
 public class AVSampleBufferDisplayLayerWrapperView: NSView {
     private let displayLayer = AVSampleBufferDisplayLayer()
-    private let doviConverter = DoViHDR10Converter()
     
     override public init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -111,18 +93,7 @@ public class AVSampleBufferDisplayLayerWrapperView: NSView {
     
     /// Enqueues a video frame for display
     func enqueue(_ frame: VideoFrame) {
-        var frameToDisplay = frame
-        
-        // Check for Dolby Vision Profile 5 (which needs conversion for System Renderer)
-        if frame.doviProfile == 5 {
-            // "Profile 5" check: IPTPQc2 requires custom conversion
-            // Convert to HDR10 (RGBA16Float)
-            if let converted = doviConverter?.convert(frame: frame) {
-                frameToDisplay = converted
-            }
-        }
-        
-        guard let sampleBuffer = createSampleBuffer(from: frameToDisplay) else { return }
+        guard let sampleBuffer = createSampleBuffer(from: frame) else { return }
         
         // AVSBDL requires the layer to be ready
         if displayLayer.status == .failed {
@@ -158,11 +129,6 @@ public class AVSampleBufferDisplayLayerWrapperView: NSView {
                 transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
             }
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
-            
-            // Apply Dolby Vision L1 metadata if present (Dynamic HDR10)
-            if let seiPayload = frame.doviMetadata?.contentLightLevelData() {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferContentLightLevelInfoKey, seiPayload as CFData, .shouldPropagate)
-            }
         }
         
         var formatDescription: CMFormatDescription?
