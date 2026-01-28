@@ -99,7 +99,7 @@ public struct VidPlayer<Overlay: View>: View {
             Color.black
             
             // Video rendering
-            AVSystemVideoRenderer(currentFrame: activePlayer.currentFrame)
+            AVSystemVideoRenderer(player: activePlayer)
             
             // Built-in controls (can be disabled)
             if showsBuiltInControls {

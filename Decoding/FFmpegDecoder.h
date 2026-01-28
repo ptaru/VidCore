@@ -113,15 +113,18 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Initialize the decoder with a video file URL.
 /// @param url The file URL to the video.
 /// @param error Output error if initialization fails.
-- (nullable instancetype)initWithURL:(NSURL *)url error:(NSError **)error;
+
+
+/// Initialize the decoder with a configuration dictionary from the demuxer.
+/// @param config The configuration dictionary containing codec parameters.
+/// @param error Output error if initialization fails.
+- (nullable instancetype)initWithDemuxerConfig:(NSDictionary<NSString *, id> *)config
+                                         error:(NSError **)error;
 
 /// Get metadata about the video stream.
 - (nullable FFmpegVideoInfo *)getVideoInfo;
 
-/// Demux the next packet from the container.
-///
-/// This method reads from the file but does not prevent decoding.
-- (nullable FFmpegPacketData *)demuxNextPacket;
+
 
 /// Decode a packet into frames.
 ///
@@ -145,28 +148,12 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Call this repeatedly after flushing until it returns nil.
 - (nullable FFmpegVideoFrame *)drainVideoFrame;
 
-/// Seek to a specific timestamp.
-///
-/// @param seconds The target time in seconds.
-/// @param accurate If YES, performs a frame-precise seek (slower). If NO, seeks
-/// to nearest keyframe (faster).
-/// @return The video frame at the seek target, or nil if seek failed.
-- (nullable FFmpegVideoFrame *)seekToTime:(double)seconds accurate:(BOOL)accurate;
+
 
 /// Release all FFmpeg resources.
 - (void)close;
 
-/// Extract embedded cover image from the container (e.g., MKV attachments).
-///
-/// Many video containers like MKV can include embedded cover art as attachment
-/// streams. This method searches for JPEG or PNG attachments and returns the
-/// image data.
-/// @return The cover image data as JPEG or PNG, or nil if no cover image is
-/// found.
-- (nullable NSData *)extractCoverImage;
 
-/// Whether to use optimized seeking (may be less accurate).
-@property(nonatomic, assign) BOOL seekOptimizationEnabled;
 
 @end
 

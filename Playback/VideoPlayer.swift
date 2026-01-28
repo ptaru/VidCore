@@ -4,26 +4,18 @@
 //
 //  High-level video player with playback orchestration
 //
+//  Decoupled Architecture:
+//  - VideoPlayer (MainActor): Orchestrates high-level state, user input, and UI/Debug mirroring.
+//  - VideoDisplayLoop (Actor): Runs the display loop on a background thread, pushing frames to renderer.
+//
 
 import Foundation
 import Observation
 import QuartzCore
 
-
-
 // MARK: - Timing Constants
 private enum PlaybackTiming {
-    static let displayLoopInterval: UInt64 = 8_000_000     // 8ms
     static let seekPauseDelay: UInt64 = 50_000_000         // 50ms
-}
-
-// MARK: - A/V Sync Constants
-private enum SyncTiming {
-    static let driftWarningThreshold: Double = 0.05        // 50ms - log warning
-    static let driftCorrectionThreshold: Double = 0.15     // 150ms - take action
-    static let severeDriftThreshold: Double = 1.0          // 1s - hard resync
-    static let consecutiveDriftCountThreshold: Int = 3     // For normal correction
-    static let severeDriftCountThreshold: Int = 5          // For hard resync
 }
 
 /// High-level video player that orchestrates decoding, rendering, and audio playback.
@@ -54,13 +46,12 @@ public class VideoPlayer {
     /// Video metadata (dimensions, frame rate, codec, etc.)
     public private(set) var videoInfo: VideoInfo?
     
-    /// Current frame for rendering
+    /// Current frame for rendering (Mirrored from Display Loop for Debug/UI)
+    /// Note: This is NOT the source of truth for the screen.
     public private(set) var currentFrame: VideoFrame?
     
     /// Whether the video has an audio track
     public private(set) var hasAudio: Bool = false
-    
-    /// The rendering engine for displaying frames
     
     /// Real-time debug statistics
     public private(set) var debugStats = PlayerDebugStats()
@@ -100,20 +91,13 @@ public class VideoPlayer {
     private let frameBuffer: VideoFrameBuffer
     private let packetQueue: PacketQueue
     
+    // Decoupled Display Loop
+    private let displayLoop: VideoDisplayLoop
+    
     // Task management
     nonisolated(unsafe) private var demuxTask: Task<Void, Never>?
     nonisolated(unsafe) private var decodeTask: Task<Void, Never>?
-    nonisolated(unsafe) private var displayTask: Task<Void, Never>?
     nonisolated(unsafe) private var currentSeekTask: Task<Void, Never>?
-    
-    // Timing state
-    private var playbackStartTime: CFTimeInterval = 0
-    private var pauseTimestamp: CFTimeInterval = 0
-    private var firstFramePTS: Double = 0
-    private var audioStartOffset: Double = 0
-    
-    // A/V sync tracking
-    private var consecutiveDriftCount: Int = 0
     
     // MARK: - Initialization
     
@@ -126,9 +110,30 @@ public class VideoPlayer {
 
         self.frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
         self.packetQueue = PacketQueue(maxSize: packetQueueSize)
+        self.displayLoop = VideoDisplayLoop(frameBuffer: frameBuffer, audioPlayer: audioPlayer)
+        
+        setupCallbacks()
+    }
+    
+    private func setupCallbacks() {
+        Task {
+            await displayLoop.setStatsHandler { [weak self] stats in
+                self?.debugStats = stats
+            }
+            await displayLoop.setFrameUpdateHandler { [weak self] frame in
+                self?.currentFrame = frame // Update mirror
+                self?.currentTime = frame.presentationTime
+            }
+        }
     }
     
     // MARK: - Public API
+    
+    /// Sets the target renderer for video frames.
+    /// This connects the decoupled display loop to the screen.
+    public func setRenderer(_ target: VideoRendererTarget?) async {
+        await displayLoop.setRenderer(target)
+    }
     
     /// Load a video file for playback.
     ///
@@ -136,19 +141,14 @@ public class VideoPlayer {
     /// - Throws: `VideoPlayerError` if the file cannot be loaded.
     public func load(url: URL) async throws {
         state = .loading
-        state = .loading
-
         
         do {
             decoder = try VideoDecoder(url: url)
             if let decoder = decoder {
                 duration = decoder.videoInfo.duration
                 videoInfo = decoder.videoInfo
-                duration = decoder.videoInfo.duration
-                videoInfo = decoder.videoInfo
                 
-                // Configure HDR tone mapping based on video metadata
-
+                await displayLoop.setVideoInfo(decoder.videoInfo)
 
                 while !Task.isCancelled {
                     guard let packet = await decoder.demuxNextPacket() else { break }
@@ -158,11 +158,15 @@ public class VideoPlayer {
                         return nil
                     }).first {
                         currentFrame = videoFrame
+                        // Push initial frame to buffer so loop picks it up?
+                        // Or just let loop wait.
+                        // Usually first frame is handled by seek(0) in play() if finished,
+                        // or just demux loop. 
+                        // Note: If we don't push it, loop waits.
                         break
                     }
                 }
             }
-            state = .ready
             state = .ready
         } catch {
 
@@ -196,9 +200,9 @@ public class VideoPlayer {
         if state == .paused {
             state = .playing
             audioPlayer.play()
-            
-            let pauseDuration = CACurrentMediaTime() - pauseTimestamp
-            playbackStartTime += pauseDuration
+            Task {
+                await displayLoop.start()
+            }
             
             Task {
                 await packetQueue.resume()
@@ -211,11 +215,11 @@ public class VideoPlayer {
         
         state = .playing
         audioPlayer.play()
+        Task {
+            await displayLoop.start()
+        }
         
-
         startTasks()
-        
-
     }
     
     /// Pause playback.
@@ -223,10 +227,11 @@ public class VideoPlayer {
         guard state == .playing else { return }
         
         state = .paused
-        pauseTimestamp = CACurrentMediaTime()
         audioPlayer.pause()
+        Task {
+            await displayLoop.pause()
+        }
         
-
         Task {
             await packetQueue.suspend()
             await frameBuffer.suspend()
@@ -266,7 +271,7 @@ public class VideoPlayer {
             state = .seeking
             audioPlayer.pause()
             
-
+            await displayLoop.pause()
             await packetQueue.suspend()
             await frameBuffer.suspend()
             
@@ -275,35 +280,34 @@ public class VideoPlayer {
                 state = previousState
                 if wasPlaying {
                     audioPlayer.play()
+                    await displayLoop.start()
                     await packetQueue.resume()
                     await frameBuffer.resume()
                 }
                 return
             }
             
-
             await packetQueue.reset()
             await frameBuffer.reset()
+            await displayLoop.reset() // Ensure loop state is clean
             
             do {
                 if let seekFrame = try await decoder.seek(to: clampedSeconds, accurate: accurate) {
                     currentFrame = seekFrame
+                    // Force display the frame immediately since loop might be paused
+                    await displayLoop.displayFrame(seekFrame)
+                    
                     // Push the seek frame to buffer so it flows into the display loop when playing
                     await frameBuffer.push(seekFrame)
                     
                     // Update timing to match the actual frame found
                     currentTime = seekFrame.presentationTime
-                    firstFramePTS = seekFrame.presentationTime
-                    audioStartOffset = seekFrame.presentationTime
                 } else {
                     // Fallback if no frame returned (should catch in error)
                     currentTime = clampedSeconds
-                    firstFramePTS = clampedSeconds
-                    audioStartOffset = clampedSeconds
                 }
                 
                 audioPlayer.seek(to: currentTime)
-                playbackStartTime = CACurrentMediaTime() - currentTime
                 
                 guard !Task.isCancelled else {
                     return 
@@ -315,6 +319,7 @@ public class VideoPlayer {
                 if wasPlaying {
                     state = .playing
                     audioPlayer.play()
+                    await displayLoop.start()
                     await packetQueue.resume()
                     await frameBuffer.resume()
                 } else {
@@ -336,7 +341,6 @@ public class VideoPlayer {
     
     /// Close the player and release resources.
     public func close() async {
-
         
         if isPlaying {
             pause()
@@ -345,6 +349,8 @@ public class VideoPlayer {
         audioPlayer.cleanup()
         
         await stopTasks()
+        await displayLoop.stop()
+        
         currentSeekTask?.cancel()
         currentSeekTask = nil
         
@@ -356,14 +362,7 @@ public class VideoPlayer {
         
         currentFrame = nil
         
-        // Flush Metal texture cache to release GPU resources
-
-        
         state = .idle
-        
-        state = .idle
-        
-
     }
     
     // MARK: - Task Management
@@ -381,26 +380,18 @@ public class VideoPlayer {
                 await self?.runDecodeLoop()
             }
         }
-        
-        if displayTask == nil {
-            displayTask = Task { [weak self] in
-                await self?.runDisplayLoop()
-            }
-        }
     }
     
     private func stopTasks() async {
         demuxTask?.cancel()
         decodeTask?.cancel()
-        displayTask?.cancel()
+        // Display loop is controlled separately
         
         await demuxTask?.value
         await decodeTask?.value
-        await displayTask?.value
         
         demuxTask = nil
         decodeTask = nil
-        displayTask = nil
     }
     
     // MARK: - Demux Loop
@@ -439,8 +430,6 @@ public class VideoPlayer {
                     continue
                 }
                 
-
-                
                 await decoder.flushVideoDecoder()
                 
                 var drainedCount = 0
@@ -452,7 +441,6 @@ public class VideoPlayer {
                     drainedCount += 1
                 }
 
-                
                 await frameBuffer.close()
                 break
             }
@@ -474,160 +462,19 @@ public class VideoPlayer {
         }
     }
     
-    // MARK: - Display Loop
-    
-    private func runDisplayLoop() async {
-        var hasStarted = false
-        
-        while !Task.isCancelled {
-            if await frameBuffer.suspended {
-                try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-                continue
-            }
-            
-            let frameAvailable = await frameBuffer.waitForFrameAvailable()
-            
-            guard frameAvailable else {
-                if await frameBuffer.suspended {
-                    continue
-                }
-                
-                if !Task.isCancelled && state == .playing {
-                    await MainActor.run {
-                        state = .finished
-
-                    }
-                }
-                break
-            }
-            
-            guard let nextFrame = await frameBuffer.peek() else {
-                continue
-            }
-            
-            if !hasStarted {
-                playbackStartTime = CACurrentMediaTime()
-                firstFramePTS = nextFrame.presentationTime
-                audioStartOffset = nextFrame.presentationTime
-                hasStarted = true
-            }
-            
-            // Audio is master clock when available and stable; fall back to video clock during audio re-sync
-            let currentPlaybackTime: Double
-            if hasAudio && audioPlayer.isPlaying && audioPlayer.hasBufferedAudio {
-                currentPlaybackTime = audioPlayer.mediaTime
-            } else {
-                currentPlaybackTime = (CACurrentMediaTime() - playbackStartTime) + firstFramePTS
-            }
-            
-            if state == .playing {
-                currentTime = currentPlaybackTime
-            }
-            
-            let waitTime = nextFrame.presentationTime - currentPlaybackTime
-            
-            if hasAudio && audioPlayer.isPlaying {
-                let drift = waitTime
-                
-                if abs(drift) > SyncTiming.driftWarningThreshold {
-                    consecutiveDriftCount += 1
-                    
-                    if abs(drift) > SyncTiming.severeDriftThreshold 
-                        && consecutiveDriftCount >= SyncTiming.severeDriftCountThreshold {
-                        
-
-                        consecutiveDriftCount = 0
-                        
-                        let audioPosition = audioPlayer.mediaTime
-                        await packetQueue.reset()
-                        await frameBuffer.reset()
-                        
-                        if let decoder = decoder {
-                            try? await decoder.seek(to: audioPosition, accurate: true)
-                            playbackStartTime = CACurrentMediaTime() - audioPosition
-                            firstFramePTS = audioPosition
-                        }
-                        continue
-                    }
-                    
-                    if abs(drift) > SyncTiming.driftCorrectionThreshold 
-                        && consecutiveDriftCount >= SyncTiming.consecutiveDriftCountThreshold {
-                        
-                    if abs(drift) > SyncTiming.driftCorrectionThreshold 
-                        && consecutiveDriftCount >= SyncTiming.consecutiveDriftCountThreshold {
-                        
-                        if drift > 0 {
-
-                        } else {
-
-                        }
-                    }
-                    }
-                } else {
-                    consecutiveDriftCount = 0
-                }
-            }
-            
-            if waitTime > 0.1 {
-                try? await Task.sleep(nanoseconds: PlaybackTiming.displayLoopInterval)
-                continue
-            } else if waitTime > 0 {
-                let waitNanos = UInt64(waitTime * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: waitNanos)
-            } else {
-                let frameDuration = 1.0 / (videoInfo?.frameRate ?? 30.0)
-                if waitTime < -frameDuration {
-                    _ = await frameBuffer.pop()
-                    await MainActor.run {
-                        debugStats.droppedFrameCount += 1
-                    }
-                    continue
-                }
-            }
-            
-            if let frame = await frameBuffer.pop() {
-                currentFrame = frame
-            }
-            
-            // Update debug stats
-            let pqCount = await packetQueue.count
-            let fbCount = await frameBuffer.count
-            let drift = hasAudio && audioPlayer.isPlaying ? waitTime : 0.0
-            
-            await MainActor.run {
-                debugStats.packetQueueCount = pqCount
-                debugStats.packetQueueMax = 15 // packets queue max size
-                debugStats.frameBufferCount = fbCount
-                debugStats.frameBufferMax = 3 // frame buffer max size
-                debugStats.avDrift = drift
-                debugStats.isHardwareDecoded = videoInfo?.isHardwareAccelerated ?? false
-                debugStats.decoderName = videoInfo?.decoderName ?? "Unknown"
-            }
-        }
-    }
-    
     // MARK: - Cleanup
     
     /// Synchronously cancel all background tasks.
-    /// Call this for cleanup when async close() cannot be awaited (e.g., in deinit).
     public nonisolated func cancelAllTasks() {
         demuxTask?.cancel()
         decodeTask?.cancel()
-        displayTask?.cancel()
         currentSeekTask?.cancel()
     }
     
     /// Synchronous close for use from deinit or when async cannot be awaited.
-    /// Releases heavy resources (decoder, audio engine, renderer cache) immediately.
-    /// Tasks are cancelled but not awaited - they will terminate naturally.
     public nonisolated func closeSync() {
-
-
-        // Cancel all running tasks
         cancelAllTasks()
 
-        // Synchronously access MainActor-isolated properties for cleanup
-        // This is safe in deinit as we're the last reference holder
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 if isPlaying {
@@ -635,17 +482,17 @@ public class VideoPlayer {
                 }
 
                 audioPlayer.cleanup()
-
                 decoder?.close()
                 decoder = nil
-
                 currentFrame = nil
+                
+                Task {
+                    await displayLoop.stop()
+                }
 
                 demuxTask = nil
                 decodeTask = nil
-                displayTask = nil
                 currentSeekTask = nil
-
 
                 state = .idle
 
@@ -664,18 +511,17 @@ public class VideoPlayer {
                     }
 
                     audioPlayer.cleanup()
-
                     decoder?.close()
                     decoder = nil
-
                     currentFrame = nil
+                    
+                    Task {
+                        await displayLoop.stop()
+                    }
 
                     demuxTask = nil
                     decodeTask = nil
-                    displayTask = nil
                     currentSeekTask = nil
-
-
 
                     state = .idle
 
@@ -684,46 +530,25 @@ public class VideoPlayer {
                     Task.detached(priority: .high) {
                         await pq.reset()
                         await fb.reset()
-
                     }
                 }
             }
         }
-
-
     }
     
-    
-
-    
     nonisolated deinit {
-
-
         cancelAllTasks()
     }
 }
 
 /// Real-time debug statistics for the video player
 public struct PlayerDebugStats: Sendable {
-    /// Number of packets currently in the packet queue
     public var packetQueueCount: Int = 0
-    /// Maximum capacity of the packet queue
     public var packetQueueMax: Int = 0
-    
-    /// Number of frames currently in the frame buffer
     public var frameBufferCount: Int = 0
-    /// Maximum capacity of the frame buffer
     public var frameBufferMax: Int = 0
-    
-    /// Current A/V sync drift in seconds (positive = video ahead, negative = video behind)
     public var avDrift: Double = 0.0
-    
-    /// Total number of frames dropped to catch up
     public var droppedFrameCount: Int = 0
-    
-    /// Whether the current decoder is hardware accelerated
     public var isHardwareDecoded: Bool = false
-    
-    /// Name of the current decoder
     public var decoderName: String = "Unknown"
 }

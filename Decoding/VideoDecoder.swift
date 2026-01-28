@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import CoreMedia
 import CoreVideo
 import Foundation
 
@@ -163,6 +164,37 @@ public struct VideoInfo {
     }
 }
 
+// MARK: - VTDecoder Config Bridging
+
+/// Convert FFmpegDecoder's config dictionary to Swift VTDecoderConfig
+private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
+    guard let codecNum = config["codec"] as? NSNumber,
+          let width = config["width"] as? NSNumber,
+          let height = config["height"] as? NSNumber,
+          let extradata = config["extradata"] as? Data,
+          let timeBaseNum = config["timeBaseNum"] as? NSNumber,
+          let timeBaseDen = config["timeBaseDen"] as? NSNumber else {
+        throw VTDecoderError.noExtradata
+    }
+    
+    let codec: VTDecoderCodec = codecNum.intValue == 0 ? .hevc : .h264
+    
+    let vtConfig = VTDecoderConfig(
+        codec: codec,
+        width: width.int32Value,
+        height: height.int32Value,
+        extradata: extradata,
+        timeBaseNum: timeBaseNum.int32Value,
+        timeBaseDen: timeBaseDen.int32Value,
+        colorPrimaries: (config["colorPrimaries"] as? NSNumber)?.int32Value ?? 0,
+        colorTransfer: (config["colorTransfer"] as? NSNumber)?.int32Value ?? 0,
+        colorSpace: (config["colorSpace"] as? NSNumber)?.int32Value ?? 0,
+        dolbyVisionConfig: config["dolbyVisionConfig"] as? Data
+    )
+    
+    return try VTDecoder(config: vtConfig)
+}
+
 /// A decoded frame from the video stream.
 ///
 /// Each frame can be either video (a ``VideoFrame`` with pixel data) or audio (a PCM buffer with its presentation timestamp).
@@ -201,7 +233,9 @@ public enum DecodedFrame {
 /// decoder.close()
 /// ```
 public class VideoDecoder {
+    private var demuxer: FFmpegDemuxer?
     private var decoder: FFmpegDecoder?
+    private var vtDecoder: VTDecoder?
     private let url: URL
 
     // Separate queues for demuxing and decoding to enable parallelism
@@ -226,25 +260,70 @@ public class VideoDecoder {
     public init(url: URL) throws {
         self.url = url
 
+        // Phase 1: Create FFmpegDemuxer for container I/O
         do {
-            self.decoder = try FFmpegDecoder(url: url)
+            self.demuxer = try FFmpegDemuxer(url: url)
         } catch {
             throw error
         }
 
-        guard let decoder = self.decoder, let info = decoder.getVideoInfo() else {
+        guard let demuxer = self.demuxer, let info = demuxer.getVideoInfo() else {
             throw NSError(
                 domain: "VideoDecoder", code: -2,
                 userInfo: [NSLocalizedDescriptionKey: "Failed to get video info"])
         }
 
+        // Phase 2: Try to initialize Swift VTDecoder for supported codecs (HEVC/H264)
+        var finalDecoderName = info.codecName
+        var finalDecoderDescription = "Unknown"
+        var finalIsHardwareAccelerated = false
+        
+        if let vtConfig = demuxer.getVTDecoderConfig() {
+            do {
+                self.vtDecoder = try createVTDecoder(from: vtConfig)
+                if let vt = self.vtDecoder {
+                    print("[VideoDecoder] Using Swift VTDecoder (DoVi: \(vt.isDolbyVision), profile: \(vt.dolbyVisionProfile))")
+                    if vt.isDolbyVision {
+                        finalDecoderName = "VTDecoder (DoVi P\(vt.dolbyVisionProfile))"
+                    } else {
+                        finalDecoderName = "VTDecoder (\(info.codecName))"
+                    }
+                    finalDecoderDescription = "Hardware Acceleration (Swift VTDecoder)"
+                    finalIsHardwareAccelerated = true
+                }
+            } catch {
+                print("[VideoDecoder] Failed to init VTDecoder: \(error)")
+                self.vtDecoder = nil
+            }
+        }
+        
+        // Phase 3: Initialize FFmpegDecoder in decode-only mode (fallback for audio + unsupported codecs)
+        if let decoderConfig = demuxer.getDecoderConfig() {
+            do {
+                self.decoder = try FFmpegDecoder(demuxerConfig: decoderConfig)
+                if self.vtDecoder == nil, let decoder = self.decoder, let decoderInfo = decoder.getVideoInfo() {
+                    // No VTDecoder, use FFmpegDecoder info
+                    finalDecoderName = decoderInfo.decoderName
+                    finalDecoderDescription = decoderInfo.decoderDescription
+                    finalIsHardwareAccelerated = decoderInfo.isHardwareAccelerated
+                }
+            } catch {
+                print("[VideoDecoder] Failed to init FFmpegDecoder: \(error)")
+                // If we have VTDecoder, we can still proceed for video-only
+                if self.vtDecoder == nil {
+                    throw error
+                }
+            }
+        }
+        
+        // Create final videoInfo
         self.videoInfo = VideoInfo(
             width: Int(info.width),
             height: Int(info.height),
             frameRate: info.frameRate,
             duration: info.duration,
             codecName: info.codecName,
-            isHardwareAccelerated: info.isHardwareAccelerated,
+            isHardwareAccelerated: finalIsHardwareAccelerated,
             isHDR: info.isHDR,
             colorPrimaries: Int(info.colorPrimaries),
             colorTransfer: Int(info.colorTransfer),
@@ -255,13 +334,13 @@ public class VideoDecoder {
             doviProfile: info.isDolbyVision ? Int(info.doviProfile) : nil,
             maxContentLightLevel: info.maxContentLightLevel > 0 ? UInt(info.maxContentLightLevel) : nil,
             maxFrameAverageLightLevel: info.maxFrameAverageLightLevel > 0 ? UInt(info.maxFrameAverageLightLevel) : nil,
-            masteringDisplayMaxLuminance: info.masteringDisplayMaxLuminance > 0 ? info.masteringDisplayMaxLuminance : nil,
-            masteringDisplayMinLuminance: info.masteringDisplayMinLuminance > 0 ? info.masteringDisplayMinLuminance : nil,
+            masteringDisplayMaxLuminance: info.masteringDisplayMaxLuminance > 0 ? Float(info.masteringDisplayMaxLuminance) : nil,
+            masteringDisplayMinLuminance: info.masteringDisplayMinLuminance > 0 ? Float(info.masteringDisplayMinLuminance) : nil,
             audioCodecName: info.audioCodecName,
             audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
             audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,
-            decoderName: info.decoderName,
-            decoderDescription: info.decoderDescription
+            decoderName: finalDecoderName,
+            decoderDescription: finalDecoderDescription
         )
     }
 
@@ -275,10 +354,20 @@ public class VideoDecoder {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !isClosed, let decoder = self.decoder else { return }
+        guard !isClosed else { return }
         isClosed = true
-        decoder.close()
-        self.decoder = nil
+        
+        // Flush VTDecoder if used
+        vtDecoder?.flush()
+        vtDecoder = nil
+        
+        // Close FFmpegDecoder
+        decoder?.close()
+        decoder = nil
+        
+        // Close FFmpegDemuxer
+        demuxer?.close()
+        demuxer = nil
     }
 
     private var isDecoderClosed: Bool {
@@ -302,15 +391,34 @@ public class VideoDecoder {
                 self.lock.lock()
                 defer { self.lock.unlock() }
 
-                guard !self.isClosed, let decoder = self.decoder else {
+                guard !self.isClosed, let demuxer = self.demuxer else {
                     continuation.resume(returning: nil)
                     return
                 }
 
-                let packet = decoder.demuxNextPacket()
-                continuation.resume(returning: packet)
+                // Demux using FFmpegDemuxer and convert to FFmpegPacketData
+                if let demuxerPacket = demuxer.demuxNextPacket() {
+                    let packet = self.convertPacket(demuxerPacket)
+                    continuation.resume(returning: packet)
+                } else {
+                    continuation.resume(returning: nil)
+                }
             }
         }
+    }
+    
+    /// Convert FFmpegDemuxerPacket to FFmpegPacketData for API compatibility
+    private func convertPacket(_ demuxerPacket: FFmpegDemuxerPacket) -> FFmpegPacketData {
+        let packet = FFmpegPacketData()
+        packet.data = demuxerPacket.data
+        packet.size = Int32(truncatingIfNeeded: demuxerPacket.size)
+        packet.pts = demuxerPacket.pts
+        packet.dts = demuxerPacket.dts
+        packet.duration = demuxerPacket.duration
+        packet.isVideo = demuxerPacket.isVideo
+        packet.isAudio = demuxerPacket.isAudio
+        packet.flags = demuxerPacket.isKeyframe ? 1 : 0 // AV_PKT_FLAG_KEY = 1
+        return packet
     }
 
     /// Decode a packet into frames (can run concurrently on decode queue)
@@ -335,7 +443,35 @@ public class VideoDecoder {
                 var results: [DecodedFrame] = []
 
                 if packet.isVideo {
-                    if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
+                    // Use Swift VTDecoder if available
+                    if let vtDecoder = self.vtDecoder {
+                        do {
+                            // Send packet to VTDecoder
+                            try vtDecoder.sendPacket(
+                                data: packet.data,
+                                pts: packet.pts,
+                                dts: packet.dts,
+                                duration: packet.duration
+                            )
+                            
+                            // Pop all available frames
+                            while let decodedFrame = vtDecoder.popFrame() {
+                                let pts = CMTimeGetSeconds(decodedFrame.presentationTime)
+                                let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
+                                let frame = VideoFrame(
+                                    pixelBuffer: decodedFrame.pixelBuffer,
+                                    presentationTime: pts,
+                                    isHDR: self.videoInfo.isHDR,
+                                    colorTransfer: self.videoInfo.colorTransfer,
+                                    doviProfile: doviProfile
+                                )
+                                results.append(.video(frame))
+                            }
+                        } catch {
+                            print("[VideoDecoder] VTDecoder error: \(error)")
+                        }
+                    } else if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
+                        // Fallback to FFmpeg decode path
                         for ffmpegFrame in ffmpegFrames {
                             let frame = VideoFrame(
                                 pixelBuffer: ffmpegFrame.pixelBuffer,
@@ -436,8 +572,8 @@ public class VideoDecoder {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !isClosed, let decoder = self.decoder else { return nil }
-        return decoder.extractCoverImage()
+        guard !isClosed, let demuxer = self.demuxer else { return nil }
+        return demuxer.extractCoverImage()
     }
 
     // MARK: - Seeking
@@ -454,27 +590,155 @@ public class VideoDecoder {
                 self.lock.lock()
                 defer { self.lock.unlock() }
 
-                guard !self.isClosed, let decoder = self.decoder else {
+                guard !self.isClosed else {
                     continuation.resume(returning: nil)
                     return
                 }
-
-                if let ffmpegFrame = decoder.seek(toTime: seconds, accurate: accurate) {
-                     let frame = VideoFrame(
-                         pixelBuffer: ffmpegFrame.pixelBuffer,
-                         presentationTime: ffmpegFrame.presentationTime,
-                         isHDR: self.videoInfo.isHDR,
-                         colorTransfer: self.videoInfo.colorTransfer,
-                         doviProfile: Int(ffmpegFrame.doviProfile)
-                     )
-                     continuation.resume(returning: frame)
+                
+                // CRITICAL: Flush VTDecoder before seeking to clear any pending frames
+                // This prevents audio/video desync after seek
+                self.vtDecoder?.flush()
+                
+                if let vtDecoder = self.vtDecoder, let demuxer = self.demuxer {
+                    // VTDecoder path: use demuxer for seeking and getting packets
+                    // Then decode through VTDecoder for correct Dolby Vision colors
+                    guard demuxer.seek(toKeyframe: seconds) else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "VideoDecoder", code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Seek failed - seek error"]))
+                        return
+                    }
+                    
+                    // Collect packets from demuxer
+                    var packets: [FFmpegDemuxerPacket] = []
+                    if accurate {
+                        if let collectedPackets = demuxer.collectPackets(until: seconds) {
+                            packets = collectedPackets
+                        }
+                    } else {
+                        if let keyframePackets = demuxer.collectKeyframePackets() {
+                            packets = keyframePackets
+                        }
+                    }
+                    
+                    guard !packets.isEmpty else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "VideoDecoder", code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packets"]))
+                        return
+                    }
+                    
+                    // Decode packets through VTDecoder
+                    var lastFrame: VTDecodedFrame?
+                    
+                    if !accurate && packets.count == 1 {
+                        // For non-accurate seek (single keyframe), use SYNCHRONOUS decoding
+                        // This ensures we get a frame immediately for responsiveness during scrubbing
+                        let packet = packets[0]
+                        do {
+                            if let pixelBuffer = try vtDecoder.decodePacketSync(
+                                data: packet.data,
+                                pts: packet.pts,
+                                dts: packet.dts,
+                                duration: packet.duration
+                            ) {
+                                let pts = CMTime(value: packet.pts * Int64(vtDecoder.timeBaseNum),
+                                                 timescale: vtDecoder.timeBaseDen)
+                                lastFrame = VTDecodedFrame(pixelBuffer: pixelBuffer, presentationTime: pts)
+                            }
+                        } catch {
+                            print("[VideoDecoder] VTDecoder sync decode error: \(error)")
+                        }
+                    } else {
+                        // For accurate seek (multiple packets), use async pipeline
+                        for packet in packets {
+                            do {
+                                try vtDecoder.sendPacket(
+                                    data: packet.data,
+                                    pts: packet.pts,
+                                    dts: packet.dts,
+                                    duration: packet.duration
+                                )
+                                
+                                // Pop all available frames, keep the last one at or after target
+                                while let frame = vtDecoder.popFrame() {
+                                    let framePTS = CMTimeGetSeconds(frame.presentationTime)
+                                    if framePTS >= seconds - 0.01 {
+                                        lastFrame = frame
+                                    } else {
+                                        // Haven't reached target yet, keep this as backup
+                                        lastFrame = frame
+                                    }
+                                }
+                            } catch {
+                                print("[VideoDecoder] VTDecoder seek error: \(error)")
+                            }
+                        }
+                    }
+                    
+                    // Return the result frame
+                    if let resultFrame = lastFrame {
+                        let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
+                        let frame = VideoFrame(
+                            pixelBuffer: resultFrame.pixelBuffer,
+                            presentationTime: CMTimeGetSeconds(resultFrame.presentationTime),
+                            isHDR: self.videoInfo.isHDR,
+                            colorTransfer: self.videoInfo.colorTransfer,
+                            doviProfile: doviProfile
+                        )
+                        continuation.resume(returning: frame)
+                    } else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "VideoDecoder", code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Seek failed - no frame decoded"]))
+                    }
+                } else if let demuxer = self.demuxer, let decoder = self.decoder {
+                    // Non-VTDecoder path: use demuxer to seek, decoder to decode
+                    guard demuxer.seek(toKeyframe: seconds) else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "VideoDecoder", code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Seek failed"]))
+                        return
+                    }
+                    
+                    // Collect packets and decode
+                    if let collectedPackets = accurate ? demuxer.collectPackets(until: seconds) : demuxer.collectKeyframePackets() {
+                        for demuxerPacket in collectedPackets {
+                            let packet = self.convertPacket(demuxerPacket)
+                            if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
+                                for ffmpegFrame in ffmpegFrames {
+                                    let framePTS = ffmpegFrame.presentationTime
+                                    if framePTS >= seconds - 0.01 || !accurate {
+                                        let frame = VideoFrame(
+                                            pixelBuffer: ffmpegFrame.pixelBuffer,
+                                            presentationTime: framePTS,
+                                            isHDR: self.videoInfo.isHDR,
+                                            colorTransfer: self.videoInfo.colorTransfer,
+                                            doviProfile: Int(ffmpegFrame.doviProfile)
+                                        )
+                                        continuation.resume(returning: frame)
+                                        return
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continuation.resume(
+                        throwing: NSError(
+                            domain: "VideoDecoder", code: -3,
+                            userInfo: [NSLocalizedDescriptionKey: "Seek failed - no frame decoded"]))
                 } else {
                     continuation.resume(
                         throwing: NSError(
                             domain: "VideoDecoder", code: -3,
-                            userInfo: [NSLocalizedDescriptionKey: "Seek failed"]))
+                            userInfo: [NSLocalizedDescriptionKey: "Seek failed - decoder unavailable"]))
                 }
             }
         }
     }
 }
+

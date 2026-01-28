@@ -4,6 +4,9 @@
 //
 //  Handles audio playback using AVAudioEngine
 //
+//  References:
+//  - Decoupled architecture: Thread-safe time access via getMediaTime()
+//
 
 import Combine
 import Foundation
@@ -14,14 +17,38 @@ import AVFoundation
 public class AudioPlayer: ObservableObject {
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    
     private var audioFormat: AVAudioFormat?
     
     private var isEngineRunning = false
     private var sampleRate: Double = 48000.0
     private var playbackStartTime: AVAudioTime?
     
-    private var baseAudioPTS: Double = 0
-    private var totalSamplesEnqueued: Int64 = 0
+    // Thread-safe state container
+    private final class AudioSyncState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _baseAudioPTS: Double = 0
+        private var _totalSamplesEnqueued: Int64 = 0
+        
+        var baseAudioPTS: Double {
+            get { lock.withLock { _baseAudioPTS } }
+            set { lock.withLock { _baseAudioPTS = newValue } }
+        }
+        
+        var totalSamplesEnqueued: Int64 {
+            get { lock.withLock { _totalSamplesEnqueued } }
+            set { lock.withLock { _totalSamplesEnqueued = newValue } }
+        }
+        
+        func reset() {
+            lock.withLock {
+                _baseAudioPTS = 0
+                _totalSamplesEnqueued = 0
+            }
+        }
+    }
+    
+    private let syncState = AudioSyncState()
     
     public init() {
         setupEngine()
@@ -79,10 +106,10 @@ public class AudioPlayer: ObservableObject {
     }
 
     public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double) {
-        if totalSamplesEnqueued == 0 {
-            baseAudioPTS = pts
+        if syncState.totalSamplesEnqueued == 0 {
+            syncState.baseAudioPTS = pts
         }
-        totalSamplesEnqueued += Int64(buffer.frameLength)
+        syncState.totalSamplesEnqueued += Int64(buffer.frameLength)
         
         if !isEngineRunning {
             try? engine.start()
@@ -93,34 +120,36 @@ public class AudioPlayer: ObservableObject {
     
     /// Reset sync state (call on seek)
     public func resetSync() {
-        baseAudioPTS = 0
-        totalSamplesEnqueued = 0
+        syncState.reset()
     }
     
     /// Whether audio buffers have been enqueued since last reset
-    public var hasBufferedAudio: Bool {
-        totalSamplesEnqueued > 0
+    public nonisolated var hasBufferedAudio: Bool {
+        syncState.totalSamplesEnqueued > 0
     }
     
     /// Current sample-based time (legacy)
     public var currentTime: TimeInterval {
+        getMediaTime()
+    }
+    
+    /// Actual media time accounting for base PTS - Safe to call from any thread
+    public nonisolated func getMediaTime() -> Double {
+        // AVAudioNode methods are thread-safe
         guard let nodeTime = playerNode.lastRenderTime,
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
-            return 0
+            return syncState.baseAudioPTS
         }
-        return Double(playerTime.sampleTime) / playerTime.sampleRate
+        
+        return syncState.baseAudioPTS + (Double(playerTime.sampleTime) / playerTime.sampleRate)
     }
     
     /// Actual media time accounting for base PTS
     public var mediaTime: Double {
-        guard let nodeTime = playerNode.lastRenderTime,
-              let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
-            return baseAudioPTS
-        }
-        return baseAudioPTS + (Double(playerTime.sampleTime) / playerTime.sampleRate)
+        getMediaTime()
     }
     
-    public var isPlaying: Bool {
+    public nonisolated var isPlaying: Bool {
         return playerNode.isPlaying
     }
     

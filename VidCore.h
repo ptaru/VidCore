@@ -16,3 +16,4 @@ FOUNDATION_EXPORT const unsigned char VidCoreVersionString[];
 
 // Public Objective-C headers - these are exposed to Swift automatically
 #import <VidCore/FFmpegDecoder.h>
+#import <VidCore/FFmpegDemuxer.h>

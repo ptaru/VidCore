@@ -11,88 +11,18 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 
-/// SwiftUI view that renders video frames using macOS system APIs (AVSampleBufferDisplayLayer).
-/// This serves as a "reference" renderer to verify custom HDR/HLG processing.
-public struct AVSystemVideoRenderer: NSViewRepresentable {
-    public let currentFrame: VideoFrame?
+/// Renderer target that wraps AVSampleBufferDisplayLayer.
+/// It is Sendable and can be called from background threads.
+public final class LayerRenderer: VideoRendererTarget, @unchecked Sendable {
+    public let displayLayer = AVSampleBufferDisplayLayer()
     
-    public init(currentFrame: VideoFrame?) {
-        self.currentFrame = currentFrame
-    }
-    
-    public func makeNSView(context: Context) -> AVSampleBufferDisplayLayerWrapperView {
-        let view = AVSampleBufferDisplayLayerWrapperView()
-        return view
-    }
-    
-    public func updateNSView(_ view: AVSampleBufferDisplayLayerWrapperView, context: Context) {
-        if let frame = currentFrame {
-            view.enqueue(frame)
-        }
-    }
-    
-    /// Creates a CGImage from a VideoFrame using VideoToolbox, handling HDR and Dolby Vision.
-    /// - Parameter frame: The video frame to convert
-    /// - Returns: A CGImage representation of the frame, or nil if conversion fails.
-    public static func createCGImage(from frame: VideoFrame) -> CGImage? {
-        let pixelBuffer = frame.pixelBuffer
-        
-        if frame.isHDR {
-            // Most HDR content is BT.2020
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-            
-            // Transfer Function
-            let transferFunction: CFString
-            if frame.colorTransfer == 18 { // HLG
-                transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-            } else { // PQ (ST 2084)
-                transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-            }
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
-        }
-        
-        var cgImage: CGImage?
-        VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
-        
-        return cgImage
-    }
-}
-
-/// NSView wrapper for AVSampleBufferDisplayLayer
-public class AVSampleBufferDisplayLayerWrapperView: NSView {
-    private let displayLayer = AVSampleBufferDisplayLayer()
-    
-    override public init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setupLayer()
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupLayer()
-    }
-    
-    private func setupLayer() {
+    public init() {
         // Essential for proper HDR rendering on macOS
-        // "preventsCapture" defaults to false, which allows screen recording/screenshots
-        // to capture the content (often tone-mapped to SDR if the capture doesn't support HDR).
         displayLayer.preventsCapture = false
         displayLayer.videoGravity = .resizeAspect
-        
-        // Host the layer
-        self.wantsLayer = true
-        self.layer = displayLayer
     }
     
-    // Ensure layer resizes with view
-    override public func layout() {
-        super.layout()
-        displayLayer.frame = self.bounds
-    }
-    
-    /// Enqueues a video frame for display
-    func enqueue(_ frame: VideoFrame) {
+    public func enqueue(_ frame: VideoFrame) {
         guard let sampleBuffer = createSampleBuffer(from: frame) else { return }
         
         // AVSBDL requires the layer to be ready
@@ -165,5 +95,75 @@ public class AVSampleBufferDisplayLayerWrapperView: NSView {
         }
         
         return buffer
+    }
+}
+
+/// SwiftUI view that renders video frames using macOS system APIs (AVSampleBufferDisplayLayer).
+public struct AVSystemVideoRenderer: NSViewRepresentable {
+    let player: VideoPlayer
+    
+    public init(player: VideoPlayer) {
+        self.player = player
+    }
+    
+    public func makeNSView(context: Context) -> AVSampleBufferDisplayLayerWrapperView {
+        let view = AVSampleBufferDisplayLayerWrapperView()
+        // Connect the renderer to the player
+        Task {
+            await player.setRenderer(view.layerRenderer)
+        }
+        return view
+    }
+    
+    public func updateNSView(_ view: AVSampleBufferDisplayLayerWrapperView, context: Context) {
+        // No-op: Updates happen directly via the layerRenderer
+    }
+    
+    /// Creates a CGImage from a VideoFrame using VideoToolbox, handling HDR and Dolby Vision.
+    public static func createCGImage(from frame: VideoFrame) -> CGImage? {
+        let pixelBuffer = frame.pixelBuffer
+        
+        if frame.isHDR {
+            CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            
+            let transferFunction: CFString
+            if frame.colorTransfer == 18 { // HLG
+                transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+            } else { // PQ (ST 2084)
+                transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            }
+            CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
+        }
+        
+        var cgImage: CGImage?
+        VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
+        
+        return cgImage
+    }
+}
+
+/// NSView wrapper for AVSampleBufferDisplayLayer
+public class AVSampleBufferDisplayLayerWrapperView: NSView {
+    public let layerRenderer = LayerRenderer()
+    
+    override public init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupLayer()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupLayer()
+    }
+    
+    private func setupLayer() {
+        self.wantsLayer = true
+        self.layer = layerRenderer.displayLayer
+    }
+    
+    override public func layout() {
+        super.layout()
+        layerRenderer.displayLayer.frame = self.bounds
     }
 }

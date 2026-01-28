@@ -10,7 +10,6 @@
 #import "FFmpegBridge.h"
 #undef AVMediaType
 
-#import "VTDecoder.h"
 #import "FFmpegDecoder.h"
 #import "PixelFormatConverter.h"
 #import <AVFoundation/AVFoundation.h>
@@ -54,10 +53,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @end
 
 @interface FFmpegDecoder ()
-@property(nonatomic, assign) AVFormatContext *formatContext;
+
 @property(nonatomic, assign)
     AVCodecContext *codecContext; // Video codec context
-@property(nonatomic, strong) VTDecoder *vtDecoder;
+// VTDecoder now handled by Swift VideoDecoder
 @property(nonatomic, assign)
     AVCodecContext *audioCodecContext; // Audio codec context
 @property(nonatomic, assign) SwsContext *swsContext;
@@ -75,8 +74,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) enum AVPixelFormat hwPixelFormat;
 // Pixel format converter for software decode path
 @property(nonatomic, strong) PixelFormatConverter *pixelFormatConverter;
-// Queue for packets read during seek operations
-@property(nonatomic, strong) NSMutableArray<FFmpegPacketData *> *queuedPackets;
+
+// Time base for decode-only mode (when formatContext is NULL)
+@property(nonatomic, assign) int32_t videoTimeBaseNum;
+@property(nonatomic, assign) int32_t videoTimeBaseDen;
+@property(nonatomic, assign) int32_t audioTimeBaseNum;
+@property(nonatomic, assign) int32_t audioTimeBaseDen;
 @end
 #pragma mark - Internal Helper Functions
 
@@ -85,24 +88,7 @@ static const int kAudioSampleRate = 48000;
 static const enum AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
 static const int kAudioChannels = 2; // Stereo
 
-// Constants for seeking
-static const double kSeekPTSTolerance = 0.001;       // 1ms for frame matching
-static const double kAudioQueueTolerance = 0.05;     // 50ms for audio pre-buffer
-static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growth during long seeks
-static const double kSeekOptimizationFrameCount = 15.0; // Frames before target to stop skipping
 
-// Error handling helper macro for openVideoFile
-// Sets error, calls close, and returns NO in one statement
-#define FFMPEG_SET_ERROR_AND_CLOSE(errorPtr, errorCode, errorMsg) \
-  do { \
-    if (errorPtr) { \
-      *errorPtr = [NSError errorWithDomain:@"FFmpegDecoder" \
-                                      code:errorCode \
-                                  userInfo:@{NSLocalizedDescriptionKey: errorMsg}]; \
-    } \
-    [self close]; \
-    return NO; \
-  } while (0)
 
 // Static variable to store the expected hw pixel format for the callback
 static enum AVPixelFormat s_hwPixelFormat = AV_PIX_FMT_NONE;
@@ -115,8 +101,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     }
   }
   // Hardware format not available, return first software format as fallback
-  // Hardware format not available, return first software format as fallback
-
   return pix_fmts[0];
 }
 
@@ -126,15 +110,19 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 #pragma mark - Initialization & Lifecycle
 
-- (instancetype)initWithURL:(NSURL *)url error:(NSError **)error {
+
+
+- (nullable instancetype)initWithDemuxerConfig:(NSDictionary<NSString *, id> *)config
+                                         error:(NSError **)error {
   self = [super init];
   if (self) {
-    // Set log level to ERROR to avoid noisy hevc logs
+    // Set log level to ERROR
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
       av_log_set_level(AV_LOG_ERROR);
     });
-    _formatContext = NULL;
+    
+    // Initialize state
     _codecContext = NULL;
     _audioCodecContext = NULL;
     _swsContext = NULL;
@@ -144,18 +132,175 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _audioFrame = NULL;
     _swrOutputFrame = NULL;
     _packet = NULL;
-    _videoStreamIndex = -1;
+    _videoStreamIndex = 0; // Dummy index for decode-only mode
     _audioStreamIndex = -1;
     _hwDeviceCtx = NULL;
     _usingHardwareDecoder = NO;
     _hwPixelFormat = AV_PIX_FMT_VIDEOTOOLBOX;
-    _seekOptimizationEnabled = YES; // Enable by default
     _pixelFormatConverter = [[PixelFormatConverter alloc] init];
-    _queuedPackets = [NSMutableArray array];
-
-    if (![self openVideoFile:url error:error]) {
+    
+    // Extract config values
+    int videoCodecId = [config[@"videoCodecId"] intValue];
+    int width = [config[@"width"] intValue];
+    int height = [config[@"height"] intValue];
+    int pixelFormat = [config[@"pixelFormat"] intValue];
+    NSData *videoExtradata = config[@"videoExtradata"];
+    
+    // Find video codec
+    const AVCodec *codec = avcodec_find_decoder((enum AVCodecID)videoCodecId);
+    if (!codec) {
+      if (error) {
+        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2001
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Codec not found"}];
+      }
       return nil;
     }
+    
+    // Allocate video codec context
+    _codecContext = avcodec_alloc_context3(codec);
+    if (!_codecContext) {
+      if (error) {
+        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2002
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to allocate codec context"}];
+      }
+      return nil;
+    }
+    
+    // Set codec parameters
+    _codecContext->width = width;
+    _codecContext->height = height;
+    _codecContext->pix_fmt = (enum AVPixelFormat)pixelFormat;
+    _codecContext->color_primaries = (enum AVColorPrimaries)[config[@"colorPrimaries"] intValue];
+    _codecContext->color_trc = (enum AVColorTransferCharacteristic)[config[@"colorTransfer"] intValue];
+    _codecContext->colorspace = (enum AVColorSpace)[config[@"colorSpace"] intValue];
+    _codecContext->color_range = (enum AVColorRange)[config[@"colorRange"] intValue];
+    
+    // Set timebase
+    _videoTimeBaseNum = [config[@"videoTimeBaseNum"] intValue];
+    _videoTimeBaseDen = [config[@"videoTimeBaseDen"] intValue];
+    
+    if (_videoTimeBaseDen > 0) {
+        AVRational tb = (AVRational){_videoTimeBaseNum, _videoTimeBaseDen};
+        _codecContext->pkt_timebase = tb;
+        _codecContext->time_base = tb;
+    }
+    
+    // Set extradata
+    if (videoExtradata && videoExtradata.length > 0) {
+      _codecContext->extradata = (uint8_t *)av_malloc(videoExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+      if (_codecContext->extradata) {
+        memcpy(_codecContext->extradata, videoExtradata.bytes, videoExtradata.length);
+        _codecContext->extradata_size = (int)videoExtradata.length;
+      }
+    }
+    
+    // Try hardware acceleration
+    BOOL hwSuccess = [self initHardwareDecoder:codec error:nil];
+    if (hwSuccess && _hwDeviceCtx) {
+      _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
+      _codecContext->get_format = get_hw_format;
+      _usingHardwareDecoder = YES;
+    } else {
+      // Software decode with threading
+      _codecContext->thread_count = 0;
+      _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
+    
+    // Open video codec
+    if (avcodec_open2(_codecContext, codec, NULL) < 0) {
+      if (error) {
+        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2003
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to open codec"}];
+      }
+      avcodec_free_context(&_codecContext);
+      return nil;
+    }
+    
+    // Setup audio codec if present
+    if (config[@"audioCodecId"]) {
+      int audioCodecId = [config[@"audioCodecId"] intValue];
+      const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)audioCodecId);
+      if (audioCodec) {
+        _audioCodecContext = avcodec_alloc_context3(audioCodec);
+        if (_audioCodecContext) {
+          _audioCodecContext->sample_rate = [config[@"audioSampleRate"] intValue];
+          av_channel_layout_default(&_audioCodecContext->ch_layout, [config[@"audioChannels"] intValue]);
+          
+          NSData *audioExtradata = config[@"audioExtradata"];
+          if (audioExtradata && audioExtradata.length > 0) {
+            _audioCodecContext->extradata = (uint8_t *)av_malloc(audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (_audioCodecContext->extradata) {
+              memcpy(_audioCodecContext->extradata, audioExtradata.bytes, audioExtradata.length);
+              _audioCodecContext->extradata_size = (int)audioExtradata.length;
+            }
+          }
+          
+          if (avcodec_open2(_audioCodecContext, audioCodec, NULL) >= 0) {
+            _audioStreamIndex = 1; // Dummy index for decode-only mode
+            // Store audio time base for PTS calculation
+            _audioTimeBaseNum = [config[@"audioTimeBaseNum"] intValue];
+            _audioTimeBaseDen = [config[@"audioTimeBaseDen"] intValue];
+          } else {
+            avcodec_free_context(&_audioCodecContext);
+          }
+        }
+      }
+    }
+    
+    // Allocate frames
+    _frame = av_frame_alloc();
+    _swFrame = av_frame_alloc();
+    _audioFrame = av_frame_alloc();
+    _swrOutputFrame = av_frame_alloc();
+    _packet = av_packet_alloc();
+    
+    if (!_frame || !_swFrame || !_packet || !_audioFrame || !_swrOutputFrame) {
+      if (error) {
+        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2004
+                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to allocate frames"}];
+      }
+      [self close];
+      return nil;
+    }
+    
+    // Initialize scaler for software path
+    if (!_usingHardwareDecoder) {
+      _swsContext = sws_getContext(width, height, (enum AVPixelFormat)pixelFormat,
+                                   width, height, AV_PIX_FMT_NV12,
+                                   SWS_BILINEAR, NULL, NULL, NULL);
+    }
+    
+    // Create video info
+    _videoInfo = [[FFmpegVideoInfo alloc] init];
+    _videoInfo.width = width;
+    _videoInfo.height = height;
+    _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
+    _videoInfo.isHardwareAccelerated = _usingHardwareDecoder;
+    _videoInfo.decoderName = _usingHardwareDecoder 
+        ? [NSString stringWithFormat:@"%s_videotoolbox", codec->name]
+        : [NSString stringWithFormat:@"%s", codec->name];
+    _videoInfo.decoderDescription = _usingHardwareDecoder 
+        ? @"Hardware Acceleration (VideoToolbox)" 
+        : @"Software Decoding (CPU)";
+    _videoInfo.colorPrimaries = [config[@"colorPrimaries"] intValue];
+    _videoInfo.colorTransfer = [config[@"colorTransfer"] intValue];
+    _videoInfo.colorSpace = [config[@"colorSpace"] intValue];
+    _videoInfo.colorRange = [config[@"colorRange"] intValue];
+    _videoInfo.isDolbyVision = [config[@"isDolbyVision"] boolValue];
+    _videoInfo.doviProfile = [config[@"doviProfile"] intValue];
+    _videoInfo.frameRate = [config[@"frameRate"] doubleValue] ?: 30.0;
+    _videoInfo.duration = [config[@"duration"] doubleValue];
+    
+    if (config[@"audioCodecId"]) {
+      const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)[config[@"audioCodecId"] intValue]);
+      if (audioCodec) {
+        _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
+      }
+      _videoInfo.audioSampleRate = [config[@"audioSampleRate"] intValue];
+      _videoInfo.audioChannels = [config[@"audioChannels"] intValue];
+    }
+    
+    NSLog(@"[FFmpegDecoder] Initialized in decode-only mode (HW: %@)", _usingHardwareDecoder ? @"YES" : @"NO");
   }
   return self;
 }
@@ -194,358 +339,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return YES;
 }
 
-- (BOOL)openVideoFile:(NSURL *)url error:(NSError **)error {
-  const char *filename = [[url path] UTF8String];
-
-  // Open input file
-  if (avformat_open_input(&_formatContext, filename, NULL, NULL) < 0) {
-    if (error) {
-      *error = [NSError
-          errorWithDomain:@"FFmpegDecoder"
-                     code:1001
-                 userInfo:@{
-                   NSLocalizedDescriptionKey : @"Failed to open video file"
-                 }];
-    }
-    return NO; // Don't call close - nothing to clean up yet
-  }
-
-  // Retrieve stream information
-  if (avformat_find_stream_info(_formatContext, NULL) < 0) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1002, @"Failed to find stream information");
-  }
-
-  // Find the best video stream
-  _videoStreamIndex =
-      av_find_best_stream(_formatContext, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-  if (_videoStreamIndex < 0) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1003, @"No video stream found");
-  }
-
-  AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
-
-  // Find decoder for the video stream
-  const AVCodec *codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
-  if (!codec) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1004, @"Codec not found");
-  }
-
-  // Try to initialize hardware decoder
-  // Try to initialize VTDecoder for supported codecs (HEVC)
-  // This bypasses FFmpeg's hardware decoder
-  if ([VTDecoder isCodecSupported:videoStream->codecpar->codec_id]) {
-      // Extract Dolby Vision config if present
-      NSData *doviConfigData = nil;
-      const AVPacketSideData *doviSideData = av_packet_side_data_get(
-          videoStream->codecpar->coded_side_data,
-          videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
-      if (doviSideData && doviSideData->size > 0) {
-          doviConfigData = [NSData dataWithBytes:doviSideData->data length:doviSideData->size];
-      }
-      
-      _vtDecoder = [[VTDecoder alloc] initWithCodecParameters:videoStream->codecpar
-                                                     timeBase:videoStream->time_base
-                                          dolbyVisionSideData:doviConfigData
-                                                        error:nil];
-      if (_vtDecoder) {
-          _usingHardwareDecoder = YES;
-          if (_vtDecoder.isDolbyVision) {
-              NSLog(@"[FFmpegDecoder] Using VTDecoder for Dolby Vision Profile %d", _vtDecoder.dolbyVisionProfile);
-          } else {
-              NSLog(@"[FFmpegDecoder] Using VTDecoder for HEVC");
-          }
-      }
-  }
-
-  // Initialize hardware decoder (only if manual VTDecoder didn't take over)
-  // And even if VTDecoder is used, we might want to open software codec for metadata?
-  // Actually, if _vtDecoder is used, we skip FFmpeg's HW init.
-  BOOL hwInitSuccess = NO;
-  if (!_vtDecoder) {
-      hwInitSuccess = [self initHardwareDecoder:codec error:nil];
-  }
-
-  // Allocate codec context
-  _codecContext = avcodec_alloc_context3(codec);
-  if (!_codecContext) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1005, @"Failed to allocate codec context");
-  }
-
-  // Copy codec parameters to codec context
-  if (avcodec_parameters_to_context(_codecContext, videoStream->codecpar) < 0) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1006, @"Failed to copy codec parameters");
-  }
-
-  // Configure hardware acceleration if available
-  if (hwInitSuccess && _hwDeviceCtx) {
-    _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
-    _codecContext->get_format = get_hw_format;
-    _usingHardwareDecoder = YES;
-    _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
-    _codecContext->get_format = get_hw_format;
-    _usingHardwareDecoder = YES;
-
-  } else {
-    // Enable multi-threaded decoding for software decode path
-    // 0 = auto-detect optimal thread count based on CPU cores
-    _codecContext->thread_count = 0;
-    // Enable both frame threading (decode multiple frames in parallel) and
-    // slice threading (decode slices of a single frame in parallel)
-    _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-
-  }
-
-  // Open codec
-  int ret = avcodec_open2(_codecContext, codec, NULL);
-  if (ret < 0) {
-    // If hardware decoding failed to open, try falling back to software
-    // If hardware decoding failed to open, try falling back to software
-    if (_usingHardwareDecoder && !_vtDecoder) {
-
-
-      // Reset hardware state
-      av_buffer_unref(&_hwDeviceCtx);
-      _hwDeviceCtx = NULL;
-      _codecContext->hw_device_ctx = NULL;
-      _codecContext->get_format = NULL;
-      _usingHardwareDecoder = NO;
-
-      // Try opening again with software
-      ret = avcodec_open2(_codecContext, codec, NULL);
-    }
-
-    if (ret < 0) {
-      FFMPEG_SET_ERROR_AND_CLOSE(error, 1007, @"Failed to open codec");
-    }
-  }
-
-  // Find the best audio stream (optional)
-  _audioStreamIndex =
-      av_find_best_stream(_formatContext, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-
-  if (_audioStreamIndex >= 0) {
-    AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
-    const AVCodec *audioCodec =
-        avcodec_find_decoder(audioStream->codecpar->codec_id);
-
-    if (audioCodec) {
-      _audioCodecContext = avcodec_alloc_context3(audioCodec);
-      if (_audioCodecContext) {
-        if (avcodec_parameters_to_context(_audioCodecContext,
-                                          audioStream->codecpar) >= 0) {
-          if (avcodec_open2(_audioCodecContext, audioCodec, NULL) >= 0) {
-
-          } else {
-
-            avcodec_free_context(&_audioCodecContext);
-            _audioCodecContext = NULL;
-            _audioStreamIndex = -1;
-          }
-        } else {
-          avcodec_free_context(&_audioCodecContext);
-          _audioCodecContext = NULL;
-          _audioStreamIndex = -1;
-        }
-      }
-    }
-  } else {
-
-  }
-
-  // Allocate frames
-  _frame = av_frame_alloc();
-  _swFrame = av_frame_alloc(); // For transferring hw frames to sw
-  _audioFrame = av_frame_alloc();
-  _swrOutputFrame = av_frame_alloc();
-  _packet = av_packet_alloc();
-
-  if (!_frame || !_swFrame || !_packet || !_audioFrame || !_swrOutputFrame) {
-    FFMPEG_SET_ERROR_AND_CLOSE(error, 1008, @"Failed to allocate frame or packet");
-  }
-
-  // Initialize scaler context for YUV to BGRA conversion (only used for
-  // software path) For hardware path, we get CVPixelBuffer directly
-  if (!_usingHardwareDecoder) {
-    // Use NV12 output format for accelerated conversion (no CPU YUV→RGB)
-    // Core Image handles YUV→RGB on the GPU when rendering
-    _swsContext = sws_getContext(_codecContext->width, _codecContext->height,
-                                 _codecContext->pix_fmt, _codecContext->width,
-                                 _codecContext->height, AV_PIX_FMT_NV12,
-                                 SWS_BILINEAR, NULL, NULL, NULL);
-
-    if (!_swsContext) {
-      FFMPEG_SET_ERROR_AND_CLOSE(error, 1009, @"Failed to create scaler context");
-    }
-  }
-
-  // Create video info
-  _videoInfo = [[FFmpegVideoInfo alloc] init];
-  _videoInfo.width = _codecContext->width;
-  _videoInfo.height = _codecContext->height;
-  _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
-  _videoInfo.isHardwareAccelerated = _usingHardwareDecoder;
-  
-  // Set decoder details
-  if (_usingHardwareDecoder) {
-      if (_vtDecoder) {
-          _videoInfo.decoderName = [NSString stringWithFormat:@"VTDecoder (%s)", codec->name];
-          _videoInfo.decoderDescription = @"Hardware Acceleration (Manual Mapped)";
-      } else {
-          _videoInfo.decoderName = [NSString stringWithFormat:@"%s_videotoolbox", codec->name];
-          _videoInfo.decoderDescription = @"Hardware Acceleration (VideoToolbox)";
-      }
-  } else {
-      _videoInfo.decoderName = [NSString stringWithFormat:@"%s", codec->name];
-      _videoInfo.decoderDescription = @"Software Decoding (CPU)";
-  }
-
-  // Extract color metadata for HDR detection
-  // Extract color metadata for HDR detection
-  // Prefer codec context (bitstream), fallback to container (stream)
-  _videoInfo.colorPrimaries = _codecContext->color_primaries;
-  if (_videoInfo.colorPrimaries == AVCOL_PRI_UNSPECIFIED && videoStream->codecpar->color_primaries != AVCOL_PRI_UNSPECIFIED) {
-      _videoInfo.colorPrimaries = videoStream->codecpar->color_primaries;
-  }
-
-  _videoInfo.colorTransfer = _codecContext->color_trc;
-  if (_videoInfo.colorTransfer == AVCOL_TRC_UNSPECIFIED && videoStream->codecpar->color_trc != AVCOL_TRC_UNSPECIFIED) {
-      _videoInfo.colorTransfer = videoStream->codecpar->color_trc;
-  }
-
-  _videoInfo.colorSpace = _codecContext->colorspace;
-  if (_videoInfo.colorSpace == AVCOL_SPC_UNSPECIFIED && videoStream->codecpar->color_space != AVCOL_SPC_UNSPECIFIED) {
-      _videoInfo.colorSpace = videoStream->codecpar->color_space;
-  }
-
-  _videoInfo.colorRange = _codecContext->color_range;
-  if (_videoInfo.colorRange == AVCOL_RANGE_UNSPECIFIED && videoStream->codecpar->color_range != AVCOL_RANGE_UNSPECIFIED) {
-      _videoInfo.colorRange = videoStream->codecpar->color_range;
-  }
-
-  // Check for Dolby Vision side data in the stream
-  const AVPacketSideData *doviSideData = av_packet_side_data_get(
-      videoStream->codecpar->coded_side_data,
-      videoStream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
-  if (doviSideData && doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
-      _videoInfo.isDolbyVision = YES;
-      const AVDOVIDecoderConfigurationRecord *doviConf = (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
-      _videoInfo.doviProfile = doviConf->dv_profile;
-  } else {
-      _videoInfo.isDolbyVision = NO;
-      _videoInfo.doviProfile = 0;
-  }
-
-  // Extract Content Light Level metadata (MaxCLL/MaxFALL) for HDR tone mapping
-  const AVPacketSideData *cllSideData = av_packet_side_data_get(
-      videoStream->codecpar->coded_side_data,
-      videoStream->codecpar->nb_coded_side_data,
-      AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-  if (cllSideData && cllSideData->size >= sizeof(AVContentLightMetadata)) {
-    const AVContentLightMetadata *cll = (const AVContentLightMetadata *)cllSideData->data;
-    _videoInfo.maxContentLightLevel = cll->MaxCLL;
-    _videoInfo.maxFrameAverageLightLevel = cll->MaxFALL;
-  }
-
-  // Extract Mastering Display metadata for HDR tone mapping
-  const AVPacketSideData *mdSideData = av_packet_side_data_get(
-      videoStream->codecpar->coded_side_data,
-      videoStream->codecpar->nb_coded_side_data,
-      AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
-  if (mdSideData && mdSideData->size >= sizeof(AVMasteringDisplayMetadata)) {
-    const AVMasteringDisplayMetadata *md = (const AVMasteringDisplayMetadata *)mdSideData->data;
-    if (md->has_luminance) {
-      _videoInfo.masteringDisplayMaxLuminance = (float)av_q2d(md->max_luminance);
-      _videoInfo.masteringDisplayMinLuminance = (float)av_q2d(md->min_luminance);
-    }
-  }
-
-  // Calculate bits per component from pixel format
-  const AVPixFmtDescriptor *pixFmtDesc =
-      av_pix_fmt_desc_get(_codecContext->pix_fmt);
-  _videoInfo.bitsPerComponent = pixFmtDesc ? pixFmtDesc->comp[0].depth : 8;
-
-  // Calculate frame rate
-  AVRational frameRate = av_guess_frame_rate(_formatContext, videoStream, NULL);
-  if (frameRate.num && frameRate.den) {
-    _videoInfo.frameRate = (double)frameRate.num / (double)frameRate.den;
-  } else {
-    _videoInfo.frameRate = 30.0; // Default to 30fps
-  }
-
-  // Calculate duration
-  if (videoStream->duration != AV_NOPTS_VALUE) {
-    _videoInfo.duration =
-        (double)videoStream->duration * av_q2d(videoStream->time_base);
-  } else if (_formatContext->duration != AV_NOPTS_VALUE) {
-    _videoInfo.duration = (double)_formatContext->duration / AV_TIME_BASE;
-  } else {
-    _videoInfo.duration = 0.0;
-  }
-
-  // Populate audio info if audio stream is available
-  if (_audioStreamIndex >= 0 && _audioCodecContext) {
-    AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
-    const AVCodec *audioCodec =
-        avcodec_find_decoder(audioStream->codecpar->codec_id);
-    if (audioCodec) {
-      _videoInfo.audioCodecName =
-          [NSString stringWithUTF8String:audioCodec->name];
-    }
-    _videoInfo.audioSampleRate = _audioCodecContext->sample_rate;
-    _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
-  }
-
-
-
-  return YES;
-}
-
-#pragma mark - Metadata Accessors
-
 - (nullable FFmpegVideoInfo *)getVideoInfo {
   return _videoInfo;
-}
-
-#pragma mark - Demuxing & Decoding
-
-- (nullable FFmpegPacketData *)demuxNextPacket {
-  if (!_formatContext) {
-    return nil;
-  }
-
-  // Check if we have queued packets from a seek operation
-  if (_queuedPackets.count > 0) {
-    FFmpegPacketData *packetData = _queuedPackets.firstObject;
-    [_queuedPackets removeObjectAtIndex:0];
-    return packetData;
-  }
-
-  // Allocate a temporary packet for demuxing
-  AVPacket *pkt = av_packet_alloc();
-  if (!pkt) {
-    return nil;
-  }
-
-  while (av_read_frame(_formatContext, pkt) >= 0) {
-    BOOL isVideo = (pkt->stream_index == _videoStreamIndex);
-    BOOL isAudio =
-        (pkt->stream_index == _audioStreamIndex && _audioCodecContext != NULL);
-
-    // Only return video or audio packets
-    if (isVideo || isAudio) {
-      FFmpegPacketData *packetData = [self createPacketDataFromAVPacket:pkt
-                                                                isVideo:isVideo
-                                                                isAudio:isAudio];
-      av_packet_free(&pkt);
-      return packetData;
-    }
-
-    // Skip non-video/audio packets
-    av_packet_unref(pkt);
-  }
-
-  av_packet_free(&pkt);
-  return nil;
 }
 
 - (nullable FFmpegFrame *)decodePacket:(FFmpegPacketData *)packetData {
@@ -642,45 +437,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
-  // Manual VTDecoder Path
-  if (_vtDecoder) {
-      NSError *error = nil;
-      // 1. Send packet to decoder (Push)
-      if (![_vtDecoder sendPacket:pkt error:&error]) {
-          if (error) NSLog(@"[FFmpegDecoder] VTDecoder sendPacket error: %@", error);
-          // Don't return nil yet, checking if any frames are ready to pop regardless of input failure
-      }
-      
-      NSMutableArray<FFmpegVideoFrame *> *frames = [NSMutableArray array];
-      
-      // 2. Retrieve all available frames (Pull)
-      CVPixelBufferRef pixelBuffer = NULL;
-      CMTime framePTS = kCMTimeInvalid;
-      
-      while ((pixelBuffer = [_vtDecoder popFrame:&framePTS])) {
-          // Calculate PTS from the frame's metadata
-          double pts = 0.0;
-          if (CMTIME_IS_VALID(framePTS)) {
-              pts = CMTimeGetSeconds(framePTS);
-          } else {
-              // Fallback if somehow invalid (shouldn't happen with valid packets)
-               if (pkt->pts != AV_NOPTS_VALUE) {
-                   AVStream *stream = _formatContext->streams[_videoStreamIndex];
-                   pts = (double)pkt->pts * av_q2d(stream->time_base);
-               }
-          }
-          
-          FFmpegVideoFrame *frame = [self createVideoFrameFromPixelBuffer:pixelBuffer pts:pts];
-          // Ownership of pixelBuffer is transferred to FFmpegVideoFrame, which releases it on dealloc.
-          // We do NOT release it here.
-          
-          if (frame) {
-              [frames addObject:frame];
-          }
-      }
-      
-      return frames.count > 0 ? frames : nil;
-  }
+  // Note: Swift VTDecoder is now used by VideoDecoder.swift for H264/HEVC
+  // This method handles FFmpeg software and FFmpeg-VideoToolbox paths
 
   if (avcodec_send_packet(_codecContext, pkt) < 0) {
     return nil;
@@ -701,10 +459,16 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       break;
     }
 
+    int64_t finalPts = _frame->pts;
+    if (finalPts == AV_NOPTS_VALUE) {
+        finalPts = _frame->best_effort_timestamp;
+    }
+
     double pts = 0.0;
-    if (_frame->pts != AV_NOPTS_VALUE) {
-      AVStream *stream = _formatContext->streams[_videoStreamIndex];
-      pts = (double)_frame->pts * av_q2d(stream->time_base);
+    if (finalPts != AV_NOPTS_VALUE) {
+      if (_videoTimeBaseDen > 0) {
+          pts = (double)finalPts * (double)_videoTimeBaseNum / (double)_videoTimeBaseDen;
+      }
     }
 
     FFmpegVideoFrame *videoFrame = [self createVideoFrameFromDecodedFrame:pts];
@@ -734,10 +498,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   double pts = 0.0;
-  if (_audioFrame->pts != AV_NOPTS_VALUE) {
-    AVStream *stream = _formatContext->streams[_audioStreamIndex];
-    pts = (double)_audioFrame->pts * av_q2d(stream->time_base);
-  }
+    if (_audioFrame->pts != AV_NOPTS_VALUE) {
+        if (_audioTimeBaseDen > 0) {
+            pts = (double)_audioFrame->pts * (double)_audioTimeBaseNum / (double)_audioTimeBaseDen;
+        }
+    }
 
   FFmpegAudioFrame *audioFrame = [[FFmpegAudioFrame alloc] init];
   audioFrame.type = FFmpegFrameTypeAudio;
@@ -760,7 +525,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 - (nullable FFmpegVideoFrame *)drainVideoFrame {
-  if (!_codecContext || !_formatContext) {
+  if (!_codecContext) {
     return nil;
   }
 
@@ -780,8 +545,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   double pts = 0.0;
   if (_frame->pts != AV_NOPTS_VALUE) {
-    AVStream *stream = _formatContext->streams[_videoStreamIndex];
-    pts = (double)_frame->pts * av_q2d(stream->time_base);
+      if (_videoTimeBaseDen > 0) {
+          pts = (double)_frame->pts * (double)_videoTimeBaseNum / (double)_videoTimeBaseDen;
+      }
   }
 
   return [self createVideoFrameFromDecodedFrame:pts];
@@ -909,178 +675,17 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return videoFrame;
 }
 
-/// Seeks to the specified time in the video.
-///
-/// Uses a two-phase strategy:
-/// 1. Fast seek to nearest keyframe before target using avformat_seek_file
-/// 2. If accurate=YES, decode frames until reaching target PTS
-///
-/// When seek optimization is enabled, non-reference frames are skipped during
-/// the catch-up phase (from keyframe to ~15 frames before target) for better performance.
-///
-/// @param seconds Target time in seconds
-/// @param accurate If YES, decode frames for precise positioning; if NO, return nearest keyframe
-/// @return The frame at or after the target time, or nil on failure
-- (nullable FFmpegVideoFrame *)seekToTime:(double)seconds accurate:(BOOL)accurate {
-  if (!_formatContext || _videoStreamIndex < 0) {
-    return nil;
-  }
 
-  // Clear any previously queued packets
-  [_queuedPackets removeAllObjects];
 
-  AVStream *stream = _formatContext->streams[_videoStreamIndex];
-  int64_t timestamp = (int64_t)(seconds / av_q2d(stream->time_base));
+#pragma mark - Seek Implementation
 
-  // Phase 1: Fast seek to nearest keyframe before target
-  if (avformat_seek_file(_formatContext, _videoStreamIndex, INT64_MIN,
-                         timestamp, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
-    return nil;
-  }
 
-  // Flush codec buffers to reset decoder state
-  if (_vtDecoder) {
-      [_vtDecoder flush];
-  }
-  avcodec_flush_buffers(_codecContext);
-  if (_audioCodecContext) {
-    avcodec_flush_buffers(_audioCodecContext);
-  }
-
-  // Phase 2: Frame-accurate seek - decode frames until we reach target PTS
-  double targetPTS = seconds;
-
-  // Optimization: Skip non-reference frames when catching up from far away
-  enum AVDiscard originalSkipFrame = _codecContext->skip_frame;
-  BOOL optimizationActive = NO;
-  // Calculate adaptive threshold: ~15 frames before target, proportional to frame rate
-  double adaptiveThreshold = kSeekOptimizationFrameCount / _videoInfo.frameRate;
-
-  if (accurate && self.seekOptimizationEnabled) {
-    _codecContext->skip_frame = AVDISCARD_NONREF;
-    optimizationActive = YES;
-  }
-
-  FFmpegVideoFrame *resultFrame = nil;
-
-  while (true) {
-    int readResult = av_read_frame(_formatContext, _packet);
-    if (readResult < 0) {
-      // Handle EOF or error
-      if (readResult == AVERROR_EOF) {
-        int flushRet = avcodec_send_packet(_codecContext, NULL); // Flush
-        if (flushRet < 0 && flushRet != AVERROR_EOF) {
-          NSLog(@"[FFmpegDecoder] Warning: flush packet failed: %s", av_err2str(flushRet));
-        }
-        while (avcodec_receive_frame(_codecContext, _frame) == 0) {
-          double framePTS = 0.0;
-          if (_frame->pts != AV_NOPTS_VALUE) {
-            framePTS = (double)_frame->pts * av_q2d(stream->time_base);
-          }
-          
-          if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
-            resultFrame = [self createVideoFrameFromDecodedFrame:framePTS];
-            break;
-          }
-        }
-      }
-      av_packet_unref(_packet);
-      break;
-    }
-
-    // Audio Packet - Queue it for later consumption (only during accurate seeks)
-    if (_packet->stream_index == _audioStreamIndex && _audioCodecContext && accurate) {
-      AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
-      double audioPTS = (double)_packet->pts * av_q2d(audioStream->time_base);
-      
-      // Only queue audio packets that are close to or after our target time
-      // Discard packets from the "catch-up" phase (between keyframe and target)
-      // Use a small negative tolerance to ensure we don't miss the start of the audio segment
-      if (audioPTS >= targetPTS - kAudioQueueTolerance && _queuedPackets.count < kMaxQueuedAudioPackets) {
-          FFmpegPacketData *packetData = [self createPacketDataFromAVPacket:_packet
-                                                                    isVideo:NO
-                                                                    isAudio:YES];
-          [_queuedPackets addObject:packetData];
-      }
-      av_packet_unref(_packet);
-      continue;
-    }
-
-    // Video Packet - Decode
-    if (_packet->stream_index == _videoStreamIndex && (_codecContext || _vtDecoder)) {
-      if (optimizationActive) {
-        double packetPTS = (double)_packet->pts * av_q2d(stream->time_base);
-        if (packetPTS >= targetPTS - adaptiveThreshold) {
-          _codecContext->skip_frame = originalSkipFrame;
-          optimizationActive = NO;
-        }
-      }
-      
-      if (_vtDecoder) {
-          // Synchronous manual decode for seeking
-          NSError *vtError = nil;
-          CVPixelBufferRef pixelBuffer = [_vtDecoder decodePacket:_packet error:&vtError];
-          if (pixelBuffer) {
-              double framePTS = 0.0;
-              if (_packet->pts != AV_NOPTS_VALUE) {
-                  framePTS = (double)_packet->pts * av_q2d(stream->time_base);
-              }
-              
-              if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
-                  resultFrame = [self createVideoFrameFromPixelBuffer:pixelBuffer pts:framePTS];
-                  // Ownership transferred to resultFrame, do not release
-                  av_packet_unref(_packet);
-                  break; // Found it
-              }
-              CVPixelBufferRelease(pixelBuffer);
-          }
-          av_packet_unref(_packet);
-          continue;
-      }
-
-      if (avcodec_send_packet(_codecContext, _packet) < 0) {
-        av_packet_unref(_packet);
-        continue;
-      }
-
-      av_packet_unref(_packet);
-
-      // Drain frames
-      while (true) {
-        int ret = avcodec_receive_frame(_codecContext, _frame);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0) break;
-
-        double framePTS = 0.0;
-        if (_frame->pts != AV_NOPTS_VALUE) {
-          framePTS = (double)_frame->pts * av_q2d(stream->time_base);
-        }
-
-        // If not accurate, return the first frame we find (keyframe)
-        // If accurate, wait for target
-        if (!accurate || framePTS >= targetPTS - kSeekPTSTolerance) {
-          resultFrame = [self createVideoFrameFromDecodedFrame:framePTS];
-          break; // Found it
-        }
-      }
-
-      if (resultFrame) {
-        break; // Exit outer loop
-      }
-    } else {
-      // Discard other stream packets
-      av_packet_unref(_packet);
-    }
-  }
-
-  _codecContext->skip_frame = originalSkipFrame; // Safety restore
-  return resultFrame;
-}
 
 #pragma mark - Cleanup
 
 - (void)close {
   // Guard against double-close (dealloc also calls close)
-  if (!_formatContext && !_codecContext) {
+  if (!_codecContext) {
     return;
   }
 
@@ -1131,10 +736,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _audioCodecContext = NULL;
   }
 
-  if (_formatContext) {
-    avformat_close_input(&_formatContext);
-    _formatContext = NULL;
-  }
+
 
   if (_hwDeviceCtx) {
     av_buffer_unref(&_hwDeviceCtx);
@@ -1145,70 +747,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   [_pixelFormatConverter cleanup];
   _pixelFormatConverter = nil;
 
-  if (_vtDecoder) {
-      [_vtDecoder flush]; // Ensure clean teardown if needed (though teardown handles it)
-      _vtDecoder = nil;
-  }
+  // Note: VTDecoder is now managed by Swift VideoDecoder
 
   _usingHardwareDecoder = NO;
   NSLog(@"[FFmpegDecoder] close() completed - all resources freed");
 }
-
-#pragma mark - Cover Image Extraction
-
-- (nullable NSData *)extractCoverImage {
-  if (!_formatContext) {
-    return nil;
-  }
-
-  // Iterate through all streams looking for cover images
-  for (unsigned int i = 0; i < _formatContext->nb_streams; i++) {
-    AVStream *stream = _formatContext->streams[i];
-    enum AVCodecID codecId = stream->codecpar->codec_id;
-
-    // Method 1: Check attachment streams (common in MP4, M4A)
-    if (stream->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT) {
-      // Check if it's an image codec (JPEG, PNG, or BMP)
-      if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
-          codecId != AV_CODEC_ID_BMP) {
-        continue;
-      }
-
-      // The attachment data is in extradata
-      if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
-        NSLog(@"[FFmpegDecoder] Found embedded cover image (attachment): %s, "
-              @"size: %d bytes",
-              avcodec_get_name(codecId), stream->codecpar->extradata_size);
-        return [NSData dataWithBytes:stream->codecpar->extradata
-                              length:stream->codecpar->extradata_size];
-      }
-    }
-
-    // Method 2: Check video streams with attached_pic disposition (common in
-    // MKV) MKV files store cover images as video streams with the
-    // AV_DISPOSITION_ATTACHED_PIC flag
-    if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-        (stream->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
-      // Verify it's an image codec
-      if (codecId != AV_CODEC_ID_MJPEG && codecId != AV_CODEC_ID_PNG &&
-          codecId != AV_CODEC_ID_BMP && codecId != AV_CODEC_ID_WEBP) {
-        continue;
-      }
-
-      // For attached_pic streams, we need to read the packet data
-      // The image data is stored as a single packet, not in extradata
-      if (stream->attached_pic.data && stream->attached_pic.size > 0) {
-        NSLog(@"[FFmpegDecoder] Found embedded cover image (attached_pic): %s, "
-              @"size: %d bytes",
-              avcodec_get_name(codecId), stream->attached_pic.size);
-        return [NSData dataWithBytes:stream->attached_pic.data
-                              length:stream->attached_pic.size];
-      }
-    }
-  }
-
-  NSLog(@"[FFmpegDecoder] No embedded cover image found");
-  return nil;
-}
-
 @end
