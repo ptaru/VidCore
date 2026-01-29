@@ -139,6 +139,7 @@ public final class VTDecoder: @unchecked Sendable {
     
     // Dolby Vision
     public private(set) var isDolbyVision: Bool = false
+    public private(set) var isHDR: Bool = false
     public private(set) var dolbyVisionProfile: UInt8 = 0
     private var dvcCData: Data?
     
@@ -172,11 +173,13 @@ public final class VTDecoder: @unchecked Sendable {
         self.timeBaseNum = config.timeBaseNum
         self.timeBaseDen = config.timeBaseDen
         
+        // Detect HDR content (16 = PQ, 18 = HLG)
+        self.isHDR = config.colorTransfer == 16 || config.colorTransfer == 18
+        
         // Process Dolby Vision configuration if provided
         if let doviConfig = config.dolbyVisionConfig, doviConfig.count >= 8 {
             processDolbyVisionConfig(doviConfig)
         }
-        
 
         
         // Create format description
@@ -214,6 +217,13 @@ public final class VTDecoder: @unchecked Sendable {
             let elPresentFlag = bytes[5]
             let blPresentFlag = bytes[6]
             let dvBlSignalCompatibilityId = bytes[7]
+            
+            // For Profile 7, we strip DoVi metadata to let it act as HDR10
+            if dvProfile == 7 {
+                print("[VTDecoder] Dolby Vision Profile 7 detected, STRIPPING DoVi metadata to act as HDR10")
+                self.dolbyVisionProfile = 7
+                return
+            }
             
             self.isDolbyVision = true
             self.dolbyVisionProfile = dvProfile
@@ -341,16 +351,16 @@ public final class VTDecoder: @unchecked Sendable {
             kCVPixelBufferMetalCompatibilityKey as String: true
         ]
         
-        // For Dolby Vision 10-bit content, request appropriate pixel format
-        if isDolbyVision && (dolbyVisionProfile == 5 || dolbyVisionProfile == 7 || dolbyVisionProfile == 8) {
-            if dolbyVisionProfile == 5 {
+        // For HDR (PQ/HLG) or Dolby Vision 10-bit content, request appropriate pixel format
+        if (isDolbyVision && (dolbyVisionProfile == 5 || dolbyVisionProfile == 7 || dolbyVisionProfile == 8)) || isHDR {
+            if isDolbyVision && dolbyVisionProfile == 5 {
                 // Profile 5 (IPTPQc2) uses full range encoding
                 destinationAttributes[kCVPixelBufferPixelFormatTypeKey as String] = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
                 print("[VTDecoder] Requesting 10-bit FULL range pixel format for Dolby Vision Profile 5")
             } else {
-                // Profile 7/8 use video (limited) range
+                // Profile 7/8 (or standard HDR10/HLG) use video (limited) range
                 destinationAttributes[kCVPixelBufferPixelFormatTypeKey as String] = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-                print("[VTDecoder] Requesting 10-bit video range pixel format for Dolby Vision Profile \(dolbyVisionProfile)")
+                print("[VTDecoder] Requesting 10-bit video range pixel format for \(isDolbyVision ? "Dolby Vision Profile \(dolbyVisionProfile)" : "HDR content")")
             }
         }
         
