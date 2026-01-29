@@ -59,6 +59,8 @@ public struct VidPlayer<Overlay: View>: View {
     private let showsBuiltInControls: Bool
     private let allowsDebugMenu: Bool
     private let ownsPlayer: Bool
+    private let url: URL?
+    private let autoPlay: Bool
     
     @State private var internalPlayer: VideoPlayer?
     @State private var loadError: VideoPlayerError?
@@ -88,6 +90,8 @@ public struct VidPlayer<Overlay: View>: View {
         self.allowsDebugMenu = allowsDebugMenu
         self.overlay = overlay()
         self.ownsPlayer = false
+        self.url = nil
+        self.autoPlay = false
     }
     
     // MARK: - Body
@@ -160,6 +164,23 @@ public struct VidPlayer<Overlay: View>: View {
 
             }
         }
+        .onAppear {
+            if ownsPlayer, internalPlayer == nil, let url = url {
+                let p = player
+                internalPlayer = p
+                Task {
+                    do {
+                        try await p.load(url: url)
+                        if autoPlay {
+                            p.play()
+                        }
+                    } catch {
+                        // Error handled by player state mainly, but we can track load error
+                        // Player state sets .error()
+                    }
+                }
+            }
+        }
         .onDisappear {
             // Clean up owned player
             if ownsPlayer, let player = internalPlayer {
@@ -203,6 +224,8 @@ extension VidPlayer where Overlay == EmptyView {
         self.allowsDebugMenu = allowsDebugMenu
         self.overlay = EmptyView()
         self.ownsPlayer = true
+        self.url = url
+        self.autoPlay = autoPlay
         self._internalPlayer = State(initialValue: nil)
         self._loadError = State(initialValue: nil)
     }

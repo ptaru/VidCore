@@ -15,6 +15,7 @@ public actor VideoDisplayLoop {
     
     // MARK: - Dependencies
     private let frameBuffer: VideoFrameBuffer
+    private let packetQueue: PacketQueue
     private let audioPlayer: AudioPlayer
     private weak var renderer: VideoRendererTarget?
     
@@ -39,6 +40,7 @@ public actor VideoDisplayLoop {
     // Callback for debug stats
     private var statsUpdateHandler: (@MainActor @Sendable (PlayerDebugStats) -> Void)?
     private var frameUpdateHandler: (@MainActor @Sendable (VideoFrame) -> Void)?
+    private var completionHandler: (@MainActor @Sendable () -> Void)?
     
     // Constants
     private enum Constants {
@@ -50,8 +52,9 @@ public actor VideoDisplayLoop {
         static let consecutiveDriftCountThreshold: Int = 3
     }
     
-    public init(frameBuffer: VideoFrameBuffer, audioPlayer: AudioPlayer) {
+    public init(frameBuffer: VideoFrameBuffer, packetQueue: PacketQueue, audioPlayer: AudioPlayer) {
         self.frameBuffer = frameBuffer
+        self.packetQueue = packetQueue
         self.audioPlayer = audioPlayer
     }
     
@@ -96,6 +99,10 @@ public actor VideoDisplayLoop {
         self.frameUpdateHandler = handler
     }
     
+    public func setCompletionHandler(_ handler: @escaping @MainActor @Sendable () -> Void) {
+        self.completionHandler = handler
+    }
+    
     // MARK: - Control
     
     public func start() {
@@ -135,6 +142,7 @@ public actor VideoDisplayLoop {
     private func runLoop() async {
         var hasStarted = false
         var droppedFrameCount = 0
+        var reachedEndOfStream = false
         
         while !Task.isCancelled && isRunning {
             if await frameBuffer.suspended {
@@ -146,6 +154,7 @@ public actor VideoDisplayLoop {
             let frameAvailable = await frameBuffer.waitForFrameAvailable()
             guard frameAvailable else {
                  if await frameBuffer.suspended { continue }
+                 reachedEndOfStream = true
                  break // Buffer closed/empty
             }
             
@@ -209,15 +218,15 @@ public actor VideoDisplayLoop {
                 }
                 
                 // Update stats
-                let pqCount = 0 // Needs access to PacketQueue if we want this, or just omit for now
+                let pqCount = await packetQueue.count
                 let fbCount = await frameBuffer.count
                 let drift = await (audioPlayer.hasBufferedAudio && audioPlayer.isPlaying) ? waitTime : 0.0
                 
                 let stats = PlayerDebugStats(
-                    packetQueueCount: -1, // Not accessible here easily
-                    packetQueueMax: 15,
+                    packetQueueCount: pqCount,
+                    packetQueueMax: await packetQueue.maxSize,
                     frameBufferCount: fbCount,
-                    frameBufferMax: 3,
+                    frameBufferMax: await frameBuffer.maxSize,
                     avDrift: drift,
                     droppedFrameCount: droppedFrameCount,
                     isHardwareDecoded: isHardware,
@@ -230,6 +239,18 @@ public actor VideoDisplayLoop {
                     }
                 }
             }
+        }
+        
+        // Loop exited naturally (not cancelled/stopped) and buffer is empty
+        if !Task.isCancelled && reachedEndOfStream {
+            print("[VideoDisplayLoop] End of stream reached (buffer empty/closed). Triggering completion.")
+            if let handler = completionHandler {
+                await MainActor.run {
+                    handler()
+                }
+            }
+        } else {
+             print("[VideoDisplayLoop] Loop exited. Cancelled: \(Task.isCancelled), StreamEnd: \(reachedEndOfStream)")
         }
     }
 }

@@ -39,6 +39,8 @@
 @property(nonatomic, assign) int audioStreamIndex;
 @property(nonatomic, strong) FFmpegDemuxerVideoInfo *videoInfo;
 @property(nonatomic, strong) NSMutableArray<FFmpegDemuxerPacket *> *queuedAudioPackets;
+
+- (void)ensureExtradata;
 @end
 
 #pragma mark - Constants
@@ -128,9 +130,231 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     }
     
     // Build video info
+    [self ensureExtradata];
     [self buildVideoInfo];
     
     return YES;
+}
+
+- (void)ensureExtradata {
+    if (!_formatContext || _videoStreamIndex < 0) return;
+    
+    AVCodecParameters *codecPar = _formatContext->streams[_videoStreamIndex]->codecpar;
+    
+    // Check if HEVC and extradata is missing or suspicious (header only, no arrays)
+    BOOL isHEVC = (codecPar->codec_id == AV_CODEC_ID_HEVC);
+    
+    // HEVC decoder config record header is 23 bytes. If size <= 23, it typically has no NAL arrays.
+    BOOL needsExtradata = NO;
+    if (codecPar->extradata_size == 0) {
+        needsExtradata = YES;
+    } else if (isHEVC && codecPar->extradata_size <= 23) {
+        needsExtradata = YES;
+    }
+    
+    if (!needsExtradata) return;
+    
+    NSLog(@"[FFmpegDemuxer] Extradata missing or incomplete (%d bytes), attempting manual reconstruction...", codecPar->extradata_size);
+    
+    // Use hevc_mp4toannexb to ensure we have standard Annex B start codes
+    const AVBitStreamFilter *filter = av_bsf_get_by_name("hevc_mp4toannexb");
+    if (!filter) {
+        NSLog(@"[FFmpegDemuxer] 'hevc_mp4toannexb' filter not found.");
+        return;
+    }
+    
+    __block AVBSFContext *bsfCtx = NULL;
+    __block AVPacket *pkt = NULL;
+    __block AVPacket *pktOut = NULL;
+    
+    // Helper to free resources
+    void (^cleanup)(void) = ^{
+        if (bsfCtx) av_bsf_free(&bsfCtx);
+        if (pkt) av_packet_free(&pkt);
+        if (pktOut) av_packet_free(&pktOut);
+    };
+    
+    if (av_bsf_alloc(filter, &bsfCtx) < 0 || avcodec_parameters_copy(bsfCtx->par_in, codecPar) < 0 || av_bsf_init(bsfCtx) < 0) {
+        NSLog(@"[FFmpegDemuxer] Failed to init hevc_mp4toannexb");
+        cleanup();
+        return;
+    }
+    
+    pkt = av_packet_alloc();
+    pktOut = av_packet_alloc();
+    if (!pkt || !pktOut) {
+        cleanup();
+        return;
+    }
+    
+    // Store found NALs
+    __block NSMutableData *vpsData = nil;
+    __block NSMutableData *spsData = nil;
+    __block NSMutableData *ppsData = nil;
+    
+    int packetsChecked = 0;
+    const int MaxPacketsToCheck = 2000;
+    
+    // Seek to start
+    if (av_seek_frame(_formatContext, _videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+        NSLog(@"[FFmpegDemuxer] Warning: Failed to seek to start");
+        cleanup();
+        return;
+    }
+    
+    BOOL foundAll = NO;
+    
+    while (packetsChecked < MaxPacketsToCheck) {
+        int ret = av_read_frame(_formatContext, pkt);
+        if (ret < 0) break;
+        
+        if (pkt->stream_index == _videoStreamIndex) {
+            ret = av_bsf_send_packet(bsfCtx, pkt);
+            if (ret < 0) {
+                av_packet_unref(pkt);
+                break;
+            }
+            
+            while (ret >= 0) {
+                ret = av_bsf_receive_packet(bsfCtx, pktOut);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+                if (ret < 0) break;
+                
+                // Parse NAL units from pktOut->data (Annex B)
+                uint8_t *data = pktOut->data;
+                int size = pktOut->size;
+                
+                int i = 0;
+                while (i < size - 4) {
+                    // Find start code 00 00 01 or 00 00 00 01
+                    if (data[i] == 0 && data[i+1] == 0) {
+                        int startCodeLen = 0;
+                        if (data[i+2] == 1) {
+                            startCodeLen = 3;
+                        } else if (data[i+2] == 0 && data[i+3] == 1) {
+                            startCodeLen = 4;
+                        }
+                        
+                        if (startCodeLen > 0) {
+                            // NAL Header
+                            uint8_t nalHeader = data[i+startCodeLen];
+                            int nalType = (nalHeader & 0x7E) >> 1;
+                            
+                            // Find next start code or end
+                            int nextStart = i + startCodeLen + 1;
+                            while (nextStart < size - 3) {
+                                if (data[nextStart] == 0 && data[nextStart+1] == 0 && 
+                                    (data[nextStart+2] == 1 || (data[nextStart+2] == 0 && data[nextStart+3] == 1))) {
+                                    break;
+                                }
+                                nextStart++;
+                            }
+                            if (nextStart >= size - 3) nextStart = size;
+                            
+                            int nalSize = nextStart - (i + startCodeLen);
+                            NSData *nalData = [NSData dataWithBytes:&data[i + startCodeLen] length:nalSize];
+                            
+                            if (nalType == 32) { // VPS
+                                if (!vpsData) vpsData = [nalData mutableCopy];
+                            } else if (nalType == 33) { // SPS
+                                if (!spsData) spsData = [nalData mutableCopy];
+                            } else if (nalType == 34) { // PPS
+                                if (!ppsData) ppsData = [nalData mutableCopy];
+                            }
+                            
+                            i = nextStart;
+                            continue;
+                        }
+                    }
+                    i++;
+                }
+                
+                if (vpsData && spsData && ppsData) {
+                    foundAll = YES;
+                    break;
+                }
+                
+                av_packet_unref(pktOut);
+            }
+        }
+        
+        av_packet_unref(pkt);
+        if (foundAll) break;
+        packetsChecked++;
+    }
+    
+    if (foundAll) {
+        NSLog(@"[FFmpegDemuxer] Reconstruction success! Building valid hvcC atom...");
+        
+        // Reconstruct hvcC box
+        // Use existing header (first 22 bytes? or 23? header is usually 23 bytes including numArrays=0 byte)
+        // Header structure:
+        // configVersion(1) + ... + numArrays(1)
+        
+        // Let's take the first 22 bytes from existing extradata (excluding numArrays)
+        NSMutableData *newExtradata = [NSMutableData data];
+        if (codecPar->extradata && codecPar->extradata_size >= 22) {
+            [newExtradata appendBytes:codecPar->extradata length:22]; // Copy header config
+        } else {
+            // Fallback header construction if original is totally empty
+             uint8_t header[] = {
+                 1, // version
+                 1, // profile space/tier/profile
+                 0x60, 0x00, 0x00, 0x00, // profile/compat bytes
+                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // constraint bytes
+                 0, // level
+                 0xF0, 0x00, 0xFC, 0xFD, 0xF8, 0xF8 // flags
+             };
+             // This is risky, better to use what was there if >0
+             [newExtradata appendBytes:header length:sizeof(header)];
+        }
+        
+        // NumArrays = 3
+        uint8_t numArrays = 3;
+        [newExtradata appendBytes:&numArrays length:1];
+        
+        // Append Arrays
+        auto appendArray = ^(NSData *nal, uint8_t type) {
+            // Array Header: Type(1) + Count(2) + Length(2) + Data
+            uint8_t t = type | 0x80; // completeness? or just type? hvcC uses type & 0x3F | completeness(0x80)
+            t = type | 0x80; // Set complete flag
+            [newExtradata appendBytes:&t length:1];
+            
+            uint16_t count = htons(1);
+            [newExtradata appendBytes:&count length:2];
+            
+            uint16_t len = htons((uint16_t)nal.length);
+            [newExtradata appendBytes:&len length:2];
+            
+            [newExtradata appendData:nal];
+        };
+        
+        appendArray(vpsData, 32);
+        appendArray(spsData, 33);
+        appendArray(ppsData, 34);
+        
+        // Update codecPar
+        if (codecPar->extradata) av_free(codecPar->extradata);
+        codecPar->extradata_size = (int)newExtradata.length;
+        codecPar->extradata = (uint8_t *)av_malloc(codecPar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        memcpy(codecPar->extradata, newExtradata.bytes, newExtradata.length);
+        memset(codecPar->extradata + codecPar->extradata_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        
+        // Mark as synthesized
+        _didSynthesizeExtradata = YES;
+        
+        NSLog(@"[FFmpegDemuxer] New extradata size: %d bytes", codecPar->extradata_size);
+    } else {
+        NSLog(@"[FFmpegDemuxer] Failed to find all parameter sets (VPS:%@ SPS:%@ PPS:%@)", 
+              vpsData ? @"YES" : @"NO", spsData ? @"YES" : @"NO", ppsData ? @"YES" : @"NO");
+    }
+    
+    cleanup();
+    
+    // Seek back
+    if (av_seek_frame(_formatContext, _videoStreamIndex, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+        NSLog(@"[FFmpegDemuxer] Warning: Failed to seek back to start");
+    }
 }
 
 - (void)buildVideoInfo {
@@ -142,6 +366,14 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     _videoInfo.width = codecPars->width;
     _videoInfo.height = codecPars->height;
     _videoInfo.codecName = codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
+    
+    // Container format
+    if (_formatContext->iformat) {
+        const char *name = _formatContext->iformat->long_name ? _formatContext->iformat->long_name : _formatContext->iformat->name;
+        _videoInfo.formatName = [NSString stringWithUTF8String:name];
+    } else {
+        _videoInfo.formatName = @"Unknown";
+    }
     
     // Color metadata (prefer codec params, fallback to stream)
     _videoInfo.colorPrimaries = codecPars->color_primaries;
@@ -262,6 +494,12 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     
     // Must have extradata
     if (!codecPars->extradata || codecPars->extradata_size == 0) {
+        return nil;
+    }
+    
+    // HEVC extradata must be valid (header is 23 bytes, need > 23 for arrays)
+    if (codecPars->codec_id == AV_CODEC_ID_HEVC && codecPars->extradata_size <= 23) {
+        NSLog(@"[FFmpegDemuxer] Extradata corrupted/incomplete (%d bytes), disabling VTDecoder", codecPars->extradata_size);
         return nil;
     }
     

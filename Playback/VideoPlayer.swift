@@ -110,7 +110,7 @@ public class VideoPlayer {
 
         self.frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
         self.packetQueue = PacketQueue(maxSize: packetQueueSize)
-        self.displayLoop = VideoDisplayLoop(frameBuffer: frameBuffer, audioPlayer: audioPlayer)
+        self.displayLoop = VideoDisplayLoop(frameBuffer: frameBuffer, packetQueue: packetQueue, audioPlayer: audioPlayer)
         
         setupCallbacks()
     }
@@ -123,6 +123,14 @@ public class VideoPlayer {
             await displayLoop.setFrameUpdateHandler { [weak self] frame in
                 self?.currentFrame = frame // Update mirror
                 self?.currentTime = frame.presentationTime
+            }
+            await displayLoop.setCompletionHandler { [weak self] in
+                guard let self = self else { return }
+                if self.state == .playing {
+                    self.state = .finished
+                    // Ensure audio is paused so it doesn't try to continue or hold resources
+                    self.audioPlayer.pause()
+                }
             }
         }
     }
@@ -158,11 +166,8 @@ public class VideoPlayer {
                         return nil
                     }).first {
                         currentFrame = videoFrame
-                        // Push initial frame to buffer so loop picks it up?
-                        // Or just let loop wait.
-                        // Usually first frame is handled by seek(0) in play() if finished,
-                        // or just demux loop. 
-                        // Note: If we don't push it, loop waits.
+                        // Push initial frame to buffer so loop picks it up immediately
+                        await frameBuffer.push(videoFrame)
                         break
                     }
                 }
@@ -186,11 +191,13 @@ public class VideoPlayer {
         
 
         if state == .finished {
+            print("[VideoPlayer] Play called in .finished state. Restarting...")
             Task {
                 await seek(to: 0)
                 await packetQueue.resume()
                 await frameBuffer.resume()
                 state = .ready
+                print("[VideoPlayer] State unset to .ready, calling play()")
                 play()
             }
             return
@@ -198,6 +205,7 @@ public class VideoPlayer {
         
 
         if state == .paused {
+            print("[VideoPlayer] Play called in .paused state. Resuming...")
             state = .playing
             audioPlayer.play()
             Task {
@@ -213,6 +221,7 @@ public class VideoPlayer {
             return
         }
         
+        print("[VideoPlayer] Play called. Starting from fresh.")
         state = .playing
         audioPlayer.play()
         Task {

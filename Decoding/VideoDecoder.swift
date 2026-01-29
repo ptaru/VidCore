@@ -30,6 +30,8 @@ public struct VideoInfo {
     public let frameRate: Double
     /// Total duration in seconds.
     public let duration: Double
+    /// Container format name (e.g., "QuickTime / MOV", "Matroska / WebM").
+    public let containerName: String
     /// Codec identifier (e.g., "h264", "vp9", "hevc").
     public let codecName: String
     /// Whether VideoToolbox hardware acceleration is active.
@@ -41,6 +43,9 @@ public struct VideoInfo {
     public let decoderName: String?
     /// Description of the decoder implementation.
     public let decoderDescription: String?
+    
+    /// Whether extradata was manually synthesized from the bitstream.
+    public let didSynthesizeExtradata: Bool
     
     // MARK: - Color Metadata
     
@@ -88,7 +93,7 @@ public struct VideoInfo {
         case 16: return "PQ"
         case 18: return "HLG"
         default:
-            return colorTransfer > 0 ? "Unknown (\(colorTransfer))" : "Unspecified"
+            return colorTransfer > 0 ? "Unknown" : "Unspecified"
         }
     }
     
@@ -98,7 +103,7 @@ public struct VideoInfo {
         case 1: return "BT.709"
         case 9: return "BT.2020"
         default:
-            return colorPrimaries > 0 ? "Unknown (\(colorPrimaries))" : "Unspecified"
+            return colorPrimaries > 0 ? "Unknown" : "Unspecified"
         }
     }
     
@@ -110,7 +115,7 @@ public struct VideoInfo {
         case 6: return "SMPTE 170M"
         case 9: return "BT.2020nc"
         case 10: return "BT.2020c"
-        default: return colorSpace > 0 ? "Unspecified (\(colorSpace))" : "YCbCr"
+        default: return colorSpace > 0 ? "Unspecified" : "YCbCr"
         }
     }
     
@@ -129,19 +134,21 @@ public struct VideoInfo {
     }
     
     public init(
-        width: Int, height: Int, frameRate: Double, duration: Double, codecName: String,
+        width: Int, height: Int, frameRate: Double, duration: Double, containerName: String, codecName: String,
         isHardwareAccelerated: Bool, isHDR: Bool = false,
         colorPrimaries: Int = 0, colorTransfer: Int = 0, colorSpace: Int = 0,
         colorRange: Int = 0, bitsPerComponent: Int = 8, isDolbyVision: Bool = false, doviProfile: Int? = nil,
         maxContentLightLevel: UInt? = nil, maxFrameAverageLightLevel: UInt? = nil,
         masteringDisplayMaxLuminance: Float? = nil, masteringDisplayMinLuminance: Float? = nil,
         audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
-        decoderName: String? = nil, decoderDescription: String? = nil
+        decoderName: String? = nil, decoderDescription: String? = nil,
+        didSynthesizeExtradata: Bool = false
     ) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
         self.duration = duration
+        self.containerName = containerName
         self.codecName = codecName
         self.isHardwareAccelerated = isHardwareAccelerated
         self.isHDR = isHDR
@@ -161,6 +168,7 @@ public struct VideoInfo {
         self.audioChannels = audioChannels
         self.decoderName = decoderName
         self.decoderDescription = decoderDescription
+        self.didSynthesizeExtradata = didSynthesizeExtradata
     }
 }
 
@@ -322,6 +330,7 @@ public class VideoDecoder {
             height: Int(info.height),
             frameRate: info.frameRate,
             duration: info.duration,
+            containerName: info.formatName,
             codecName: info.codecName,
             isHardwareAccelerated: finalIsHardwareAccelerated,
             isHDR: info.isHDR,
@@ -340,7 +349,8 @@ public class VideoDecoder {
             audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
             audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,
             decoderName: finalDecoderName,
-            decoderDescription: finalDecoderDescription
+            decoderDescription: finalDecoderDescription,
+            didSynthesizeExtradata: demuxer.didSynthesizeExtradata
         )
     }
 
@@ -697,6 +707,10 @@ public class VideoDecoder {
                     }
                 } else if let demuxer = self.demuxer, let decoder = self.decoder {
                     // Non-VTDecoder path: use demuxer to seek, decoder to decode
+                    
+                    // Flush decoder buffers to clear state (fix for replay issues)
+                    decoder.flushCodecBuffers()
+                    
                     guard demuxer.seek(toKeyframe: seconds) else {
                         continuation.resume(
                             throwing: NSError(
@@ -705,32 +719,59 @@ public class VideoDecoder {
                         return
                     }
                     
-                    // Collect packets and decode
-                    if let collectedPackets = accurate ? demuxer.collectPackets(until: seconds) : demuxer.collectKeyframePackets() {
-                        for demuxerPacket in collectedPackets {
-                            let packet = self.convertPacket(demuxerPacket)
-                            if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
-                                for ffmpegFrame in ffmpegFrames {
-                                    let framePTS = ffmpegFrame.presentationTime
-                                    if framePTS >= seconds - 0.01 || !accurate {
-                                        let frame = VideoFrame(
-                                            pixelBuffer: ffmpegFrame.pixelBuffer,
-                                            presentationTime: framePTS,
-                                            isHDR: self.videoInfo.isHDR,
-                                            colorTransfer: self.videoInfo.colorTransfer,
-                                            doviProfile: Int(ffmpegFrame.doviProfile)
-                                        )
-                                        continuation.resume(returning: frame)
-                                        return
+                    // Robust Seek Loop: Feed packets until we get a frame
+                    var foundFrame: VideoFrame? = nil
+                    var packetCount = 0
+                    let maxPackets = 200 // Safety break
+                    
+                    while packetCount < maxPackets {
+                        let shouldStop = autoreleasepool { () -> Bool in
+                            // Read next packet directly
+                            guard let demuxerPacket = demuxer.demuxNextPacket() else {
+                                return true // EOF
+                            }
+                            
+                            // Filter for video packets
+                            if demuxerPacket.isVideo {
+                                packetCount += 1
+                                let packet = self.convertPacket(demuxerPacket)
+                                
+                                if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
+                                    for ffmpegFrame in ffmpegFrames {
+                                        let framePTS = ffmpegFrame.presentationTime
+                                        
+                                        // For accurate seek: wait for target
+                                        // For fast seek: take first frame (keyframe or first available)
+                                        if framePTS >= seconds - 0.05 || !accurate {
+                                            let frame = VideoFrame(
+                                                pixelBuffer: ffmpegFrame.pixelBuffer,
+                                                presentationTime: framePTS,
+                                                isHDR: self.videoInfo.isHDR,
+                                                colorTransfer: self.videoInfo.colorTransfer,
+                                                doviProfile: Int(ffmpegFrame.doviProfile)
+                                            )
+                                            foundFrame = frame
+                                            return true
+                                        }
                                     }
                                 }
                             }
+                            return false
+                        }
+                        
+                        if shouldStop {
+                            break
                         }
                     }
-                    continuation.resume(
-                        throwing: NSError(
-                            domain: "VideoDecoder", code: -3,
-                            userInfo: [NSLocalizedDescriptionKey: "Seek failed - no frame decoded"]))
+                    
+                    if let frame = foundFrame {
+                        continuation.resume(returning: frame)
+                    } else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "VideoDecoder", code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Seek failed - no suitable frame found"]))
+                    }
                 } else {
                     continuation.resume(
                         throwing: NSError(

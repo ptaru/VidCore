@@ -21,6 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int32_t height;
 @property(nonatomic, assign) double frameRate;
 @property(nonatomic, assign) double duration;
+@property(nonatomic, copy) NSString *formatName;
 @property(nonatomic, copy) NSString *codecName;
 @property(nonatomic, assign) int colorPrimaries;
 @property(nonatomic, assign) int colorTransfer;
@@ -145,6 +146,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Whether seek optimization (skip non-ref frames) is enabled.
 @property(nonatomic, assign) BOOL seekOptimizationEnabled;
+
+/// Whether extradata was manually synthesized due to missing headers.
+@property(nonatomic, readonly) BOOL didSynthesizeExtradata;
 
 @end
 

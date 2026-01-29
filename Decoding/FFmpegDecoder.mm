@@ -553,6 +553,15 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return [self createVideoFrameFromDecodedFrame:pts];
 }
 
+- (void)flushCodecBuffers {
+  if (_codecContext) {
+    avcodec_flush_buffers(_codecContext);
+  }
+  if (_audioCodecContext) {
+    avcodec_flush_buffers(_audioCodecContext);
+  }
+}
+
 #pragma mark - Internal Frame Conversion & Processing
 
 - (AVAudioPCMBuffer *)convertAudioFrame:(AVFrame *)frame {

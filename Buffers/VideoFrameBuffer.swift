@@ -13,7 +13,7 @@ import Foundation
 /// return frames in decode order rather than presentation order
 public actor VideoFrameBuffer {
     private var frames: [VideoFrame] = []
-    private let maxSize: Int
+    public let maxSize: Int
     private var waitingConsumers: [CheckedContinuation<VideoFrame?, Never>] = []
     private var availabilityWaiters: [CheckedContinuation<Void, Never>] = []
     private var waitingProducers: [CheckedContinuation<Void, Never>] = []

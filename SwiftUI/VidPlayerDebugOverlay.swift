@@ -21,6 +21,14 @@ struct VidPlayerDebugOverlay: View {
                 header("Pipeline & Timing")
                 
                 // Pipeline Stats
+                if let info = videoInfo {
+                    debugRow("Container", info.containerName)
+                    debugRow("Codec", info.codecName.uppercased())
+                    if info.didSynthesizeExtradata {
+                        debugRow("Extradata", "Synthesized", color: .green)
+                    }
+                }
+                
                 if let stats = debugStats {
                     Group {
                         debugRow("State", "Playing") // Dynamic in future
@@ -29,8 +37,15 @@ struct VidPlayerDebugOverlay: View {
                         // Buffer Health
                         let pqPct = Double(stats.packetQueueCount) / Double(max(1, stats.packetQueueMax)) * 100
                         let fbPct = Double(stats.frameBufferCount) / Double(max(1, stats.frameBufferMax)) * 100
-                        debugBar("Packet Queue", percent: pqPct, label: "\(stats.packetQueueCount)/\(stats.packetQueueMax)")
-                        debugBar("Frame Buffer", percent: fbPct, label: "\(stats.frameBufferCount)/\(stats.frameBufferMax)")
+                        
+                        // Pad current count based on max value digits to prevent jumping
+                        let pqWidth = String(stats.packetQueueMax).count
+                        let fbWidth = String(stats.frameBufferMax).count
+                        let pqLabel = String(format: "%\(pqWidth)d/\(stats.packetQueueMax)", stats.packetQueueCount)
+                        let fbLabel = String(format: "%\(fbWidth)d/\(stats.frameBufferMax)", stats.frameBufferCount)
+                        
+                        debugBar("Packet Queue", percent: pqPct, label: pqLabel)
+                        debugBar("Frame Buffer", percent: fbPct, label: fbLabel)
                         
                         if stats.droppedFrameCount > 0 {
                             debugRow("Dropped Frames", "\(stats.droppedFrameCount)", color: .orange)
@@ -64,7 +79,6 @@ struct VidPlayerDebugOverlay: View {
                 if let info = videoInfo {
                     debugRow("Resolution", "\(info.width)×\(info.height)")
                     debugRow("Frame Rate", String(format: "%.2f fps", info.frameRate))
-                    debugRow("Codec", info.codecName.uppercased())
                 }
                 
                 let pixelInfo = pixelFormatInfo(from: frame.pixelBuffer)
@@ -74,10 +88,12 @@ struct VidPlayerDebugOverlay: View {
                 Divider().background(Color.white.opacity(0.3))
                 
                 // Color Info
+                // Color Info
                 if let info = videoInfo {
-                    debugRow("Transfer", info.transferFunctionName)
-                    debugRow("Primaries", info.colorPrimariesName)
-                    debugRow("Range", info.colorRange == 2 ? "Full" : "Limited")
+                    debugRow("Transfer", "\(info.transferFunctionName) (\(info.colorTransfer))")
+                    debugRow("Primaries", "\(info.colorPrimariesName) (\(info.colorPrimaries))")
+                    debugRow("Matrix", "\(info.colorSpaceName) (\(info.colorSpace))")
+                    debugRow("Range", "\(info.colorRange == 2 ? "Full" : "Limited") (\(info.colorRange))")
                     
                     // HDR/DoVi
                     if frame.doviProfile > 0 {

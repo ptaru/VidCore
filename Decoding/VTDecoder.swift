@@ -218,7 +218,7 @@ public final class VTDecoder: @unchecked Sendable {
         guard !config.extradata.isEmpty else {
             throw VTDecoderError.noExtradata
         }
-        
+
         // Determine codec type and atom key
         let codecType: CMVideoCodecType
         let atomKey: String
@@ -266,6 +266,12 @@ public final class VTDecoder: @unchecked Sendable {
             extensions[kCVImageBufferTransferFunctionKey as String] = kCVImageBufferTransferFunction_ITU_R_2100_HLG
         } else if config.colorTransfer == 1 { // BT.709
             extensions[kCVImageBufferTransferFunctionKey as String] = kCVImageBufferTransferFunction_ITU_R_709_2
+        } else if config.colorTransfer == 0 || config.colorTransfer == 2 {
+            // Unspecified - if DoVi Profile 5, it uses PQ curve (IPTPQc2)
+            if isDolbyVision && dolbyVisionProfile == 5 {
+                extensions[kCVImageBufferTransferFunctionKey as String] = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+                print("[VTDecoder] Comparison: inferred PQ transfer for DoVi P5")
+            }
         }
         
         // YCbCr Matrix

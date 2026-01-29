@@ -11,7 +11,7 @@ import Foundation
 /// Uses FFmpegPacketData from the ObjC bridge layer
 public actor PacketQueue {
     private var packets: [FFmpegPacketData] = []
-    private let maxSize: Int
+    public let maxSize: Int
     private var waitingConsumers: [CheckedContinuation<FFmpegPacketData?, Never>] = []
     private var waitingProducers: [CheckedContinuation<Void, Never>] = []
     private var isClosed = false
