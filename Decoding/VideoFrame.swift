@@ -34,6 +34,7 @@ public struct VideoFrame {
     /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
     public let doviProfile: Int
 
+
     /// Creates a video frame with full control over metadata and color characteristics.
     public init(
         pixelBuffer: CVPixelBuffer,

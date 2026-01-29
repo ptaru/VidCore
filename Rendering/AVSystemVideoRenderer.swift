@@ -48,17 +48,24 @@ public final class LayerRenderer: VideoRendererTarget, @unchecked Sendable {
         
         if frame.isHDR {
             // Most HDR content is BT.2020
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) == nil {
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            }
+            
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) == nil {
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            }
             
             // Transfer Function
-            let transferFunction: CFString
-            if frame.colorTransfer == 18 { // HLG
-                transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-            } else { // PQ (ST 2084)
-                transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
+                let transferFunction: CFString
+                if frame.colorTransfer == 18 { // HLG
+                    transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+                } else { // PQ (ST 2084)
+                    transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+                }
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
             }
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
         }
         
         var formatDescription: CMFormatDescription?
@@ -124,16 +131,23 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
         let pixelBuffer = frame.pixelBuffer
         
         if frame.isHDR {
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-            
-            let transferFunction: CFString
-            if frame.colorTransfer == 18 { // HLG
-                transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-            } else { // PQ (ST 2084)
-                transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) == nil {
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
             }
-            CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
+            
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) == nil {
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            }
+            
+            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
+                let transferFunction: CFString
+                if frame.colorTransfer == 18 { // HLG
+                    transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+                } else { // PQ (ST 2084)
+                    transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+                }
+                CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
+            }
         }
         
         var cgImage: CGImage?
@@ -167,3 +181,4 @@ public class AVSampleBufferDisplayLayerWrapperView: NSView {
         layerRenderer.displayLayer.frame = self.bounds
     }
 }
+

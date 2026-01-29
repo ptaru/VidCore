@@ -13,6 +13,8 @@ struct VidPlayerDebugOverlay: View {
     let frame: VideoFrame
     let videoInfo: VideoInfo?
     let debugStats: PlayerDebugStats?
+
+    @State private var isAttachmentsExpanded = false
     
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -88,7 +90,6 @@ struct VidPlayerDebugOverlay: View {
                 Divider().background(Color.white.opacity(0.3))
                 
                 // Color Info
-                // Color Info
                 if let info = videoInfo {
                     debugRow("Transfer", "\(info.transferFunctionName) (\(info.colorTransfer))")
                     debugRow("Primaries", "\(info.colorPrimariesName) (\(info.colorPrimaries))")
@@ -113,6 +114,7 @@ struct VidPlayerDebugOverlay: View {
                         debugRow("SDR", "Active")
                     }
                 }
+                
             }
             
             Divider().background(Color.white.opacity(0.3))
@@ -131,6 +133,45 @@ struct VidPlayerDebugOverlay: View {
                     }
                 } else {
                     debugRow("Audio", "None", color: .gray)
+                }
+                
+                Divider().background(Color.white.opacity(0.3))
+                
+                // Attachments
+                Button(action: { isAttachmentsExpanded.toggle() }) {
+                    HStack {
+                        Text("Attachments")
+                            .fontWeight(.bold)
+                            .foregroundColor(.white.opacity(0.9))
+                        Spacer()
+                        Image(systemName: isAttachmentsExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                if isAttachmentsExpanded {
+                    let attachments = getAttachments(from: frame.pixelBuffer)
+                    if attachments.isEmpty {
+                        Text("No attachments")
+                            .foregroundColor(.gray)
+                            .padding(.leading, 8)
+                    } else {
+                        ForEach(attachments, id: \.0) { key, value in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(key)
+                                    .foregroundColor(.gray)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(value)
+                                    .foregroundColor(.white)
+                                    .lineLimit(2)
+                            }
+                            .padding(.leading, 8)
+                            .padding(.bottom, 4)
+                        }
+                    }
                 }
             }
         }
@@ -229,5 +270,16 @@ struct VidPlayerDebugOverlay: View {
         let num = max(p - c1, 0)
         let den = c2 - c3 * p
         return pow(num / max(den, 1e-6), 1.0 / m1) * 10000.0
+    }
+    
+    /// Extracts attachments from CVPixelBuffer as key-value pairs
+    private func getAttachments(from pixelBuffer: CVPixelBuffer) -> [(String, String)] {
+        guard let attachments = CVBufferGetAttachments(pixelBuffer, .shouldPropagate) as? [String: Any] else {
+            return []
+        }
+        
+        return attachments.sorted(by: { $0.key < $1.key }).map { key, value in
+            return (key, String(describing: value))
+        }
     }
 }

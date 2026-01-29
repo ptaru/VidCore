@@ -37,8 +37,10 @@
 @property(nonatomic, assign) AVPacket *packet;
 @property(nonatomic, assign) int videoStreamIndex;
 @property(nonatomic, assign) int audioStreamIndex;
+@property(nonatomic, assign) int metadataStreamIndex;
 @property(nonatomic, strong) FFmpegDemuxerVideoInfo *videoInfo;
 @property(nonatomic, strong) NSMutableArray<FFmpegDemuxerPacket *> *queuedAudioPackets;
+
 
 - (void)ensureExtradata;
 @end
@@ -79,7 +81,11 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
         _formatContext = NULL;
         _packet = NULL;
         _videoStreamIndex = -1;
+        _formatContext = NULL;
+        _packet = NULL;
+        _videoStreamIndex = -1;
         _audioStreamIndex = -1;
+        _metadataStreamIndex = -1;
         _seekOptimizationEnabled = YES;
         _queuedAudioPackets = [NSMutableArray array];
         
@@ -443,8 +449,11 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
             _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
         }
         _videoInfo.audioSampleRate = audioStream->codecpar->sample_rate;
+        _videoInfo.audioSampleRate = audioStream->codecpar->sample_rate;
         _videoInfo.audioChannels = audioStream->codecpar->ch_layout.nb_channels;
     }
+    
+
 }
 
 #pragma mark - Metadata
@@ -530,6 +539,8 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     if (dolbyVisionConfig) {
         config[@"dolbyVisionConfig"] = dolbyVisionConfig;
     }
+
+
     
     return config;
 }
@@ -622,9 +633,9 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     while (av_read_frame(_formatContext, _packet) >= 0) {
         BOOL isVideo = (_packet->stream_index == _videoStreamIndex);
         BOOL isAudio = (_packet->stream_index == _audioStreamIndex && _audioStreamIndex >= 0);
-        
         if (isVideo || isAudio) {
             FFmpegDemuxerPacket *packet = [self createPacketFromAV:_packet isVideo:isVideo isAudio:isAudio];
+            
             av_packet_unref(_packet);
             return packet;
         }
@@ -796,6 +807,7 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     [_queuedAudioPackets removeAllObjects];
     _videoStreamIndex = -1;
     _audioStreamIndex = -1;
+    _metadataStreamIndex = -1;
 }
 
 #pragma mark - Private Helpers
@@ -817,6 +829,54 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     } else {
         packet.data = [NSData data];
         packet.size = 0;
+    }
+    
+    // Extract Ambient Viewing Environment side data
+    const AVPacketSideData *amveSideData = av_packet_side_data_get(
+        pkt->side_data, pkt->side_data_elems, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+    if (amveSideData && amveSideData->size >= sizeof(AVAmbientViewingEnvironment)) {
+        const AVAmbientViewingEnvironment *env = (const AVAmbientViewingEnvironment *)amveSideData->data;
+        
+        // Convert to 8-byte SEI format: illuminance(32) + x(16) + y(16)
+        uint32_t ill = (uint32_t)round(av_q2d(env->ambient_illuminance) * 10000.0);
+        uint16_t x = (uint16_t)round(av_q2d(env->ambient_light_x) * 50000.0);
+        uint16_t y = (uint16_t)round(av_q2d(env->ambient_light_y) * 50000.0);
+        
+        uint8_t packed[8];
+        packed[0] = (ill >> 24) & 0xFF;
+        packed[1] = (ill >> 16) & 0xFF;
+        packed[2] = (ill >> 8) & 0xFF;
+        packed[3] = ill & 0xFF;
+        packed[4] = (x >> 8) & 0xFF;
+        packed[5] = x & 0xFF;
+        packed[6] = (y >> 8) & 0xFF;
+        packed[7] = y & 0xFF;
+        
+        packet.ambientLightMetadata = [NSData dataWithBytes:packed length:8];
+    } else {
+        // Fallback: check stream side data
+        AVStream *stream = _formatContext->streams[pkt->stream_index];
+        const AVPacketSideData *streamAmve = av_packet_side_data_get(
+            stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+        if (streamAmve && streamAmve->size >= sizeof(AVAmbientViewingEnvironment)) {
+            const AVAmbientViewingEnvironment *env = (const AVAmbientViewingEnvironment *)streamAmve->data;
+            
+            uint32_t ill = (uint32_t)round(av_q2d(env->ambient_illuminance) * 10000.0);
+            uint16_t x = (uint16_t)round(av_q2d(env->ambient_light_x) * 50000.0);
+            uint16_t y = (uint16_t)round(av_q2d(env->ambient_light_y) * 50000.0);
+            
+            uint8_t packed[8];
+            packed[0] = (ill >> 24) & 0xFF;
+            packed[1] = (ill >> 16) & 0xFF;
+            packed[2] = (ill >> 8) & 0xFF;
+            packed[3] = ill & 0xFF;
+            packed[4] = (x >> 8) & 0xFF;
+            packed[5] = x & 0xFF;
+            packed[6] = (y >> 8) & 0xFF;
+            packed[7] = y & 0xFF;
+            
+            packet.ambientLightMetadata = [NSData dataWithBytes:packed length:8];
+        }
     }
     
     return packet;

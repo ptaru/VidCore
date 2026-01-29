@@ -428,6 +428,7 @@ public class VideoDecoder {
         packet.isVideo = demuxerPacket.isVideo
         packet.isAudio = demuxerPacket.isAudio
         packet.flags = demuxerPacket.isKeyframe ? 1 : 0 // AV_PKT_FLAG_KEY = 1
+        packet.ambientLightMetadata = demuxerPacket.ambientLightMetadata
         return packet
     }
 
@@ -456,33 +457,34 @@ public class VideoDecoder {
                     // Use Swift VTDecoder if available
                     if let vtDecoder = self.vtDecoder {
                         do {
-                            // Send packet to VTDecoder
-                            try vtDecoder.sendPacket(
-                                data: packet.data,
-                                pts: packet.pts,
-                                dts: packet.dts,
-                                duration: packet.duration
-                            )
-                            
-                            // Pop all available frames
-                            while let decodedFrame = vtDecoder.popFrame() {
-                                let pts = CMTimeGetSeconds(decodedFrame.presentationTime)
-                                let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
-                                let frame = VideoFrame(
-                                    pixelBuffer: decodedFrame.pixelBuffer,
-                                    presentationTime: pts,
-                                    isHDR: self.videoInfo.isHDR,
-                                    colorTransfer: self.videoInfo.colorTransfer,
-                                    doviProfile: doviProfile
+                                try vtDecoder.sendPacket(
+                                    data: packet.data,
+                                    pts: packet.pts,
+                                    dts: packet.dts,
+                                    duration: packet.duration,
+                                    ambientMetadata: packet.ambientLightMetadata
                                 )
-                                results.append(.video(frame))
-                            }
+                                
+                                // Pop all available frames
+                                while let decodedFrame = vtDecoder.popFrame() {
+                                    let pts = CMTimeGetSeconds(decodedFrame.presentationTime)
+                                    let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
+                                    let frame = VideoFrame(
+                                        pixelBuffer: decodedFrame.pixelBuffer,
+                                        presentationTime: pts,
+                                        isHDR: self.videoInfo.isHDR,
+                                        colorTransfer: self.videoInfo.colorTransfer,
+                                        doviProfile: doviProfile
+                                    )
+                                    results.append(.video(frame))
+                                }
                         } catch {
                             print("[VideoDecoder] VTDecoder error: \(error)")
                         }
                     } else if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
                         // Fallback to FFmpeg decode path
                         for ffmpegFrame in ffmpegFrames {
+
                             let frame = VideoFrame(
                                 pixelBuffer: ffmpegFrame.pixelBuffer,
                                 presentationTime: ffmpegFrame.presentationTime,
@@ -557,6 +559,7 @@ public class VideoDecoder {
                     continuation.resume(returning: nil)
                     return
                 }
+
 
                 let frame = VideoFrame(
                     pixelBuffer: videoFrameObj.pixelBuffer,
@@ -781,5 +784,12 @@ public class VideoDecoder {
             }
         }
     }
+    
+    // MARK: - Configuration
+    
+
+    
+
+
 }
 

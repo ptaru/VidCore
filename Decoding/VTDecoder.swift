@@ -10,6 +10,17 @@ import CoreVideo
 import Foundation
 import VideoToolbox
 
+// MARK: - Context Objects
+
+/// Context for a single frame being decoded.
+private class VTFrameContext {
+    let ambientMetadata: Data?
+    
+    init(ambientMetadata: Data?) {
+        self.ambientMetadata = ambientMetadata
+    }
+}
+
 // MARK: - Error Types
 
 /// Errors that can occur during VTDecoder operations.
@@ -70,6 +81,8 @@ public struct VTDecoderConfig {
     // Optional Dolby Vision configuration
     public let dolbyVisionConfig: Data?
     
+
+    
     public init(
         codec: VTDecoderCodec,
         width: Int32,
@@ -104,6 +117,12 @@ public struct VTDecodedFrame: @unchecked Sendable {
         self.pixelBuffer = pixelBuffer
         self.presentationTime = presentationTime
     }
+    public func attachmentData(forKey key: CFString) -> Data? {
+        if let value = CVBufferGetAttachment(pixelBuffer, key, nil)?.takeUnretainedValue() as? Data {
+            return value
+        }
+        return nil
+    }
 }
 
 // MARK: - VTDecoder Actor
@@ -123,6 +142,8 @@ public final class VTDecoder: @unchecked Sendable {
     public private(set) var dolbyVisionProfile: UInt8 = 0
     private var dvcCData: Data?
     
+
+    
     // Async frame queue
     private var frameQueue: [VTDecodedFrame] = []
     private let queueLock = NSLock()
@@ -130,6 +151,9 @@ public final class VTDecoder: @unchecked Sendable {
     // Performance tracking
     private var totalDecodeTime: TimeInterval = 0
     private var decodeCount: UInt = 0
+    
+    // Configuration
+
     
     /// Average decode duration in seconds (for debugging).
     public var averageDecodeDuration: TimeInterval {
@@ -152,6 +176,8 @@ public final class VTDecoder: @unchecked Sendable {
         if let doviConfig = config.dolbyVisionConfig, doviConfig.count >= 8 {
             processDolbyVisionConfig(doviConfig)
         }
+        
+
         
         // Create format description
         try createFormatDescription(config: config)
@@ -349,6 +375,28 @@ public final class VTDecoder: @unchecked Sendable {
         }
         
         self.decompressionSession = sess
+        
+        // Apply initial properties
+        updateSessionProperties()
+    }
+    
+    private func updateSessionProperties() {
+        guard let session = decompressionSession else { return }
+        
+        // kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata
+        // This property defaults to true (unset), but we can explicitly set it.
+        // It controls whether the decoder attaches HDR metadata (mastering display info, etc.)
+        // to the output CVPixelBuffers.
+        
+        let propertyKey = kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata
+        let value = kCFBooleanTrue
+        
+        let status = VTSessionSetProperty(session, key: propertyKey, value: value)
+        if status != noErr {
+            print("[VTDecoder] Failed to set PropagatePerFrameHDRDisplayMetadata to true: \(status)")
+        } else {
+            print("[VTDecoder] Set PropagatePerFrameHDRDisplayMetadata to true")
+        }
     }
     
     // MARK: - Teardown
@@ -462,7 +510,8 @@ public final class VTDecoder: @unchecked Sendable {
             throw VTDecoderError.sampleBufferCreationFailed(status)
         }
         
-        // Decode synchronously using a pointer to capture output
+        // Decode synchronously using a pointer to capture output [Not fully supported with context yet in sync mode]
+        // But for sync mode we don't usually have async metadata pipeline 
         var outputPixelBuffer: CVPixelBuffer?
         let startTime = CFAbsoluteTimeGetCurrent()
         
@@ -485,11 +534,14 @@ public final class VTDecoder: @unchecked Sendable {
         return outputPixelBuffer
     }
     
+
+    
     // MARK: - Decoding (Async Pipeline)
     
     /// Sends a packet to the decoder for asynchronous decoding.
     /// Call popFrame to retrieve results.
-    public func sendPacket(data: Data, pts: Int64, dts: Int64, duration: Int64) throws {
+    /// Sends a compressed packet to the decoder.
+    public func sendPacket(data: Data, pts: Int64, dts: Int64, duration: Int64, ambientMetadata: Data? = nil) throws {
         // Ensure we have a valid session
         if decompressionSession == nil {
             if formatDescription != nil {
@@ -559,14 +611,24 @@ public final class VTDecoder: @unchecked Sendable {
             throw VTDecoderError.sampleBufferCreationFailed(status)
         }
         
-        // Decode asynchronously (frameRefcon = nil triggers async path in callback)
+        // Create context for this frame
+        let frameContext = VTFrameContext(ambientMetadata: ambientMetadata)
+        let frameRefcon = Unmanaged.passRetained(frameContext).toOpaque()
+        
         status = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sample,
             flags: [._EnableAsynchronousDecompression],
-            frameRefcon: nil,
+            frameRefcon: frameRefcon,
             infoFlagsOut: nil
         )
+        
+        // If calls fail immediately, we must release the context, but VT usually takes ownership if successful?
+        // Actually: "The decompression session calls the output callback... The frameRefcon is passed to the callback."
+        // If the function returns an error, the callback might NOT be called.
+        if status != noErr {
+            Unmanaged<VTFrameContext>.fromOpaque(frameRefcon).release()
+        }
         
         guard status == noErr else {
             throw VTDecoderError.decodeFailed(status)
@@ -586,6 +648,8 @@ public final class VTDecoder: @unchecked Sendable {
         frameQueue.removeAll()
         queueLock.unlock()
     }
+    
+
 }
 
 // MARK: - Decompression Callback
@@ -604,14 +668,27 @@ private func decompressionOutputCallback(
     guard let refCon = decompressionOutputRefCon else { return }
     let decoder = Unmanaged<VTDecoder>.fromOpaque(refCon).takeUnretainedValue()
     
-    // Check if synchronous mode (sourceFrameRefCon is a pointer to output buffer)
-    if let outputPtr = sourceFrameRefCon {
-        // Synchronous mode: store result in provided pointer
-        let bufferPtr = outputPtr.assumingMemoryBound(to: CVPixelBuffer?.self)
-        // Swift ARC manages CVPixelBuffer, no explicit retain needed
-        bufferPtr.pointee = pixelBuffer
+     // Check if asynchronous mode
+    if (infoFlags.contains(.asynchronous)) {
+         let context: VTFrameContext? = sourceFrameRefCon.map { Unmanaged<VTFrameContext>.fromOpaque($0).takeRetainedValue() }
+         
+         // Handle ambient viewing environment debugging
+                 if let context = context {
+                     if let ambientData = context.ambientMetadata {
+                         CVBufferSetAttachment(pixelBuffer, kCVImageBufferAmbientViewingEnvironmentKey, ambientData as CFData, .shouldPropagate)
+                     }
+                 }
+         
+          // We passed the context as sourceFrameRefCon
+         decoder.enqueueFrame(pixelBuffer, pts: presentationTimeStamp)
     } else {
-        // Async mode: enqueue frame (Swift ARC manages the reference)
-        decoder.enqueueFrame(pixelBuffer, pts: presentationTimeStamp)
+        // Synchronous: sourceFrameRefCon is a pointer to a CVPixelBuffer? (stack address)
+        if let outputPtr = sourceFrameRefCon {
+            let bufferPtr = outputPtr.assumingMemoryBound(to: CVPixelBuffer?.self)
+            // Swift ARC manages CVPixelBuffer, no explicit retain needed here as it's assigned to a strong variable on the stack
+            bufferPtr.pointee = pixelBuffer
+             // Metadata attachment for sync mode is handled by the caller (decodePacketSync)
+        }
     }
 }
+

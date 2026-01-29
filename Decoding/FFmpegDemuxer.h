@@ -35,6 +35,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) uint16_t maxFrameAverageLightLevel;
 @property(nonatomic, assign) double masteringDisplayMaxLuminance;
 @property(nonatomic, assign) double masteringDisplayMinLuminance;
+
 // Audio info
 @property(nonatomic, copy, nullable) NSString *audioCodecName;
 @property(nonatomic, assign) int audioSampleRate;
@@ -51,6 +52,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) BOOL isVideo;
 @property(nonatomic, assign) BOOL isAudio;
 @property(nonatomic, assign) BOOL isKeyframe;
+@property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
+
 @end
 
 #pragma mark - FFmpegDemuxer

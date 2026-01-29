@@ -142,7 +142,8 @@ public struct VidPlayer<Overlay: View>: View {
                 VidPlayerDebugOverlay(
                     frame: frame,
                     videoInfo: activePlayer.videoInfo,
-                    debugStats: activePlayer.debugStats
+                    debugStats: activePlayer.debugStats,
+
                 )
             }
             

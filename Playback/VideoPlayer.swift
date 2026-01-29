@@ -56,7 +56,6 @@ public class VideoPlayer {
     /// Real-time debug statistics
     public private(set) var debugStats = PlayerDebugStats()
 
-    
     // MARK: - Volume Control
     
     /// Playback volume (0.0 to 1.0)
@@ -153,6 +152,7 @@ public class VideoPlayer {
         do {
             decoder = try VideoDecoder(url: url)
             if let decoder = decoder {
+
                 duration = decoder.videoInfo.duration
                 videoInfo = decoder.videoInfo
                 

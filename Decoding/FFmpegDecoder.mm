@@ -300,7 +300,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       _videoInfo.audioChannels = [config[@"audioChannels"] intValue];
     }
     
-    NSLog(@"[FFmpegDecoder] Initialized in decode-only mode (HW: %@)", _usingHardwareDecoder ? @"YES" : @"NO");
+    NSLog(@"[FFmpegDecoder] Initialized  (HW: %@)", _usingHardwareDecoder ? @"YES" : @"NO");
   }
   return self;
 }
@@ -430,7 +430,14 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     packetData.data = [NSData data];
     packetData.size = 0;
   }
-
+  
+  // Extract Ambient Viewing Environment side data
+  const AVPacketSideData *amveSideData = av_packet_side_data_get(
+      pkt->side_data, pkt->side_data_elems, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+  if (amveSideData && amveSideData->size > 0) {
+      packetData.ambientLightMetadata = [NSData dataWithBytes:amveSideData->data length:amveSideData->size];
+  }
+  
   return packetData;
 }
 

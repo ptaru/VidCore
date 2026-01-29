@@ -103,6 +103,7 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) int32_t flags;
 @property(nonatomic, assign) BOOL isVideo;
 @property(nonatomic, assign) BOOL isAudio;
+@property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
 @end
 
 /// Core FFmpeg wrapper for decoding video files.
