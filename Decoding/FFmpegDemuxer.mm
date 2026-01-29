@@ -37,7 +37,7 @@
 @property(nonatomic, assign) AVPacket *packet;
 @property(nonatomic, assign) int videoStreamIndex;
 @property(nonatomic, assign) int audioStreamIndex;
-@property(nonatomic, assign) int metadataStreamIndex;
+
 @property(nonatomic, strong) FFmpegDemuxerVideoInfo *videoInfo;
 @property(nonatomic, strong) NSMutableArray<FFmpegDemuxerPacket *> *queuedAudioPackets;
 
@@ -81,12 +81,7 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
         _formatContext = NULL;
         _packet = NULL;
         _videoStreamIndex = -1;
-        _formatContext = NULL;
-        _packet = NULL;
-        _videoStreamIndex = -1;
         _audioStreamIndex = -1;
-        _metadataStreamIndex = -1;
-        _seekOptimizationEnabled = YES;
         _queuedAudioPackets = [NSMutableArray array];
         
         if (![self openFile:url error:error]) {
@@ -322,8 +317,7 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
         // Append Arrays
         auto appendArray = ^(NSData *nal, uint8_t type) {
             // Array Header: Type(1) + Count(2) + Length(2) + Data
-            uint8_t t = type | 0x80; // completeness? or just type? hvcC uses type & 0x3F | completeness(0x80)
-            t = type | 0x80; // Set complete flag
+            uint8_t t = type | 0x80; // Set complete flag
             [newExtradata appendBytes:&t length:1];
             
             uint16_t count = htons(1);
@@ -799,6 +793,7 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
         _packet = NULL;
     }
     
+    
     if (_formatContext) {
         avformat_close_input(&_formatContext);
         _formatContext = NULL;
@@ -807,7 +802,25 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     [_queuedAudioPackets removeAllObjects];
     _videoStreamIndex = -1;
     _audioStreamIndex = -1;
-    _metadataStreamIndex = -1;
+}
+
+- (NSData *)parseAmbientViewingEnvironment:(const AVAmbientViewingEnvironment *)env {
+    // Convert to 8-byte SEI format: illuminance(32) + x(16) + y(16)
+    uint32_t ill = (uint32_t)round(av_q2d(env->ambient_illuminance) * 10000.0);
+    uint16_t x = (uint16_t)round(av_q2d(env->ambient_light_x) * 50000.0);
+    uint16_t y = (uint16_t)round(av_q2d(env->ambient_light_y) * 50000.0);
+    
+    uint8_t packed[8];
+    packed[0] = (ill >> 24) & 0xFF;
+    packed[1] = (ill >> 16) & 0xFF;
+    packed[2] = (ill >> 8) & 0xFF;
+    packed[3] = ill & 0xFF;
+    packed[4] = (x >> 8) & 0xFF;
+    packed[5] = x & 0xFF;
+    packed[6] = (y >> 8) & 0xFF;
+    packed[7] = y & 0xFF;
+    
+    return [NSData dataWithBytes:packed length:8];
 }
 
 #pragma mark - Private Helpers
@@ -832,50 +845,22 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     }
     
     // Extract Ambient Viewing Environment side data
+    // Extract Ambient Viewing Environment side data
     const AVPacketSideData *amveSideData = av_packet_side_data_get(
         pkt->side_data, pkt->side_data_elems, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+    
     if (amveSideData && amveSideData->size >= sizeof(AVAmbientViewingEnvironment)) {
         const AVAmbientViewingEnvironment *env = (const AVAmbientViewingEnvironment *)amveSideData->data;
-        
-        // Convert to 8-byte SEI format: illuminance(32) + x(16) + y(16)
-        uint32_t ill = (uint32_t)round(av_q2d(env->ambient_illuminance) * 10000.0);
-        uint16_t x = (uint16_t)round(av_q2d(env->ambient_light_x) * 50000.0);
-        uint16_t y = (uint16_t)round(av_q2d(env->ambient_light_y) * 50000.0);
-        
-        uint8_t packed[8];
-        packed[0] = (ill >> 24) & 0xFF;
-        packed[1] = (ill >> 16) & 0xFF;
-        packed[2] = (ill >> 8) & 0xFF;
-        packed[3] = ill & 0xFF;
-        packed[4] = (x >> 8) & 0xFF;
-        packed[5] = x & 0xFF;
-        packed[6] = (y >> 8) & 0xFF;
-        packed[7] = y & 0xFF;
-        
-        packet.ambientLightMetadata = [NSData dataWithBytes:packed length:8];
+        packet.ambientLightMetadata = [self parseAmbientViewingEnvironment:env];
     } else {
         // Fallback: check stream side data
         AVStream *stream = _formatContext->streams[pkt->stream_index];
         const AVPacketSideData *streamAmve = av_packet_side_data_get(
             stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+            
         if (streamAmve && streamAmve->size >= sizeof(AVAmbientViewingEnvironment)) {
             const AVAmbientViewingEnvironment *env = (const AVAmbientViewingEnvironment *)streamAmve->data;
-            
-            uint32_t ill = (uint32_t)round(av_q2d(env->ambient_illuminance) * 10000.0);
-            uint16_t x = (uint16_t)round(av_q2d(env->ambient_light_x) * 50000.0);
-            uint16_t y = (uint16_t)round(av_q2d(env->ambient_light_y) * 50000.0);
-            
-            uint8_t packed[8];
-            packed[0] = (ill >> 24) & 0xFF;
-            packed[1] = (ill >> 16) & 0xFF;
-            packed[2] = (ill >> 8) & 0xFF;
-            packed[3] = ill & 0xFF;
-            packed[4] = (x >> 8) & 0xFF;
-            packed[5] = x & 0xFF;
-            packed[6] = (y >> 8) & 0xFF;
-            packed[7] = y & 0xFF;
-            
-            packet.ambientLightMetadata = [NSData dataWithBytes:packed length:8];
+            packet.ambientLightMetadata = [self parseAmbientViewingEnvironment:env];
         }
     }
     

@@ -2,7 +2,7 @@
 //  VideoFrame.swift
 //  VidCore
 //
-//  Swift wrapper for decoded video frames
+//  Wrapper for decoded video frames
 //
 
 import CoreVideo
@@ -48,6 +48,36 @@ public struct VideoFrame {
         self.isHDR = isHDR
         self.colorTransfer = colorTransfer ?? (isHDR ? 16 : 1)
         self.doviProfile = doviProfile
+    }
+    /// Applies HDR attachments (Color Primaries, Transfer Function, YCbCr Matrix) to the pixel buffer if missing.
+    /// This is often necessary for software-decoded frames or when converting formats.
+    public func applyHDRAttachments() {
+        guard isHDR else { return }
+        
+        let attachments = [
+            kCVImageBufferColorPrimariesKey: kCVImageBufferColorPrimaries_ITU_R_2020,
+            kCVImageBufferYCbCrMatrixKey: kCVImageBufferYCbCrMatrix_ITU_R_2020
+        ]
+        
+        for (key, value) in attachments {
+            if CVBufferGetAttachment(pixelBuffer, key, nil) == nil {
+                CVBufferSetAttachment(pixelBuffer, key, value, .shouldPropagate)
+            }
+        }
+        
+        // Transfer Function
+        if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
+            let TransferFunction_HLG = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+            let TransferFunction_PQ = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            
+            let transferFunction: CFString
+            if colorTransfer == 18 { // HLG
+                transferFunction = TransferFunction_HLG
+            } else { // PQ (ST 2084)
+                transferFunction = TransferFunction_PQ
+            }
+            CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
+        }
     }
 }
 

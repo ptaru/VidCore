@@ -147,8 +147,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// Release all demuxer resources.
 - (void)close;
 
-/// Whether seek optimization (skip non-ref frames) is enabled.
-@property(nonatomic, assign) BOOL seekOptimizationEnabled;
 
 /// Whether extradata was manually synthesized due to missing headers.
 @property(nonatomic, readonly) BOOL didSynthesizeExtradata;

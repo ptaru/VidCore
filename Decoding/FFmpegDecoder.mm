@@ -88,8 +88,6 @@ static const int kAudioSampleRate = 48000;
 static const enum AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
 static const int kAudioChannels = 2; // Stereo
 
-
-
 // Static variable to store the expected hw pixel format for the callback
 static enum AVPixelFormat s_hwPixelFormat = AV_PIX_FMT_NONE;
 
@@ -109,8 +107,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @implementation FFmpegDecoder
 
 #pragma mark - Initialization & Lifecycle
-
-
 
 - (nullable instancetype)initWithDemuxerConfig:(NSDictionary<NSString *, id> *)config
                                          error:(NSError **)error {
@@ -410,37 +406,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return pkt;
 }
 
-/// Helper to create FFmpegPacketData from AVPacket
-- (FFmpegPacketData *)createPacketDataFromAVPacket:(AVPacket *)pkt
-                                           isVideo:(BOOL)isVideo
-                                           isAudio:(BOOL)isAudio {
-  FFmpegPacketData *packetData = [[FFmpegPacketData alloc] init];
-  packetData.streamIndex = pkt->stream_index;
-  packetData.pts = pkt->pts;
-  packetData.dts = pkt->dts;
-  packetData.duration = pkt->duration;
-  packetData.flags = pkt->flags;
-  packetData.isVideo = isVideo;
-  packetData.isAudio = isAudio;
-
-  if (pkt->data && pkt->size > 0) {
-    packetData.data = [NSData dataWithBytes:pkt->data length:pkt->size];
-    packetData.size = pkt->size;
-  } else {
-    packetData.data = [NSData data];
-    packetData.size = 0;
-  }
-  
-  // Extract Ambient Viewing Environment side data
-  const AVPacketSideData *amveSideData = av_packet_side_data_get(
-      pkt->side_data, pkt->side_data_elems, AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT);
-  if (amveSideData && amveSideData->size > 0) {
-      packetData.ambientLightMetadata = [NSData dataWithBytes:amveSideData->data length:amveSideData->size];
-  }
-  
-  return packetData;
-}
-
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
@@ -649,8 +614,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return NULL;
 }
 
-
-
 - (CVPixelBufferRef)convertFrameToPixelBuffer:(AVFrame *)frame {
   return [_pixelFormatConverter convertFrame:frame];
 }
@@ -679,23 +642,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   videoFrame.doviProfile = _videoInfo.doviProfile;
   return videoFrame;
 }
-
-- (nullable FFmpegVideoFrame *)createVideoFrameFromPixelBuffer:(CVPixelBufferRef)pixelBuffer pts:(double)pts {
-    if (!pixelBuffer) return nil;
-    
-    FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
-    videoFrame.type = FFmpegFrameTypeVideo;
-    videoFrame.pixelBuffer = pixelBuffer;
-    videoFrame.presentationTime = pts;
-    videoFrame.doviProfile = _videoInfo.doviProfile;
-    return videoFrame;
-}
-
-
-
-#pragma mark - Seek Implementation
-
-
 
 #pragma mark - Cleanup
 
@@ -752,8 +698,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _audioCodecContext = NULL;
   }
 
-
-
   if (_hwDeviceCtx) {
     av_buffer_unref(&_hwDeviceCtx);
     _hwDeviceCtx = NULL;
@@ -762,8 +706,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Cleanup pixel format converter (handles I420 and P010 buffer pools)
   [_pixelFormatConverter cleanup];
   _pixelFormatConverter = nil;
-
-  // Note: VTDecoder is now managed by Swift VideoDecoder
 
   _usingHardwareDecoder = NO;
   NSLog(@"[FFmpegDecoder] close() completed - all resources freed");

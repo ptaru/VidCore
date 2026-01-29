@@ -47,25 +47,7 @@ public final class LayerRenderer: VideoRendererTarget, @unchecked Sendable {
         let pixelBuffer = frame.pixelBuffer
         
         if frame.isHDR {
-            // Most HDR content is BT.2020
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) == nil {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-            }
-            
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) == nil {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-            }
-            
-            // Transfer Function
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
-                let transferFunction: CFString
-                if frame.colorTransfer == 18 { // HLG
-                    transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-                } else { // PQ (ST 2084)
-                    transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-                }
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
-            }
+            frame.applyHDRAttachments()
         }
         
         var formatDescription: CMFormatDescription?
@@ -131,23 +113,7 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
         let pixelBuffer = frame.pixelBuffer
         
         if frame.isHDR {
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) == nil {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-            }
-            
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) == nil {
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-            }
-            
-            if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
-                let transferFunction: CFString
-                if frame.colorTransfer == 18 { // HLG
-                    transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-                } else { // PQ (ST 2084)
-                    transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-                }
-                CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, transferFunction, .shouldPropagate)
-            }
+            frame.applyHDRAttachments()
         }
         
         var cgImage: CGImage?

@@ -2,7 +2,7 @@
 //  VTDecoder.swift
 //  VidCore
 //
-//  Pure Swift VideoToolbox decoder with actor-based concurrency
+//  VideoToolbox decoder with actor-based concurrency
 //
 
 import CoreMedia
@@ -118,7 +118,7 @@ public struct VTDecodedFrame: @unchecked Sendable {
         self.presentationTime = presentationTime
     }
     public func attachmentData(forKey key: CFString) -> Data? {
-        if let value = CVBufferGetAttachment(pixelBuffer, key, nil)?.takeUnretainedValue() as? Data {
+        if let value = CVBufferCopyAttachment(pixelBuffer, key, nil) as? Data {
             return value
         }
         return nil
@@ -458,6 +458,105 @@ public final class VTDecoder: @unchecked Sendable {
         guard let session = decompressionSession else {
             throw VTDecoderError.sessionNotActive
         }
+
+        // Create sample buffer
+        let sample = try createSampleBuffer(from: data, pts: pts, dts: dts, duration: duration)
+        
+        // Decode synchronously using a pointer to capture output [Not fully supported with context yet in sync mode]
+        // But for sync mode we don't usually have async metadata pipeline 
+        var outputPixelBuffer: CVPixelBuffer?
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        let status = withUnsafeMutablePointer(to: &outputPixelBuffer) { outputPtr in
+            VTDecompressionSessionDecodeFrame(
+                session,
+                sampleBuffer: sample,
+                flags: [],
+                frameRefcon: outputPtr,
+                infoFlagsOut: nil
+            )
+        }
+        
+        let decodeDuration = CFAbsoluteTimeGetCurrent() - startTime
+        totalDecodeTime += decodeDuration
+        decodeCount += 1
+        
+        guard status == noErr else {
+            throw VTDecoderError.decodeFailed(status)
+        }
+        
+        return outputPixelBuffer
+    }
+    
+
+    
+    // MARK: - Decoding (Async Pipeline)
+    
+    /// Sends a packet to the decoder for asynchronous decoding.
+    /// Call popFrame to retrieve results.
+    /// Sends a compressed packet to the decoder.
+    public func sendPacket(data: Data, pts: Int64, dts: Int64, duration: Int64, ambientMetadata: Data? = nil) throws {
+        // Ensure we have a valid session
+        if decompressionSession == nil {
+            if formatDescription != nil {
+                try createDecompressionSession()
+            } else {
+                throw VTDecoderError.sessionNotActive
+            }
+        }
+        
+        guard let session = decompressionSession else {
+            throw VTDecoderError.sessionNotActive
+        }
+        
+        // Create Sample Buffer
+        let sample = try createSampleBuffer(from: data, pts: pts, dts: dts, duration: duration)
+        
+        // Create context for this frame
+        let frameContext = VTFrameContext(ambientMetadata: ambientMetadata)
+        let frameRefcon = Unmanaged.passRetained(frameContext).toOpaque()
+        
+        let status = VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sample,
+            flags: [._EnableAsynchronousDecompression],
+            frameRefcon: frameRefcon,
+            infoFlagsOut: nil
+        )
+        
+        // If calls fail immediately, we must release the context, but VT usually takes ownership if successful?
+        // Actually: "The decompression session calls the output callback... The frameRefcon is passed to the callback."
+        // If the function returns an error, the callback might NOT be called.
+        if status != noErr {
+            Unmanaged<VTFrameContext>.fromOpaque(frameRefcon).release()
+        }
+        
+        guard status == noErr else {
+            throw VTDecoderError.decodeFailed(status)
+        }
+    }
+    
+    // MARK: - Flush
+    
+    /// Flushes the decompression session and clears the frame queue.
+    public func flush() {
+        if let session = decompressionSession {
+            VTDecompressionSessionFinishDelayedFrames(session)
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
+        }
+        
+        queueLock.lock()
+        frameQueue.removeAll()
+        queueLock.unlock()
+    }
+    
+
+    // MARK: - Helper Methods
+    
+    private func createSampleBuffer(from data: Data, pts: Int64, dts: Int64, duration: Int64) throws -> CMSampleBuffer {
+        guard !data.isEmpty else {
+            throw VTDecoderError.blockBufferCreationFailed(-1)
+        }
         
         // Create CMBlockBuffer
         var blockBuffer: CMBlockBuffer?
@@ -520,146 +619,8 @@ public final class VTDecoder: @unchecked Sendable {
             throw VTDecoderError.sampleBufferCreationFailed(status)
         }
         
-        // Decode synchronously using a pointer to capture output [Not fully supported with context yet in sync mode]
-        // But for sync mode we don't usually have async metadata pipeline 
-        var outputPixelBuffer: CVPixelBuffer?
-        let startTime = CFAbsoluteTimeGetCurrent()
-        
-        status = VTDecompressionSessionDecodeFrame(
-            session,
-            sampleBuffer: sample,
-            flags: [],
-            frameRefcon: &outputPixelBuffer,
-            infoFlagsOut: nil
-        )
-        
-        let decodeDuration = CFAbsoluteTimeGetCurrent() - startTime
-        totalDecodeTime += decodeDuration
-        decodeCount += 1
-        
-        guard status == noErr else {
-            throw VTDecoderError.decodeFailed(status)
-        }
-        
-        return outputPixelBuffer
+        return sample
     }
-    
-
-    
-    // MARK: - Decoding (Async Pipeline)
-    
-    /// Sends a packet to the decoder for asynchronous decoding.
-    /// Call popFrame to retrieve results.
-    /// Sends a compressed packet to the decoder.
-    public func sendPacket(data: Data, pts: Int64, dts: Int64, duration: Int64, ambientMetadata: Data? = nil) throws {
-        // Ensure we have a valid session
-        if decompressionSession == nil {
-            if formatDescription != nil {
-                try createDecompressionSession()
-            } else {
-                throw VTDecoderError.sessionNotActive
-            }
-        }
-        
-        guard let session = decompressionSession else {
-            throw VTDecoderError.sessionNotActive
-        }
-        
-        // Create CMBlockBuffer
-        var blockBuffer: CMBlockBuffer?
-        var status = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: nil,
-            blockLength: data.count,
-            blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: data.count,
-            flags: kCMBlockBufferAssureMemoryNowFlag,
-            blockBufferOut: &blockBuffer
-        )
-        
-        guard status == noErr, let block = blockBuffer else {
-            throw VTDecoderError.blockBufferCreationFailed(status)
-        }
-        
-        status = data.withUnsafeBytes { ptr in
-            CMBlockBufferReplaceDataBytes(
-                with: ptr.baseAddress!,
-                blockBuffer: block,
-                offsetIntoDestination: 0,
-                dataLength: data.count
-            )
-        }
-        
-        guard status == noErr else {
-            throw VTDecoderError.blockBufferCreationFailed(status)
-        }
-        
-        // Timing info
-        var timingInfo = CMSampleTimingInfo()
-        timingInfo.duration = duration > 0 ? CMTime(value: duration * Int64(timeBaseNum), timescale: timeBaseDen) : .invalid
-        timingInfo.presentationTimeStamp = pts != Int64.min ? CMTime(value: pts * Int64(timeBaseNum), timescale: timeBaseDen) : .invalid
-        timingInfo.decodeTimeStamp = dts != Int64.min ? CMTime(value: dts * Int64(timeBaseNum), timescale: timeBaseDen) : timingInfo.presentationTimeStamp
-        
-        // Sample buffer
-        var sampleBuffer: CMSampleBuffer?
-        var sampleSize = data.count
-        status = CMSampleBufferCreateReady(
-            allocator: kCFAllocatorDefault,
-            dataBuffer: block,
-            formatDescription: formatDescription,
-            sampleCount: 1,
-            sampleTimingEntryCount: 1,
-            sampleTimingArray: &timingInfo,
-            sampleSizeEntryCount: 1,
-            sampleSizeArray: &sampleSize,
-            sampleBufferOut: &sampleBuffer
-        )
-        
-        guard status == noErr, let sample = sampleBuffer else {
-            throw VTDecoderError.sampleBufferCreationFailed(status)
-        }
-        
-        // Create context for this frame
-        let frameContext = VTFrameContext(ambientMetadata: ambientMetadata)
-        let frameRefcon = Unmanaged.passRetained(frameContext).toOpaque()
-        
-        status = VTDecompressionSessionDecodeFrame(
-            session,
-            sampleBuffer: sample,
-            flags: [._EnableAsynchronousDecompression],
-            frameRefcon: frameRefcon,
-            infoFlagsOut: nil
-        )
-        
-        // If calls fail immediately, we must release the context, but VT usually takes ownership if successful?
-        // Actually: "The decompression session calls the output callback... The frameRefcon is passed to the callback."
-        // If the function returns an error, the callback might NOT be called.
-        if status != noErr {
-            Unmanaged<VTFrameContext>.fromOpaque(frameRefcon).release()
-        }
-        
-        guard status == noErr else {
-            throw VTDecoderError.decodeFailed(status)
-        }
-    }
-    
-    // MARK: - Flush
-    
-    /// Flushes the decompression session and clears the frame queue.
-    public func flush() {
-        if let session = decompressionSession {
-            VTDecompressionSessionFinishDelayedFrames(session)
-            VTDecompressionSessionWaitForAsynchronousFrames(session)
-        }
-        
-        queueLock.lock()
-        frameQueue.removeAll()
-        queueLock.unlock()
-    }
-    
-
 }
 
 // MARK: - Decompression Callback

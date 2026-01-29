@@ -2,7 +2,7 @@
 //  PixelFormatConverter.mm
 //  VidCore
 //
-//  Converts FFmpeg AVFrame pixel formats to CVPixelBuffer for Metal rendering
+//  Converts FFmpeg AVFrame pixel formats to CVPixelBuffer
 //
 
 // Fix for AVMediaType collision between AVFoundation and FFmpeg
