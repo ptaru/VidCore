@@ -735,6 +735,6 @@ public final class VideoDecoder: @unchecked Sendable {
     /// Build decoder configuration for a specific audio stream.
     private func buildAudioDecoderConfig(streamIndex: Int) -> [String: Any]? {
         guard let demuxer = self.demuxer else { return nil }
-        return demuxer.getAudioDecoderConfig(forStream: Int32(streamIndex)) as? [String: Any]
+        return demuxer.getAudioDecoderConfig(forStream: Int32(streamIndex))
     }
 }
