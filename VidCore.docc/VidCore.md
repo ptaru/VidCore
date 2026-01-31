@@ -4,7 +4,7 @@ High-performance video decoding and rendering framework for macOS.
 
 ## Overview
 
-VidCore provides a modern, asynchronous API for playing video content on macOS. It combines FFmpeg for broad codec support with Metal for efficient, zero-copy GPU rendering. Full HDR10, HLG, and Dolby Vision Profile 5 support enables wide color gamut and extended dynamic range playback on EDR-capable displays.
+VidCore provides a modern, asynchronous API for playing video content on macOS. It combines FFmpeg for broad codec support with VideoToolbox hardware acceleration, rendering directly through `AVSampleBufferDisplayLayer` for efficient, power-efficient playback with perfect color accuracy. Full HDR10, HLG, and Dolby Vision Profile 5 support enables wide color gamut and extended dynamic range playback on EDR-capable displays.
 
 ### Quick Start
 
@@ -15,22 +15,27 @@ import SwiftUI
 import VidCore
 
 struct ContentView: View {
+    let videoURL: URL
+    
     var body: some View {
-        VidPlayer(url: videoURL)
+        VidPlayer(url: videoURL, autoPlay: true)
+            .edgesIgnoringSafeArea(.all)
     }
 }
 ```
 
-For more control:
+For more control with custom UI:
 
 ```swift
 @State private var player = VideoPlayer()
 
-VidPlayer(player: player)
-    .task {
-        try? await player.load(url: videoURL)
-        player.play()
-    }
+VidPlayer(player: player, showsBuiltInControls: false) {
+    CustomControlsOverlay(player: player)
+}
+.task {
+    try? await player.load(url: videoURL)
+    player.play()
+}
 ```
 
 ## Topics
@@ -38,13 +43,14 @@ VidPlayer(player: player)
 ### SwiftUI Views
 
 - ``VidPlayer``
-- ``MetalVideoRenderer``
+- ``AVSystemVideoRenderer``
 
 ### Playback
 
 - ``VideoPlayer``
 - ``PlaybackState``
 - ``VideoPlayerError``
+- ``PlayerDebugStats``
 
 ### Decoding
 
@@ -52,10 +58,18 @@ VidPlayer(player: player)
 - ``VideoInfo``
 - ``VideoFrame``
 - ``DecodedFrame``
-- ``DoViMetadata``
+- ``AudioTrackInfo``
+
+### Audio
+
+- ``AudioPlayer``
+
+### Buffer Configuration
+
+- ``Buffers``
 
 ### Rendering
 
-- ``RenderingEngine``
-- ``ToneMapping``
+- ``LayerRenderer``
+- ``VideoRendererTarget``
 
