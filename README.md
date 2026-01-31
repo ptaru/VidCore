@@ -80,7 +80,7 @@ struct ContentView: View {
     
     var body: some View {
         // Auto-play with debug overlay enabled
-        VidPlayer(url: videoURL, allowsDebugMenu: true)
+        VidPlayer(url: videoURL, autoPlay: true, allowsDebugMenu: true)
             .edgesIgnoringSafeArea(.all)
     }
 }
@@ -136,9 +136,9 @@ VidCore provides `VidPlayer` for SwiftUI integration with multiple initializatio
 For simple playback where the player manages its own lifecycle:
 
 ```swift
-VidPlayer(url: videoURL)                              // Auto-plays
-VidPlayer(url: videoURL, autoPlay: false)             // Load only, manual play
-VidPlayer(url: videoURL, allowsDebugMenu: true)       // With debug overlay
+VidPlayer(url: videoURL)                                     // Auto-plays
+VidPlayer(url: videoURL, autoPlay: false)                    // Load only, manual play
+VidPlayer(url: videoURL, autoPlay: true, allowsDebugMenu: true)  // With debug overlay
 ```
 
 #### VidPlayer (Controlled)
@@ -235,10 +235,33 @@ if let info = player.videoInfo {
     if let audioCodec = info.audioCodecName {
         print("Audio: \(audioCodec) \(info.audioChannels ?? 0)ch @ \(info.audioSampleRate ?? 0)Hz")
     }
+    
+    // Audio Tracks
+    for track in info.audioTracks {
+        let selected = track.streamIndex == player.selectedAudioTrackIndex ? "✓" : " "
+        print("\(selected) \(track.displayName)")
+    }
 }
 
 // Cleanup
 await player.close()
+```
+
+#### Audio Track Selection
+
+Select from multiple audio tracks (common in MKV/MP4 with multiple languages):
+
+```swift
+// List available tracks
+for (index, track) in player.audioTracks.enumerated() {
+    let marker = index == player.selectedAudioTrackIndex ? "→" : "  "
+    print("\(marker) \(track.displayName)")
+}
+
+// Switch to a different track (e.g., Japanese audio)
+if let japaneseIndex = player.audioTracks.firstIndex(where: { $0.language == "jpn" }) {
+    await player.selectAudioTrack(at: japaneseIndex)
+}
 ```
 
 ---
@@ -277,6 +300,26 @@ await decoder.flushVideoDecoder()
 while let frame = await decoder.drainVideoFrame() {
     // Process remaining buffered frames
 }
+
+decoder.close()
+```
+
+#### Audio Track Management (Low-Level)
+
+The VideoDecoder also provides low-level access to audio tracks:
+
+```swift
+let decoder = try VideoDecoder(url: videoURL)
+
+// Get available tracks
+let tracks = decoder.getAudioTracks()
+for track in tracks {
+    print("Track: \(track.displayName) (Language: \(track.language ?? "unknown"))")
+}
+
+// Switch to a specific track by stream index
+let targetStreamIndex = tracks.first { $0.language == "jpn" }?.streamIndex
+try await decoder.switchAudioTrack(to: targetStreamIndex!)
 
 decoder.close()
 ```
@@ -347,20 +390,13 @@ This approach provides:
 
 #### Dolby Vision Support (Profile 5)
 
-Since macOS does not natively support the Dolby Vision Profile 5 (IPTPQc2) colorspace in `AVSampleBufferDisplayLayer`, VidCore uses a specialized Metal pipeline to convert it in real-time.
+Since macOS does not natively support the Dolby Vision Profile 5 (IPTPQc2) colorspace in `AVSampleBufferDisplayLayer`, VidCore leverages VideoToolbox to handle the conversion.
 
 **The Pipeline:**
-1.  **Decode**: Frame is decoded to an NV12 buffer (software or hardware).
-2.  **Metadata Extraction**: VidCore parses the Dolby Vision RPU to extract:
-    -   Dynamic reshape curves (Polynomial/MMR)
-    -   Color transformation matrices
-    -   L1 scene brightness metadata (MaxCLL/MaxFALL)
-3.  **Compute Shader**: A custom Metal kernel (`DoViHDR10Converter`) processes the frame:
-    -   Applies nonlinear quantization.
-    -   Reshapes the signal (luma/chroma mapping).
-    -   Converts IPT color space to LMS, then to linear RGB.
-    -   Outputs a standard **HDR10** (PQ/BT.2020) frame.
-4.  **Display**: The converted HDR10 frame is handed to the system renderer, tagged with the original scene brightness metadata for accurate tone mapping.
+1.  **Decode**: Frame is decoded via VideoToolbox with Dolby Vision configuration.
+2.  **Hardware Processing**: VideoToolbox handles the Profile 5 IPTPQc2 to HDR10 (PQ/BT.2020) conversion internally.
+3.  **Metadata Handling**: VidCore configures the decoder with proper Dolby Vision atoms (dvcC) to enable hardware-accelerated processing.
+4.  **Display**: The converted frame is handed to `AVSampleBufferDisplayLayer`, tagged with HDR metadata for accurate tone mapping.
 
 #### Automatic HDR Detection
 
@@ -400,23 +436,42 @@ High-level playback orchestrator with A/V sync and state management.
 
 | Property/Method | Description |
 |-----------------|-------------|
-| `init(frameBufferSize:packetQueueSize:)` | Create player with custom buffer sizes |
+| `init(buffers:)` | Create player with buffer configuration (`.auto`, `.software`, `.hardware`, or `.custom`) |
+| `init(url:buffers:)` | Create and immediately load video |
 | `load(url:)` | Load a video file (async, throws) |
 | `play()` | Start or resume playback |
 | `pause()` | Pause playback |
 | `togglePlayPause()` | Toggle between play and pause |
+| `toggleMute()` | Toggle mute state |
 | `seek(to:accurate:)` | Seek to timestamp (async) |
+| `selectAudioTrack(at:)` | Select audio track by index (async) |
 | `close()` | Release all resources (async) |
-| `state` | Current `PlaybackState` |
-| `currentTime` | Current position in seconds |
-| `duration` | Total duration in seconds |
-| `isPlaying` | Whether currently playing |
-| `volume` | Playback volume (0.0–1.0) |
-| `isMuted` | Whether muted |
-| `videoInfo` | Video metadata |
-| `currentFrame` | Current `VideoFrame` for rendering |
-| `hasAudio` | Whether video has audio track |
-| `debugStats` | Real-time playback statistics |
+
+### Buffer Configuration
+
+The `Buffers` enum configures frame buffer and packet queue sizes:
+
+```swift
+public enum Buffers {
+    case auto           // Automatically choose based on hardware acceleration
+    case software       // Optimized for software decoding
+    case hardware       // Optimized for hardware (VideoToolbox) decoding
+    case custom(frameBuffer: Int, packetQueue: Int)  // Manual sizes
+}
+```
+
+**Usage:**
+
+```swift
+// Automatic selection (recommended)
+let player = VideoPlayer()
+
+// Force software decoding buffers
+let player = VideoPlayer(buffers: .software)
+
+// Custom sizes for specific use cases
+let player = VideoPlayer(buffers: .custom(frameBuffer: 3, packetQueue: 16))
+```
 
 ### PlaybackState
 
@@ -430,6 +485,18 @@ enum PlaybackState {
     case seeking    // Seek in progress
     case finished   // Playback completed
     case error(VideoPlayerError)
+}
+```
+
+### VideoPlayerError
+
+```swift
+enum VideoPlayerError: Error, Equatable, LocalizedError, Sendable {
+    case fileNotFound
+    case decoderInitFailed(String)
+    case unsupportedFormat
+    case decodingFailed(String)
+    case seekFailed
 }
 ```
 
@@ -480,8 +547,15 @@ Low-level decoder with split demux/decode pipeline.
 | `flushVideoDecoder()` | Signal end of stream (async) |
 | `drainVideoFrame()` | Get remaining buffered frames (async) |
 | `extractCoverImage()` | Extract embedded cover art (JPEG/PNG) from container |
+| `getAudioTracks()` | Get available audio tracks |
+| `switchAudioTrack(to:)` | Switch to different audio track |
 | `close()` | Release resources |
 | `videoInfo` | Video metadata |
+
+**Static Methods:**
+| Method | Description |
+|--------|-------------|
+| `willUseHardwareAcceleration(for:)` | Pre-detect if hardware acceleration will be used for a URL |
 
 ### VideoInfo
 
@@ -515,6 +589,9 @@ Video stream metadata with color information and HDR detection.
 | `transferFunctionName` | `String` | Computed: human-readable transfer function |
 | `colorPrimariesName` | `String` | Computed: human-readable color primaries |
 | `colorSpaceName` | `String` | Computed: human-readable color space |
+| `audioTracks` | `[AudioTrackInfo]` | All available audio tracks |
+| `containerName` | `String` | Container format name (e.g., "mov,mp4,m4a") |
+| `didSynthesizeExtradata` | `Bool` | Whether extradata was synthesized for hardware decoding |
 
 ### VideoFrame
 
@@ -526,7 +603,6 @@ A decoded video frame with pixel data and timing information.
 | `presentationTime` | `Double` | PTS in seconds |
 | `isHDR` | `Bool` | Whether frame contains HDR content |
 | `colorTransfer` | `Int` | Color transfer characteristics (1=BT.709, 16=PQ, 18=HLG) |
-| `doviMetadata` | `DoViMetadata?` | Dolby Vision metadata for this frame (Profile 5 only) |
 | `doviProfile` | `Int` | Dolby Vision Profile ID (e.g., 5, 8), 0 if not present |
 
 **Supported Pixel Formats:**
@@ -535,19 +611,22 @@ A decoded video frame with pixel data and timing information.
 - **P010**: 10-bit bi-planar (HDR Hardware)
 - **BGRA**: 8-bit packed (Fallback)
 
-### DoViMetadata
+### AudioTrackInfo
 
-Dolby Vision metadata for a single frame (Profile 5 IPTPQc2).
+Information about an available audio track.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `sourceMinPQ` | `Float` | Source mastering min luminance in PQ [0-1] |
-| `sourceMaxPQ` | `Float` | Source mastering max luminance in PQ [0-1] |
-| `sceneMaxPQ` | `Float?` | L1 scene max PQ (nil if L1 not present) |
-| `sceneAvgPQ` | `Float?` | L1 scene average PQ (nil if L1 not present) |
-| `nonlinearMatrix` | `matrix_float3x3` | IPT to LMS transformation matrix |
-| `linearMatrix` | `matrix_float3x3` | LMS to RGB transformation matrix |
-| `components` | `[DoViReshapeData]` | Reshape curves for I, P, T channels |
+| `id` | `Int` | Unique identifier |
+| `streamIndex` | `Int` | Stream index in container |
+| `language` | `String?` | Language code (e.g., "eng", "jpn") |
+| `title` | `String?` | Track title (e.g., "Director's Commentary") |
+| `codecName` | `String` | Audio codec name (e.g., "aac", "opus") |
+| `sampleRate` | `Int` | Sample rate in Hz (e.g., 48000) |
+| `channels` | `Int` | Number of channels |
+| `isDefault` | `Bool` | Whether this is the default track |
+| `displayName` | `String` | Full display name (computed) |
+| `shortDisplayName` | `String` | Short display name for UI (computed) |
 
 ### AVSystemVideoRenderer
 
@@ -563,6 +642,21 @@ if let cgImage = AVSystemVideoRenderer.createCGImage(from: videoFrame) {
 }
 ```
 
+### PlayerDebugStats
+
+Real-time playback statistics for debugging and monitoring.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `packetQueueCount` | `Int` | Current packets in queue |
+| `packetQueueMax` | `Int` | Maximum queue size |
+| `frameBufferCount` | `Int` | Current frames buffered |
+| `frameBufferMax` | `Int` | Maximum frame buffer size |
+| `avDrift` | `Double` | Audio/video synchronization drift in seconds |
+| `droppedFrameCount` | `Int` | Number of frames dropped |
+| `isHardwareDecoded` | `Bool` | Whether hardware decoding is active |
+| `decoderName` | `String` | Name of active decoder |
+
 ---
 
 ## Performance Optimizations
@@ -573,11 +667,11 @@ VidCore includes several performance optimizations for efficient video playback:
 - **Direct System Pass-through**: Standard SDR and HDR content is passed directly to `AVSampleBufferDisplayLayer` without unnecessary copying or shader processing.
 - **Hardware Compositing**: Utilizes the macOS hardware compositor for power-efficient scaling and color management.
 
-### GPU YUV Conversion (Dolby Vision)
-- **Zero-copy texture path** via Metal texture cache for Profile 5 conversion.
-- **Compute-based Reshape**: Custom Metal kernel handles IPTPQc2 to HDR10 conversion entirely on the GPU.
-- **Performance gain**: Enables playback of complex Dolby Vision Profile 5 content that is otherwise unplayable on macOS system players.
-- Supports YUV 4:2:0 subsampling with proper half-resolution U/V sampling.
+### Hardware Dolby Vision Decoding
+- **VideoToolbox Acceleration**: Uses hardware-accelerated VideoToolbox decoding for Dolby Vision Profile 5, 7, and 8 content.
+- **Native DoVi Support**: Configures the decoder with proper Dolby Vision configuration atoms (dvcC) to enable system-level processing.
+- **Profile 5 Compatibility**: Enables playback of Profile 5 (IPTPQc2) content on macOS by leveraging VideoToolbox's internal conversion to display-compatible formats.
+- **Zero-Copy Rendering**: When possible, frames are passed directly to `AVSampleBufferDisplayLayer` without format conversion.
 
 ### CVPixelBufferPool Management
 - **Reusable buffer pools** for both SDR (I420) and HDR (P010) frames
@@ -619,46 +713,59 @@ graph TD
     subgraph VidCore [VidCore Framework]
         subgraph SwiftUI [SwiftUI Layer]
             VPV[VidPlayer]
-            ASVR[AVSystemVideoRenderer]
+            VPDO[VidPlayerDebugOverlay]
         end
 
         subgraph Playback [Playback Layer]
             VP[VideoPlayer]
+            VDL[VideoDisplayLoop<br/>Actor]
             AP[AudioPlayer]
+        end
+
+        subgraph Buffers [Buffer Management]
+            VFB[VideoFrameBuffer]
+            PQ[PacketQueue]
         end
 
         subgraph Decoding [Decoding Layer]
             VD[VideoDecoder]
             FD[FFmpegDecoder<br/>Obj-C++]
+            VTD[VTDecoder]
         end
 
         subgraph Rendering [Rendering Layer]
-            DVC[DoViHDR10Converter<br/>Metal]
+            LR[LayerRenderer]
+            ASVR[AVSystemVideoRenderer]
         end
     end
 
     subgraph System [System Dependencies]
-        FF[FFmpeg]
+        FF[FFmpeg Libraries]
         VT[VideoToolbox]
-        MTL[Metal]
-        AV[AVFoundation]
+        AV[AVAudioEngine]
         ASBDL[AVSampleBufferDisplayLayer]
     end
 
     UI --> VPV
     VPV --> VP
+    VPV --> VPDO
     VPV --> ASVR
-    ASVR --> ASBDL
-    ASVR -.-> DVC
+    ASVR --> LR
+    LR --> ASBDL
 
+    VP --> VDL
     VP --> VD
     VP --> AP
+    VP -.-> VFB
+    VP -.-> PQ
+    
+    VDL --> VFB
+    VDL --> LR
     
     VD --> FD
+    VD --> VTD
     FD --> FF
-    FD --> VT
-
-    AP --> AV
+    VTD --> VT
     
-    DVC --> MTL
+    AP --> AV
 ```
