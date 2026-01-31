@@ -218,14 +218,15 @@ extension VidPlayer where Overlay == EmptyView {
     ///
     /// This initializer creates an internal `VideoPlayer` and manages its
     /// entire lifecycle. The video loads automatically and plays when ready.
+    /// Buffer sizes are automatically configured based on hardware acceleration detection.
     ///
     /// - Parameters:
     ///   - url: The URL of the video file to play.
     ///   - autoPlay: Whether to start playing automatically after loading. Defaults to `true`.
     ///   - allowsDebugMenu: Whether to enable the debug info context menu. Defaults to `false`.
     public init(url: URL, autoPlay: Bool = true, allowsDebugMenu: Bool = false) {
-        // Create a placeholder player - the real one is created in onAppear
-        self.player = VideoPlayer()
+        // Create player with auto-detection for optimal buffer sizes
+        self.player = VideoPlayer(url: url, buffers: .auto)
         self.showsBuiltInControls = true
         self.allowsDebugMenu = allowsDebugMenu
         self.overlay = EmptyView()

@@ -14,8 +14,8 @@ import AVFoundation
 public actor VideoDisplayLoop {
     
     // MARK: - Dependencies
-    private let frameBuffer: VideoFrameBuffer
-    private let packetQueue: PacketQueue
+    private var frameBuffer: VideoFrameBuffer
+    private var packetQueue: PacketQueue
     private let audioPlayer: AudioPlayer
     private weak var renderer: VideoRendererTarget?
     
@@ -66,6 +66,13 @@ public actor VideoDisplayLoop {
         self.frameRate = info?.frameRate ?? 30.0
         self.isHardware = info?.isHardwareAccelerated ?? false
         self.decoderName = info?.decoderName ?? "Unknown"
+    }
+    
+    /// Update the frame buffer and packet queue references.
+    /// Used when buffer sizes need to change (e.g., auto-detected hardware vs software).
+    public func updateBuffers(frameBuffer: VideoFrameBuffer, packetQueue: PacketQueue) {
+        self.frameBuffer = frameBuffer
+        self.packetQueue = packetQueue
     }
     
     public func reset() {

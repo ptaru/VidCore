@@ -322,6 +322,31 @@ public final class VideoDecoder: @unchecked Sendable {
     /// Metadata about the video stream.
     public let videoInfo: VideoInfo
 
+    // MARK: - Static Helpers
+
+    /// Pre-detects whether hardware acceleration will be used for the given URL.
+    ///
+    /// This method performs a lightweight check to determine if VideoToolbox hardware
+    /// acceleration is available for the video codec, without fully initializing
+    /// the decoder. It's useful for pre-configuring buffer sizes before creating
+    /// a VideoPlayer.
+    ///
+    /// - Parameter url: The URL of the video file to check
+    /// - Returns: `true` if hardware acceleration will be used, `false` for software decoding
+    public static func willUseHardwareAcceleration(for url: URL) -> Bool {
+        do {
+            let demuxer = try FFmpegDemuxer(url: url)
+            defer { demuxer.close() }
+            let config = demuxer.getVTDecoderConfig()
+            let isHardware = config != nil
+            print("[VideoDecoder] Hardware detection for \(url.lastPathComponent): \(isHardware)")
+            return isHardware
+        } catch {
+            print("[VideoDecoder] Hardware detection failed for \(url.lastPathComponent): \(error)")
+            return false
+        }
+    }
+
     /// Creates a new decoder for the specified video file.
     ///
     /// This initializes FFmpeg and opens the video file, automatically detecting the container

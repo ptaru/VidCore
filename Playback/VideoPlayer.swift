@@ -87,8 +87,9 @@ public class VideoPlayer {
     
     private let audioPlayer = AudioPlayer()
     private var decoder: VideoDecoder?
-    private let frameBuffer: VideoFrameBuffer
-    private let packetQueue: PacketQueue
+    private var frameBuffer: VideoFrameBuffer
+    private var packetQueue: PacketQueue
+    private var buffers: Buffers
     
     // Decoupled Display Loop
     private let displayLoop: VideoDisplayLoop
@@ -100,18 +101,54 @@ public class VideoPlayer {
     
     // MARK: - Initialization
     
-    /// Creates a new video player.
+    /// Creates a new video player with deferred loading.
     ///
-    /// - Parameters:
-    ///   - frameBufferSize: Maximum frames to buffer (default: 3)
-    ///   - packetQueueSize: Maximum packets to queue (default: 15)
-    public init(frameBufferSize: Int = 3, packetQueueSize: Int = 15) {
-
-        self.frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
-        self.packetQueue = PacketQueue(maxSize: packetQueueSize)
+    /// Use this initializer when you need to configure the player before loading a URL,
+    /// or when the URL is not yet available. Call `load(url:)` to load a video.
+    ///
+    /// - Parameter buffers: Buffer configuration preset. Defaults to `.auto` which detects
+    ///   the decoder type at load time and uses appropriate sizes.
+    public init(buffers: Buffers = .auto) {
+        self.buffers = buffers
+        
+        // Create initial buffers with appropriate sizes
+        let frameBufferSize = buffers.frameBufferSize
+        let packetQueueSize = buffers.packetQueueSize
+        
+        let frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
+        let packetQueue = PacketQueue(maxSize: packetQueueSize)
+        self.frameBuffer = frameBuffer
+        self.packetQueue = packetQueue
         self.displayLoop = VideoDisplayLoop(frameBuffer: frameBuffer, packetQueue: packetQueue, audioPlayer: audioPlayer)
         
         setupCallbacks()
+    }
+    
+    /// Creates a new video player and immediately loads a video.
+    ///
+    /// This initializer is a convenience for the common case where you have a URL
+    /// and want to start playback immediately. For `.auto` buffer configuration,
+    /// hardware acceleration is detected immediately and appropriate buffer sizes
+    /// are used.
+    ///
+    /// - Parameters:
+    ///   - url: The URL of the video file to load
+    ///   - buffers: Buffer configuration preset. Defaults to `.auto`.
+    public convenience init(url: URL, buffers: Buffers = .auto) {
+        // For auto mode with a URL, detect hardware immediately
+        let effectiveBuffers: Buffers
+        switch buffers {
+        case .auto:
+            let isHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
+            effectiveBuffers = isHardware ? .hardware : .software
+            print("[VideoPlayer] Auto-detected \(isHardware ? "hardware" : "software") decoding for \(url.lastPathComponent)")
+        default:
+            effectiveBuffers = buffers
+            print("[VideoPlayer] Using explicit buffer config: \(buffers)")
+        }
+        
+        print("[VideoPlayer] Buffer sizes: frameBuffer=\(effectiveBuffers.frameBufferSize), packetQueue=\(effectiveBuffers.packetQueueSize)")
+        self.init(buffers: effectiveBuffers)
     }
     
     private func setupCallbacks() {
@@ -148,6 +185,32 @@ public class VideoPlayer {
     /// - Throws: `VideoPlayerError` if the file cannot be loaded.
     public func load(url: URL) async throws {
         state = .loading
+        
+        // Handle auto-detection for deferred loading - resize buffers if needed
+        if case .auto = buffers {
+            let isHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
+            let targetBuffer: Buffers = isHardware ? .hardware : .software
+            
+            // Check if we need to resize buffers
+            let currentFrameSize = await frameBuffer.maxSize
+            let currentPacketSize = await packetQueue.maxSize
+            let targetFrameSize = targetBuffer.frameBufferSize
+            let targetPacketSize = targetBuffer.packetQueueSize
+            
+            if currentFrameSize != targetFrameSize || currentPacketSize != targetPacketSize {
+                print("[VideoPlayer] Resizing buffers for \(isHardware ? "hardware" : "software") decoding: frameBuffer \(currentFrameSize)->\(targetFrameSize), packetQueue \(currentPacketSize)->\(targetPacketSize)")
+                
+                // Recreate buffers with correct sizes
+                await frameBuffer.reset()
+                await packetQueue.reset()
+                
+                frameBuffer = VideoFrameBuffer(maxSize: targetFrameSize)
+                packetQueue = PacketQueue(maxSize: targetPacketSize)
+                
+                // Update displayLoop with new buffers
+                await displayLoop.updateBuffers(frameBuffer: frameBuffer, packetQueue: packetQueue)
+            }
+        }
         
         do {
             decoder = try VideoDecoder(url: url)
