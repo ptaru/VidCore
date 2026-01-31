@@ -42,6 +42,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int audioChannels;
 @end
 
+/// Audio track metadata for multi-track files.
+@interface FFmpegAudioTrackInfo : NSObject
+@property(nonatomic, assign) int streamIndex;
+@property(nonatomic, copy, nullable) NSString *language;
+@property(nonatomic, copy, nullable) NSString *title;
+@property(nonatomic, copy) NSString *codecName;
+@property(nonatomic, assign) int sampleRate;
+@property(nonatomic, assign) int channels;
+@property(nonatomic, assign) BOOL isDefault;
+@end
+
 /// Packet data for decoder consumption.
 @interface FFmpegDemuxerPacket : NSObject
 @property(nonatomic, strong) NSData *data;
@@ -93,6 +104,14 @@ NS_ASSUME_NONNULL_BEGIN
 ///       audioCodecId, audioExtradata, audioSampleRate, audioChannels, etc.
 - (nullable NSDictionary<NSString *, id> *)getDecoderConfig;
 
+/// Get audio decoder configuration for a specific audio stream.
+/// Used for FFmpegDecoder.switchAudioStream to switch between audio tracks.
+/// Keys: audioCodecId, audioSampleRate, audioChannels, audioTimeBaseNum,
+///       audioTimeBaseDen, audioExtradata, audioStreamIndex
+/// @param streamIndex The audio stream index to get configuration for.
+/// @return Dictionary with audio codec config, or nil if invalid/not an audio stream.
+- (nullable NSDictionary<NSString *, id> *)getAudioDecoderConfigForStream:(int)streamIndex;
+
 /// Whether the video stream uses supported hardware codec (HEVC/H264).
 @property(nonatomic, readonly) BOOL supportsHardwareDecode;
 
@@ -143,6 +162,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// Extract embedded cover image from container.
 /// @return Cover image data (JPEG/PNG), or nil if not found.
 - (nullable NSData *)extractCoverImage;
+
+/// Get all available audio tracks.
+/// @return Array of audio track info objects, or nil if no audio tracks.
+- (nullable NSArray<FFmpegAudioTrackInfo *> *)getAudioTracks;
+
+/// Select an audio stream by its stream index.
+/// @param streamIndex The stream index to select (from getAudioTracks).
+/// @return YES if successful, NO if stream index invalid.
+- (BOOL)selectAudioStream:(int)streamIndex;
+
+/// Get the currently selected audio stream index.
+/// @return The selected stream index, or -1 if no audio.
+- (int)selectedAudioStreamIndex;
 
 /// Release all demuxer resources.
 - (void)close;

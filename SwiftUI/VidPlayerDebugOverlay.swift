@@ -13,8 +13,11 @@ struct VidPlayerDebugOverlay: View {
     let frame: VideoFrame
     let videoInfo: VideoInfo?
     let debugStats: PlayerDebugStats?
+    let selectedAudioTrackIndex: Int
+    let onAudioTrackSelected: ((Int) -> Void)?
 
     @State private var isAttachmentsExpanded = false
+    @State private var isAudioTracksExpanded = true
     
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -123,19 +126,59 @@ struct VidPlayerDebugOverlay: View {
             VStack(alignment: .leading, spacing: 4) {
                 header("Audio & Metadata")
                 
-                if let info = videoInfo, let audioCodec = info.audioCodecName {
-                    debugRow("Codec", audioCodec.uppercased())
-                    if let rate = info.audioSampleRate {
-                        debugRow("Rate", String(format: "%.1f kHz", Double(rate)/1000.0))
+                // Audio Track Selector
+                if let info = videoInfo, !info.audioTracks.isEmpty {
+                    Button(action: { isAudioTracksExpanded.toggle() }) {
+                        HStack {
+                            Text("Audio Tracks (\(info.audioTracks.count))")
+                                .fontWeight(.bold)
+                                .foregroundColor(.white.opacity(0.9))
+                            Spacer()
+                            Image(systemName: isAudioTracksExpanded ? "chevron.down" : "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
                     }
-                    if let channels = info.audioChannels {
-                        debugRow("Channels", channels == 1 ? "Mono" : channels == 2 ? "Stereo" : "\(channels)ch")
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    if isAudioTracksExpanded {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(info.audioTracks.enumerated()), id: \.element.id) { index, track in
+                                let isSelected = index == selectedAudioTrackIndex
+                                Button(action: {
+                                    onAudioTrackSelected?(index)
+                                }) {
+                                    HStack {
+                                        Text(isSelected ? "●" : "○")
+                                            .foregroundColor(isSelected ? .green : .gray)
+                                            .font(.system(size: 8))
+                                        Text(track.displayName)
+                                            .foregroundColor(isSelected ? .green : .white)
+                                            .fontWeight(isSelected ? .bold : .regular)
+                                        if track.isDefault {
+                                            Text("Default")
+                                                .font(.system(size: 9))
+                                                .foregroundColor(.yellow)
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(Color.yellow.opacity(0.2))
+                                                .cornerRadius(2)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .padding(.leading, 8)
+                                .padding(.vertical, 1)
+                            }
+                        }
                     }
-                } else {
+                    
+                    Divider().background(Color.white.opacity(0.3))
+                } else if let info = videoInfo, info.audioTracks.isEmpty {
                     debugRow("Audio", "None", color: .gray)
+                    Divider().background(Color.white.opacity(0.3))
                 }
-                
-                Divider().background(Color.white.opacity(0.3))
                 
                 // Attachments
                 Button(action: { isAttachmentsExpanded.toggle() }) {

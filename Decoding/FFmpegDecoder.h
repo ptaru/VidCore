@@ -154,7 +154,12 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Use this when seeking to reset the decoder state.
 - (void)flushCodecBuffers;
 
-
+/// Switch to a different audio stream with new codec parameters.
+/// This reinitializes the audio codec context and resampler for the new format.
+/// Must be called when switching between audio tracks with different codecs (e.g., AAC to EAC3).
+/// @param config Configuration dictionary with new audio codec parameters.
+/// @return YES if successful, NO on error.
+- (BOOL)switchAudioStream:(NSDictionary<NSString *, id> *)config;
 
 /// Release all FFmpeg resources.
 - (void)close;

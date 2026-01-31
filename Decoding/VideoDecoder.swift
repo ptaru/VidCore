@@ -12,6 +12,64 @@ import Foundation
 
 extension FFmpegPacketData: @unchecked Sendable {}
 
+/// Metadata about an audio track.
+///
+/// Contains information about an audio stream's codec, language, and channel configuration.
+/// Used for audio track selection in multi-track files.
+public struct AudioTrackInfo: Sendable, Equatable, Identifiable {
+    /// Unique identifier (stream index).
+    public let id: Int
+    /// Stream index in the container.
+    public let streamIndex: Int
+    /// Language code (e.g., "eng", "jpn", "spa"), nil if not specified.
+    public let language: String?
+    /// Track title (e.g., "Director's Commentary"), nil if not specified.
+    public let title: String?
+    /// Audio codec name (e.g., "aac", "ac3", "eac3", "opus").
+    public let codecName: String
+    /// Sample rate in Hz (e.g., 48000).
+    public let sampleRate: Int
+    /// Number of channels (e.g., 2 for stereo, 6 for 5.1).
+    public let channels: Int
+    /// Whether this is the default audio track from container metadata.
+    public let isDefault: Bool
+    
+    /// Display name for the track (full format).
+    /// Format: "Title - Language, Codec, Xch" or "Language, Codec, Xch" if no title.
+    public var displayName: String {
+        let codecUpper = codecName.uppercased()
+        let channelsDesc = channels == 1 ? "1ch" : "\(channels)ch"
+        let lang = language?.uppercased() ?? "Unknown"
+        
+        if let title = title, !title.isEmpty {
+            return "\(title) - \(lang), \(codecUpper), \(channelsDesc)"
+        } else {
+            return "\(lang), \(codecUpper), \(channelsDesc)"
+        }
+    }
+    
+    /// Short display name for compact UI (e.g., picker button).
+    /// Format: "Language • Codec" or just "Codec" if no language.
+    public var shortDisplayName: String {
+        let codecUpper = codecName.uppercased()
+        if let lang = language, !lang.isEmpty {
+            return "\(lang.uppercased()) • \(codecUpper)"
+        } else {
+            return codecUpper
+        }
+    }
+    
+    public init(streamIndex: Int, language: String?, title: String?, codecName: String, sampleRate: Int, channels: Int, isDefault: Bool = false) {
+        self.id = streamIndex
+        self.streamIndex = streamIndex
+        self.language = language
+        self.title = title
+        self.codecName = codecName
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.isDefault = isDefault
+    }
+}
 
 /// Metadata about a video stream.
 ///
@@ -86,6 +144,8 @@ public struct VideoInfo {
     public let audioSampleRate: Int?
     /// Number of audio channels (e.g., 2 for stereo), nil if no audio.
     public let audioChannels: Int?
+    /// All available audio tracks in the container.
+    public let audioTracks: [AudioTrackInfo]
     
     // MARK: - Computed Properties
     
@@ -144,6 +204,7 @@ public struct VideoInfo {
         maxContentLightLevel: UInt? = nil, maxFrameAverageLightLevel: UInt? = nil,
         masteringDisplayMaxLuminance: Float? = nil, masteringDisplayMinLuminance: Float? = nil,
         audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
+        audioTracks: [AudioTrackInfo] = [],
         decoderName: String? = nil, decoderDescription: String? = nil,
         didSynthesizeExtradata: Bool = false
     ) {
@@ -169,6 +230,7 @@ public struct VideoInfo {
         self.audioCodecName = audioCodecName
         self.audioSampleRate = audioSampleRate
         self.audioChannels = audioChannels
+        self.audioTracks = audioTracks
         self.decoderName = decoderName
         self.decoderDescription = decoderDescription
         self.didSynthesizeExtradata = didSynthesizeExtradata
@@ -327,6 +389,19 @@ public final class VideoDecoder: @unchecked Sendable {
             }
         }
         
+        // Convert audio tracks from FFmpeg
+        let audioTracks: [AudioTrackInfo] = demuxer.getAudioTracks()?.map { track in
+            AudioTrackInfo(
+                streamIndex: Int(track.streamIndex),
+                language: track.language,
+                title: track.title,
+                codecName: track.codecName,
+                sampleRate: Int(track.sampleRate),
+                channels: Int(track.channels),
+                isDefault: track.isDefault
+            )
+        } ?? []
+        
         // Create final videoInfo
         self.videoInfo = VideoInfo(
             width: Int(info.width),
@@ -351,6 +426,7 @@ public final class VideoDecoder: @unchecked Sendable {
             audioCodecName: info.audioCodecName,
             audioSampleRate: info.audioSampleRate > 0 ? Int(info.audioSampleRate) : nil,
             audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,
+            audioTracks: audioTracks,
             decoderName: finalDecoderName,
             decoderDescription: finalDecoderDescription,
             didSynthesizeExtradata: demuxer.didSynthesizeExtradata
@@ -806,5 +882,69 @@ public final class VideoDecoder: @unchecked Sendable {
                 domain: "VideoDecoder", code: -3,
                 userInfo: [NSLocalizedDescriptionKey: "Seek failed - no suitable frame found"])
         }
+    }
+    
+    // MARK: - Audio Track Management
+    
+    /// Get all available audio tracks from the container.
+    /// - Returns: Array of audio track info, empty if no audio tracks.
+    public func getAudioTracks() -> [AudioTrackInfo] {
+        lock.lock()
+        defer { lock.unlock() }
+        return videoInfo.audioTracks
+    }
+    
+    /// Get the currently selected audio stream index.
+    /// - Returns: Stream index, or -1 if no audio.
+    public func selectedAudioStreamIndex() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isClosed, let demuxer = self.demuxer else { return -1 }
+        return Int(demuxer.selectedAudioStreamIndex())
+    }
+    
+    /// Switch to a different audio track by its stream index.
+    /// This reinitializes the audio decoder for the new codec format.
+    /// - Parameter streamIndex: The stream index to switch to.
+    /// - Returns: true if successful, false on error.
+    public func switchAudioTrack(to streamIndex: Int) async -> Bool {
+        await withCheckedContinuation { continuation in
+            decodeQueue.async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                
+                guard !self.isClosed, let demuxer = self.demuxer, let decoder = self.decoder else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                // Update demuxer to use the new audio stream
+                guard demuxer.selectAudioStream(Int32(streamIndex)) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                // Build decoder config for the new audio stream
+                guard let newDecoderConfig = self.buildAudioDecoderConfig(streamIndex: streamIndex) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                // Switch audio stream in decoder (handles codec reinitialization)
+                let success = decoder.switchAudioStream(newDecoderConfig)
+                continuation.resume(returning: success)
+            }
+        }
+    }
+    
+    /// Build decoder configuration for a specific audio stream.
+    private func buildAudioDecoderConfig(streamIndex: Int) -> [String: Any]? {
+        guard let demuxer = self.demuxer else { return nil }
+        return demuxer.getAudioDecoderConfig(forStream: Int32(streamIndex)) as? [String: Any]
     }
 }

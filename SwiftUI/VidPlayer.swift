@@ -143,7 +143,12 @@ public struct VidPlayer<Overlay: View>: View {
                     frame: frame,
                     videoInfo: activePlayer.videoInfo,
                     debugStats: activePlayer.debugStats,
-
+                    selectedAudioTrackIndex: activePlayer.selectedAudioTrackIndex,
+                    onAudioTrackSelected: { index in
+                        Task {
+                            await activePlayer.selectAudioTrack(at: index)
+                        }
+                    }
                 )
             }
             

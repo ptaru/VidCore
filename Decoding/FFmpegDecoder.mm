@@ -534,6 +534,79 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 }
 
+- (BOOL)switchAudioStream:(NSDictionary<NSString *, id> *)config {
+  // Validate audio config is present
+  if (!config[@"audioCodecId"]) {
+    return NO;
+  }
+  
+  // Clean up old audio context and resampler
+  if (_audioCodecContext) {
+    avcodec_free_context(&_audioCodecContext);
+    _audioCodecContext = NULL;
+  }
+  
+  if (_swrContext) {
+    swr_free(&_swrContext);
+    _swrContext = NULL;
+  }
+  
+  // Reset audio time base
+  _audioTimeBaseNum = [config[@"audioTimeBaseNum"] intValue];
+  _audioTimeBaseDen = [config[@"audioTimeBaseDen"] intValue];
+  
+  // Initialize new audio codec
+  int audioCodecId = [config[@"audioCodecId"] intValue];
+  const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)audioCodecId);
+  if (!audioCodec) {
+    NSLog(@"[FFmpegDecoder] Failed to find audio codec for id %d", audioCodecId);
+    return NO;
+  }
+  
+  _audioCodecContext = avcodec_alloc_context3(audioCodec);
+  if (!_audioCodecContext) {
+    NSLog(@"[FFmpegDecoder] Failed to allocate audio codec context");
+    return NO;
+  }
+  
+  // Set audio parameters
+  _audioCodecContext->sample_rate = [config[@"audioSampleRate"] intValue];
+  av_channel_layout_default(&_audioCodecContext->ch_layout, [config[@"audioChannels"] intValue]);
+  
+  // Set extradata if present
+  NSData *audioExtradata = config[@"audioExtradata"];
+  if (audioExtradata && audioExtradata.length > 0) {
+    _audioCodecContext->extradata = (uint8_t *)av_malloc(audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (_audioCodecContext->extradata) {
+      memcpy(_audioCodecContext->extradata, audioExtradata.bytes, audioExtradata.length);
+      _audioCodecContext->extradata_size = (int)audioExtradata.length;
+    }
+  }
+  
+  // Open the codec
+  if (avcodec_open2(_audioCodecContext, audioCodec, NULL) < 0) {
+    NSLog(@"[FFmpegDecoder] Failed to open audio codec");
+    avcodec_free_context(&_audioCodecContext);
+    _audioCodecContext = NULL;
+    return NO;
+  }
+  
+  _audioStreamIndex = [config[@"audioStreamIndex"] intValue];
+  if (_audioStreamIndex == 0 && config[@"audioStreamIndex"] == nil) {
+    _audioStreamIndex = 1; // Fallback
+  }
+  
+  // Update videoInfo with new audio details
+  _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
+  _videoInfo.audioSampleRate = _audioCodecContext->sample_rate;
+  _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
+  
+  NSLog(@"[FFmpegDecoder] Switched to audio stream with codec: %s, sampleRate: %d, channels: %d",
+        audioCodec->name, _audioCodecContext->sample_rate, _audioCodecContext->ch_layout.nb_channels);
+  
+  return YES;
+}
+
 #pragma mark - Internal Frame Conversion & Processing
 
 - (AVAudioPCMBuffer *)convertAudioFrame:(AVFrame *)frame {

@@ -27,6 +27,9 @@
 
 @end
 
+@implementation FFmpegAudioTrackInfo
+@end
+
 @implementation FFmpegDemuxerPacket
 @end
 
@@ -37,6 +40,7 @@
 @property(nonatomic, assign) AVPacket *packet;
 @property(nonatomic, assign) int videoStreamIndex;
 @property(nonatomic, assign) int audioStreamIndex;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *audioStreamIndices;
 
 @property(nonatomic, strong) FFmpegDemuxerVideoInfo *videoInfo;
 @property(nonatomic, strong) NSMutableArray<FFmpegDemuxerPacket *> *queuedAudioPackets;
@@ -121,8 +125,28 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
         DEMUXER_SET_ERROR_AND_CLOSE(error, 1003, @"No video stream found");
     }
     
-    // Find audio stream (optional)
-    _audioStreamIndex = av_find_best_stream(_formatContext, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    // Find all audio streams and identify default
+    _audioStreamIndices = [NSMutableArray array];
+    int defaultAudioStream = -1;
+    for (unsigned int i = 0; i < _formatContext->nb_streams; i++) {
+        if (_formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            [_audioStreamIndices addObject:@(i)];
+            // Check if this is the default audio stream
+            if (_formatContext->streams[i]->disposition & AV_DISPOSITION_DEFAULT) {
+                defaultAudioStream = i;
+            }
+        }
+    }
+    // Select default audio stream, or first if no default specified
+    if (defaultAudioStream >= 0) {
+        _audioStreamIndex = defaultAudioStream;
+        NSLog(@"[FFmpegDemuxer] Selected default audio stream %d", defaultAudioStream);
+    } else if (_audioStreamIndices.count > 0) {
+        _audioStreamIndex = [_audioStreamIndices[0] intValue];
+        NSLog(@"[FFmpegDemuxer] No default audio stream, selecting first stream %d", _audioStreamIndex);
+    } else {
+        _audioStreamIndex = -1;
+    }
     
     // Allocate packet for demuxing
     _packet = av_packet_alloc();
@@ -617,6 +641,44 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     return config;
 }
 
+- (nullable NSDictionary<NSString *, id> *)getAudioDecoderConfigForStream:(int)streamIndex {
+    // Verify the format context exists
+    if (!_formatContext) {
+        return nil;
+    }
+    
+    // Verify the stream index is valid
+    if (streamIndex < 0 || (unsigned int)streamIndex >= _formatContext->nb_streams) {
+        return nil;
+    }
+    
+    AVStream *stream = _formatContext->streams[streamIndex];
+    AVCodecParameters *codecPars = stream->codecpar;
+    
+    // Verify it's an audio stream
+    if (codecPars->codec_type != AVMEDIA_TYPE_AUDIO) {
+        return nil;
+    }
+    
+    NSMutableDictionary *config = [NSMutableDictionary dictionary];
+    
+    // Audio codec info
+    config[@"audioCodecId"] = @(codecPars->codec_id);
+    config[@"audioSampleRate"] = @(codecPars->sample_rate);
+    config[@"audioChannels"] = @(codecPars->ch_layout.nb_channels);
+    config[@"audioTimeBaseNum"] = @(stream->time_base.num);
+    config[@"audioTimeBaseDen"] = @(stream->time_base.den);
+    config[@"audioStreamIndex"] = @(streamIndex);
+    
+    // Audio extradata
+    if (codecPars->extradata && codecPars->extradata_size > 0) {
+        config[@"audioExtradata"] = [NSData dataWithBytes:codecPars->extradata 
+                                                   length:codecPars->extradata_size];
+    }
+    
+    return config;
+}
+
 #pragma mark - Demuxing
 
 - (nullable FFmpegDemuxerPacket *)demuxNextPacket {
@@ -781,6 +843,63 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     return nil;
 }
 
+- (nullable NSArray<FFmpegAudioTrackInfo *> *)getAudioTracks {
+    if (_audioStreamIndices.count == 0) {
+        return nil;
+    }
+    
+    NSMutableArray<FFmpegAudioTrackInfo *> *tracks = [NSMutableArray array];
+    
+    for (NSNumber *streamIndexNum in _audioStreamIndices) {
+        int streamIndex = [streamIndexNum intValue];
+        AVStream *stream = _formatContext->streams[streamIndex];
+        AVCodecParameters *codecPars = stream->codecpar;
+        const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
+        
+        FFmpegAudioTrackInfo *track = [[FFmpegAudioTrackInfo alloc] init];
+        track.streamIndex = streamIndex;
+        track.codecName = codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
+        track.sampleRate = codecPars->sample_rate;
+        track.channels = codecPars->ch_layout.nb_channels;
+        // Only mark as default if this is the stream the demuxer selected as default
+        track.isDefault = (streamIndex == _audioStreamIndex);
+        
+        // Extract metadata
+        AVDictionaryEntry *lang = av_dict_get(stream->metadata, "language", NULL, 0);
+        if (lang && lang->value) {
+            track.language = [NSString stringWithUTF8String:lang->value];
+        }
+        
+        AVDictionaryEntry *title = av_dict_get(stream->metadata, "title", NULL, 0);
+        if (title && title->value) {
+            track.title = [NSString stringWithUTF8String:title->value];
+        }
+        
+        [tracks addObject:track];
+    }
+    
+    return tracks;
+}
+
+- (BOOL)selectAudioStream:(int)streamIndex {
+    // Verify the stream index is valid and is an audio stream
+    if (streamIndex < 0 || (unsigned int)streamIndex >= _formatContext->nb_streams) {
+        return NO;
+    }
+    
+    if (_formatContext->streams[streamIndex]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
+        return NO;
+    }
+    
+    _audioStreamIndex = streamIndex;
+    NSLog(@"[FFmpegDemuxer] Selected audio stream %d", streamIndex);
+    return YES;
+}
+
+- (int)selectedAudioStreamIndex {
+    return _audioStreamIndex;
+}
+
 - (void)close {
     if (!_formatContext) {
         return;
@@ -800,6 +919,7 @@ static const NSUInteger kMaxQueuedAudioPackets = 500; // Prevent unbounded growt
     }
     
     [_queuedAudioPackets removeAllObjects];
+    [_audioStreamIndices removeAllObjects];
     _videoStreamIndex = -1;
     _audioStreamIndex = -1;
 }

@@ -156,6 +156,14 @@ public class VideoPlayer {
                 duration = decoder.videoInfo.duration
                 videoInfo = decoder.videoInfo
                 
+                // Sync selected audio track with demuxer's default selection
+                if !decoder.videoInfo.audioTracks.isEmpty {
+                    let selectedStreamIndex = decoder.selectedAudioStreamIndex()
+                    selectedAudioTrackIndex = decoder.videoInfo.audioTracks.firstIndex { $0.streamIndex == selectedStreamIndex } ?? 0
+                } else {
+                    selectedAudioTrackIndex = -1
+                }
+                
                 await displayLoop.setVideoInfo(decoder.videoInfo)
 
                 while !Task.isCancelled {
@@ -542,6 +550,56 @@ public class VideoPlayer {
                     }
                 }
             }
+        }
+    }
+    
+    // MARK: - Audio Track Selection
+    
+    /// All available audio tracks in the current video.
+    public var audioTracks: [AudioTrackInfo] {
+        videoInfo?.audioTracks ?? []
+    }
+    
+    /// Index of the currently selected audio track in the audioTracks array.
+    /// -1 if no audio track is selected.
+    public private(set) var selectedAudioTrackIndex: Int = -1
+    
+    /// Select an audio track by its index in the audioTracks array.
+    /// Flow: pause -> switch -> accurate seek -> resume
+    /// - Parameter index: Index of the audio track to select.
+    public func selectAudioTrack(at index: Int) async {
+        guard let decoder = decoder else { return }
+        guard index >= 0 && index < audioTracks.count else { return }
+        guard index != selectedAudioTrackIndex else { return }
+        
+        let track = audioTracks[index]
+        let currentPosition = currentTime
+        let wasPlaying = state == .playing
+        
+        // 1. Pause playback
+        if wasPlaying {
+            pause()
+        }
+        
+        // 2. Switch demuxer and decoder to the new audio stream
+        let success = await decoder.switchAudioTrack(to: track.streamIndex)
+        guard success else {
+            if wasPlaying {
+                play()
+            }
+            return
+        }
+        
+        // Update state
+        selectedAudioTrackIndex = index
+        videoInfo = decoder.videoInfo
+        
+        // 3. Accurate seek to reset state and maintain position
+        await seek(to: currentPosition, accurate: true)
+        
+        // 4. Resume playback if we were playing
+        if wasPlaying {
+            play()
         }
     }
     
