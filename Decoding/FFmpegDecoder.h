@@ -67,7 +67,9 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
   /// Video frame with pixel buffer.
   FFmpegFrameTypeVideo,
   /// Audio frame with PCM buffer.
-  FFmpegFrameTypeAudio
+  FFmpegFrameTypeAudio,
+  /// Subtitle frame with text or bitmap.
+  FFmpegFrameTypeSubtitle
 };
 
 /// Base class for decoded frames.
@@ -92,6 +94,22 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, strong) AVAudioPCMBuffer *pcmBuffer;
 @end
 
+/// A decoded subtitle frame.
+@interface FFmpegSubtitleFrame : FFmpegFrame
+/// Start time of the subtitle.
+@property(nonatomic, assign) double startTime;
+/// End time of the subtitle (or -1 if unknown/duration-based).
+@property(nonatomic, assign) double endTime;
+/// Text content (if text-based).
+@property(nonatomic, copy, nullable) NSString *text;
+/// Bitmap content data (if bitmap-based).
+@property(nonatomic, strong, nullable) NSData *bitmapData;
+@property(nonatomic, assign) int bitmapWidth;
+@property(nonatomic, assign) int bitmapHeight;
+/// Whether the text is in ASS/SSA format.
+@property(nonatomic, assign) BOOL isASS;
+@end
+
 /// Packet data wrapper for Swift interop (avoids exposing AVPacket)
 @interface FFmpegPacketData : NSObject
 @property(nonatomic, assign) int32_t streamIndex;
@@ -103,6 +121,7 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) int32_t flags;
 @property(nonatomic, assign) BOOL isVideo;
 @property(nonatomic, assign) BOOL isAudio;
+@property(nonatomic, assign) BOOL isSubtitle;
 @property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
 @end
 
@@ -115,17 +134,15 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// @param url The file URL to the video.
 /// @param error Output error if initialization fails.
 
-
 /// Initialize the decoder with a configuration dictionary from the demuxer.
 /// @param config The configuration dictionary containing codec parameters.
 /// @param error Output error if initialization fails.
-- (nullable instancetype)initWithDemuxerConfig:(NSDictionary<NSString *, id> *)config
+- (nullable instancetype)initWithDemuxerConfig:
+                             (NSDictionary<NSString *, id> *)config
                                          error:(NSError **)error;
 
 /// Get metadata about the video stream.
 - (nullable FFmpegVideoInfo *)getVideoInfo;
-
-
 
 /// Decode a packet into frames.
 ///
@@ -156,15 +173,19 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 
 /// Switch to a different audio stream with new codec parameters.
 /// This reinitializes the audio codec context and resampler for the new format.
-/// Must be called when switching between audio tracks with different codecs (e.g., AAC to EAC3).
+/// Must be called when switching between audio tracks with different codecs
+/// (e.g., AAC to EAC3).
 /// @param config Configuration dictionary with new audio codec parameters.
 /// @return YES if successful, NO on error.
 - (BOOL)switchAudioStream:(NSDictionary<NSString *, id> *)config;
 
+/// Switch to a different subtitle stream with new codec parameters.
+/// @param config Configuration dictionary with new subtitle codec parameters.
+/// @return YES if successful, NO on error.
+- (BOOL)switchSubtitleStream:(NSDictionary<NSString *, id> *)config;
+
 /// Release all FFmpeg resources.
 - (void)close;
-
-
 
 @end
 

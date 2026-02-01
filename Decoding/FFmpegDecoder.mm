@@ -47,6 +47,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @implementation FFmpegAudioFrame
 @end
 
+@implementation FFmpegSubtitleFrame
+@end
+
 #pragma mark - FFmpegPacketData
 
 @implementation FFmpegPacketData
@@ -59,6 +62,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 // VTDecoder now handled by Swift VideoDecoder
 @property(nonatomic, assign)
     AVCodecContext *audioCodecContext; // Audio codec context
+@property(nonatomic, assign)
+    AVCodecContext *subtitleCodecContext; // Subtitle codec context
 @property(nonatomic, assign) SwsContext *swsContext;
 @property(nonatomic, assign) SwrContext *swrContext;
 @property(nonatomic, assign) AVFrame *frame;
@@ -68,6 +73,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) AVPacket *packet;
 @property(nonatomic, assign) int videoStreamIndex;
 @property(nonatomic, assign) int audioStreamIndex;
+@property(nonatomic, assign) int subtitleStreamIndex;
 @property(nonatomic, strong) FFmpegVideoInfo *videoInfo;
 @property(nonatomic, assign) AVBufferRef *hwDeviceCtx;
 @property(nonatomic, assign) BOOL usingHardwareDecoder;
@@ -80,6 +86,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) int32_t videoTimeBaseDen;
 @property(nonatomic, assign) int32_t audioTimeBaseNum;
 @property(nonatomic, assign) int32_t audioTimeBaseDen;
+@property(nonatomic, assign) int32_t subtitleTimeBaseNum;
+@property(nonatomic, assign) int32_t subtitleTimeBaseDen;
 @end
 #pragma mark - Internal Helper Functions
 
@@ -108,7 +116,8 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 #pragma mark - Initialization & Lifecycle
 
-- (nullable instancetype)initWithDemuxerConfig:(NSDictionary<NSString *, id> *)config
+- (nullable instancetype)initWithDemuxerConfig:
+                             (NSDictionary<NSString *, id> *)config
                                          error:(NSError **)error {
   self = [super init];
   if (self) {
@@ -117,7 +126,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     dispatch_once(&onceToken, ^{
       av_log_set_level(AV_LOG_ERROR);
     });
-    
+
     // Initialize state
     _codecContext = NULL;
     _audioCodecContext = NULL;
@@ -134,62 +143,77 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _usingHardwareDecoder = NO;
     _hwPixelFormat = AV_PIX_FMT_VIDEOTOOLBOX;
     _pixelFormatConverter = [[PixelFormatConverter alloc] init];
-    
+
+    _subtitleStreamIndex = -1;
+    _subtitleCodecContext = NULL;
+
     // Extract config values
     int videoCodecId = [config[@"videoCodecId"] intValue];
     int width = [config[@"width"] intValue];
     int height = [config[@"height"] intValue];
     int pixelFormat = [config[@"pixelFormat"] intValue];
     NSData *videoExtradata = config[@"videoExtradata"];
-    
+
     // Find video codec
     const AVCodec *codec = avcodec_find_decoder((enum AVCodecID)videoCodecId);
     if (!codec) {
       if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2001
-                                 userInfo:@{NSLocalizedDescriptionKey: @"Codec not found"}];
+        *error = [NSError
+            errorWithDomain:@"FFmpegDecoder"
+                       code:2001
+                   userInfo:@{NSLocalizedDescriptionKey : @"Codec not found"}];
       }
       return nil;
     }
-    
+
     // Allocate video codec context
     _codecContext = avcodec_alloc_context3(codec);
     if (!_codecContext) {
       if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2002
-                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to allocate codec context"}];
+        *error = [NSError errorWithDomain:@"FFmpegDecoder"
+                                     code:2002
+                                 userInfo:@{
+                                   NSLocalizedDescriptionKey :
+                                       @"Failed to allocate codec context"
+                                 }];
       }
       return nil;
     }
-    
+
     // Set codec parameters
     _codecContext->width = width;
     _codecContext->height = height;
     _codecContext->pix_fmt = (enum AVPixelFormat)pixelFormat;
-    _codecContext->color_primaries = (enum AVColorPrimaries)[config[@"colorPrimaries"] intValue];
-    _codecContext->color_trc = (enum AVColorTransferCharacteristic)[config[@"colorTransfer"] intValue];
-    _codecContext->colorspace = (enum AVColorSpace)[config[@"colorSpace"] intValue];
-    _codecContext->color_range = (enum AVColorRange)[config[@"colorRange"] intValue];
-    
+    _codecContext->color_primaries =
+        (enum AVColorPrimaries)[config[@"colorPrimaries"] intValue];
+    _codecContext->color_trc =
+        (enum AVColorTransferCharacteristic)[config[@"colorTransfer"] intValue];
+    _codecContext->colorspace =
+        (enum AVColorSpace)[config[@"colorSpace"] intValue];
+    _codecContext->color_range =
+        (enum AVColorRange)[config[@"colorRange"] intValue];
+
     // Set timebase
     _videoTimeBaseNum = [config[@"videoTimeBaseNum"] intValue];
     _videoTimeBaseDen = [config[@"videoTimeBaseDen"] intValue];
-    
+
     if (_videoTimeBaseDen > 0) {
-        AVRational tb = (AVRational){_videoTimeBaseNum, _videoTimeBaseDen};
-        _codecContext->pkt_timebase = tb;
-        _codecContext->time_base = tb;
+      AVRational tb = (AVRational){_videoTimeBaseNum, _videoTimeBaseDen};
+      _codecContext->pkt_timebase = tb;
+      _codecContext->time_base = tb;
     }
-    
+
     // Set extradata
     if (videoExtradata && videoExtradata.length > 0) {
-      _codecContext->extradata = (uint8_t *)av_malloc(videoExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+      _codecContext->extradata = (uint8_t *)av_malloc(
+          videoExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
       if (_codecContext->extradata) {
-        memcpy(_codecContext->extradata, videoExtradata.bytes, videoExtradata.length);
+        memcpy(_codecContext->extradata, videoExtradata.bytes,
+               videoExtradata.length);
         _codecContext->extradata_size = (int)videoExtradata.length;
       }
     }
-    
+
     // Try hardware acceleration
     BOOL hwSuccess = [self initHardwareDecoder:codec error:nil];
     if (hwSuccess && _hwDeviceCtx) {
@@ -201,36 +225,45 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       _codecContext->thread_count = 0;
       _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
-    
+
     // Open video codec
     if (avcodec_open2(_codecContext, codec, NULL) < 0) {
       if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2003
-                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to open codec"}];
+        *error = [NSError
+            errorWithDomain:@"FFmpegDecoder"
+                       code:2003
+                   userInfo:@{
+                     NSLocalizedDescriptionKey : @"Failed to open codec"
+                   }];
       }
       avcodec_free_context(&_codecContext);
       return nil;
     }
-    
+
     // Setup audio codec if present
     if (config[@"audioCodecId"]) {
       int audioCodecId = [config[@"audioCodecId"] intValue];
-      const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)audioCodecId);
+      const AVCodec *audioCodec =
+          avcodec_find_decoder((enum AVCodecID)audioCodecId);
       if (audioCodec) {
         _audioCodecContext = avcodec_alloc_context3(audioCodec);
         if (_audioCodecContext) {
-          _audioCodecContext->sample_rate = [config[@"audioSampleRate"] intValue];
-          av_channel_layout_default(&_audioCodecContext->ch_layout, [config[@"audioChannels"] intValue]);
-          
+          _audioCodecContext->sample_rate =
+              [config[@"audioSampleRate"] intValue];
+          av_channel_layout_default(&_audioCodecContext->ch_layout,
+                                    [config[@"audioChannels"] intValue]);
+
           NSData *audioExtradata = config[@"audioExtradata"];
           if (audioExtradata && audioExtradata.length > 0) {
-            _audioCodecContext->extradata = (uint8_t *)av_malloc(audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+            _audioCodecContext->extradata = (uint8_t *)av_malloc(
+                audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
             if (_audioCodecContext->extradata) {
-              memcpy(_audioCodecContext->extradata, audioExtradata.bytes, audioExtradata.length);
+              memcpy(_audioCodecContext->extradata, audioExtradata.bytes,
+                     audioExtradata.length);
               _audioCodecContext->extradata_size = (int)audioExtradata.length;
             }
           }
-          
+
           if (avcodec_open2(_audioCodecContext, audioCodec, NULL) >= 0) {
             _audioStreamIndex = 1; // Dummy index for decode-only mode
             // Store audio time base for PTS calculation
@@ -242,42 +275,47 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         }
       }
     }
-    
+
     // Allocate frames
     _frame = av_frame_alloc();
     _swFrame = av_frame_alloc();
     _audioFrame = av_frame_alloc();
     _swrOutputFrame = av_frame_alloc();
     _packet = av_packet_alloc();
-    
+
     if (!_frame || !_swFrame || !_packet || !_audioFrame || !_swrOutputFrame) {
       if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder" code:2004
-                                 userInfo:@{NSLocalizedDescriptionKey: @"Failed to allocate frames"}];
+        *error = [NSError
+            errorWithDomain:@"FFmpegDecoder"
+                       code:2004
+                   userInfo:@{
+                     NSLocalizedDescriptionKey : @"Failed to allocate frames"
+                   }];
       }
       [self close];
       return nil;
     }
-    
+
     // Initialize scaler for software path
     if (!_usingHardwareDecoder) {
-      _swsContext = sws_getContext(width, height, (enum AVPixelFormat)pixelFormat,
-                                   width, height, AV_PIX_FMT_NV12,
-                                   SWS_BILINEAR, NULL, NULL, NULL);
+      _swsContext = sws_getContext(
+          width, height, (enum AVPixelFormat)pixelFormat, width, height,
+          AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL, NULL);
     }
-    
+
     // Create video info
     _videoInfo = [[FFmpegVideoInfo alloc] init];
     _videoInfo.width = width;
     _videoInfo.height = height;
     _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
     _videoInfo.isHardwareAccelerated = _usingHardwareDecoder;
-    _videoInfo.decoderName = _usingHardwareDecoder 
-        ? [NSString stringWithFormat:@"%s_videotoolbox", codec->name]
-        : [NSString stringWithFormat:@"%s", codec->name];
-    _videoInfo.decoderDescription = _usingHardwareDecoder 
-        ? @"Hardware Acceleration (VideoToolbox)" 
-        : @"Software Decoding (CPU)";
+    _videoInfo.decoderName =
+        _usingHardwareDecoder
+            ? [NSString stringWithFormat:@"%s_videotoolbox", codec->name]
+            : [NSString stringWithFormat:@"%s", codec->name];
+    _videoInfo.decoderDescription =
+        _usingHardwareDecoder ? @"Hardware Acceleration (VideoToolbox)"
+                              : @"Software Decoding (CPU)";
     _videoInfo.colorPrimaries = [config[@"colorPrimaries"] intValue];
     _videoInfo.colorTransfer = [config[@"colorTransfer"] intValue];
     _videoInfo.colorSpace = [config[@"colorSpace"] intValue];
@@ -286,17 +324,20 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _videoInfo.doviProfile = [config[@"doviProfile"] intValue];
     _videoInfo.frameRate = [config[@"frameRate"] doubleValue] ?: 30.0;
     _videoInfo.duration = [config[@"duration"] doubleValue];
-    
+
     if (config[@"audioCodecId"]) {
-      const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)[config[@"audioCodecId"] intValue]);
+      const AVCodec *audioCodec = avcodec_find_decoder(
+          (enum AVCodecID)[config[@"audioCodecId"] intValue]);
       if (audioCodec) {
-        _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
+        _videoInfo.audioCodecName =
+            [NSString stringWithUTF8String:audioCodec->name];
       }
       _videoInfo.audioSampleRate = [config[@"audioSampleRate"] intValue];
       _videoInfo.audioChannels = [config[@"audioChannels"] intValue];
     }
-    
-    NSLog(@"[FFmpegDecoder] Initialized  (HW: %@)", _usingHardwareDecoder ? @"YES" : @"NO");
+
+    NSLog(@"[FFmpegDecoder] Initialized  (HW: %@)",
+          _usingHardwareDecoder ? @"YES" : @"NO");
   }
   return self;
 }
@@ -350,6 +391,15 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     if (!pkt)
       return nil;
     FFmpegAudioFrame *result = [self decodeAudioPacket:pkt];
+    av_packet_free(&pkt);
+    return result;
+  }
+
+  if (packetData.isSubtitle && _subtitleCodecContext) {
+    AVPacket *pkt = [self createAVPacketFromData:packetData];
+    if (!pkt)
+      return nil;
+    FFmpegSubtitleFrame *result = [self decodeSubtitlePacket:pkt];
     av_packet_free(&pkt);
     return result;
   }
@@ -433,13 +483,14 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
     int64_t finalPts = _frame->pts;
     if (finalPts == AV_NOPTS_VALUE) {
-        finalPts = _frame->best_effort_timestamp;
+      finalPts = _frame->best_effort_timestamp;
     }
 
     double pts = 0.0;
     if (finalPts != AV_NOPTS_VALUE) {
       if (_videoTimeBaseDen > 0) {
-          pts = (double)finalPts * (double)_videoTimeBaseNum / (double)_videoTimeBaseDen;
+        pts = (double)finalPts * (double)_videoTimeBaseNum /
+              (double)_videoTimeBaseDen;
       }
     }
 
@@ -470,11 +521,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   double pts = 0.0;
-    if (_audioFrame->pts != AV_NOPTS_VALUE) {
-        if (_audioTimeBaseDen > 0) {
-            pts = (double)_audioFrame->pts * (double)_audioTimeBaseNum / (double)_audioTimeBaseDen;
-        }
+  if (_audioFrame->pts != AV_NOPTS_VALUE) {
+    if (_audioTimeBaseDen > 0) {
+      pts = (double)_audioFrame->pts * (double)_audioTimeBaseNum /
+            (double)_audioTimeBaseDen;
     }
+  }
 
   FFmpegAudioFrame *audioFrame = [[FFmpegAudioFrame alloc] init];
   audioFrame.type = FFmpegFrameTypeAudio;
@@ -482,6 +534,97 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   audioFrame.presentationTime = pts;
 
   return audioFrame;
+}
+
+- (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:(AVPacket *)pkt {
+  if (!_subtitleCodecContext)
+    return nil;
+
+  int gotSubtitle = 0;
+  AVSubtitle subtitle;
+  int ret = avcodec_decode_subtitle2(_subtitleCodecContext, &subtitle,
+                                     &gotSubtitle, pkt);
+
+  if (ret < 0 || !gotSubtitle) {
+    return nil;
+  }
+
+  FFmpegSubtitleFrame *frame = [[FFmpegSubtitleFrame alloc] init];
+  frame.type = FFmpegFrameTypeSubtitle;
+  double pts = 0.0;
+  if (subtitle.pts != AV_NOPTS_VALUE) {
+    pts = (double)subtitle.pts / AV_TIME_BASE;
+  } else if (pkt->pts != AV_NOPTS_VALUE && _subtitleTimeBaseDen > 0) {
+    pts = (double)pkt->pts * (double)_subtitleTimeBaseNum /
+          (double)_subtitleTimeBaseDen;
+  }
+
+  double startTime = pts + (double)subtitle.start_display_time / 1000.0;
+  double endTime = pts + (double)subtitle.end_display_time / 1000.0;
+
+  // If end time is invalid (<= start time), try to deduce from packet or
+  // default
+  if (subtitle.end_display_time <= subtitle.start_display_time) {
+    if (pkt->duration > 0 && _subtitleTimeBaseDen > 0) {
+      double pktDuration = (double)pkt->duration *
+                           (double)_subtitleTimeBaseNum /
+                           (double)_subtitleTimeBaseDen;
+      endTime = startTime + pktDuration;
+    } else {
+      // Fallback to a default duration (e.g. 3.0 seconds) to ensure visibility
+      // or use -1 to indicate "until next" depending on player logic.
+      // Given the flash issue, a reasonable default is safe.
+      endTime = startTime + 3.0;
+    }
+  }
+
+  frame.startTime = startTime;
+  frame.endTime = endTime;
+
+  if (subtitle.num_rects > 0) {
+    // We only handle the first rect for now for simplicity, or merge text.
+    // Usually text subtitles have one rect.
+    NSMutableString *fullText = [NSMutableString string];
+    for (unsigned int i = 0; i < subtitle.num_rects; i++) {
+      AVSubtitleRect *rect = subtitle.rects[i];
+
+      if (rect->type == SUBTITLE_TEXT) {
+        if (rect->text) {
+          [fullText appendFormat:@"%s", rect->text];
+        }
+      } else if (rect->type == SUBTITLE_ASS) {
+        if (rect->ass) {
+          [fullText appendFormat:@"%s", rect->ass];
+          frame.isASS = YES;
+        }
+      } else if (rect->type == SUBTITLE_BITMAP) {
+        // Bitmap support
+        // We'll store the first bitmap we find
+        if (frame.bitmapData == nil) {
+          // Extract bitmap data.
+          // rect->pict is an AVPicture (deprecated) or AVFrame-like structure
+          // in newer ffmpeg Usually linesize[0] * h is size? But for paletted
+          // it is linesize[0] * h.
+
+          // Let's defer full bitmap support or do a simple copy.
+          // Assuming 8-bit paletted or RGBA.
+          // But without swscale it's hard to guarantee format.
+          // For now, let's skip bitmap to allow "Extendable to bitmap"
+          // requirement but finish text first. Or provide a placeholder.
+          // frame.bitmapData = ...
+          frame.bitmapWidth = rect->w;
+          frame.bitmapHeight = rect->h;
+        }
+      }
+    }
+
+    if (fullText.length > 0) {
+      frame.text = fullText;
+    }
+  }
+
+  avsubtitle_free(&subtitle);
+  return frame;
 }
 
 #pragma mark - Decoder Flushing & Draining
@@ -493,7 +636,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Send NULL packet to signal end of stream
   // This tells the decoder to output all remaining buffered frames
   avcodec_send_packet(_codecContext, NULL);
-
 }
 
 - (nullable FFmpegVideoFrame *)drainVideoFrame {
@@ -517,9 +659,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   double pts = 0.0;
   if (_frame->pts != AV_NOPTS_VALUE) {
-      if (_videoTimeBaseDen > 0) {
-          pts = (double)_frame->pts * (double)_videoTimeBaseNum / (double)_videoTimeBaseDen;
-      }
+    if (_videoTimeBaseDen > 0) {
+      pts = (double)_frame->pts * (double)_videoTimeBaseNum /
+            (double)_videoTimeBaseDen;
+    }
   }
 
   return [self createVideoFrameFromDecodedFrame:pts];
@@ -532,6 +675,48 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (_audioCodecContext) {
     avcodec_flush_buffers(_audioCodecContext);
   }
+  if (_subtitleCodecContext) {
+    avcodec_flush_buffers(_subtitleCodecContext);
+  }
+}
+
+- (BOOL)switchSubtitleStream:(NSDictionary<NSString *, id> *)config {
+  if (!config[@"subtitleCodecId"])
+    return NO;
+
+  if (_subtitleCodecContext) {
+    avcodec_free_context(&_subtitleCodecContext);
+    _subtitleCodecContext = NULL;
+  }
+
+  int codecId = [config[@"subtitleCodecId"] intValue];
+  const AVCodec *codec = avcodec_find_decoder((enum AVCodecID)codecId);
+  if (!codec)
+    return NO;
+
+  _subtitleCodecContext = avcodec_alloc_context3(codec);
+  if (!_subtitleCodecContext)
+    return NO;
+
+  _subtitleTimeBaseNum = [config[@"subtitleTimeBaseNum"] intValue];
+  _subtitleTimeBaseDen = [config[@"subtitleTimeBaseDen"] intValue];
+
+  if (config[@"subtitleExtradata"]) {
+    NSData *extra = config[@"subtitleExtradata"];
+    _subtitleCodecContext->extradata =
+        (uint8_t *)av_malloc(extra.length + AV_INPUT_BUFFER_PADDING_SIZE);
+    memcpy(_subtitleCodecContext->extradata, extra.bytes, extra.length);
+    _subtitleCodecContext->extradata_size = (int)extra.length;
+  }
+
+  if (avcodec_open2(_subtitleCodecContext, codec, NULL) < 0) {
+    avcodec_free_context(&_subtitleCodecContext);
+    _subtitleCodecContext = NULL;
+    return NO;
+  }
+
+  _subtitleStreamIndex = [config[@"subtitleStreamIndex"] intValue];
+  return YES;
 }
 
 - (BOOL)switchAudioStream:(NSDictionary<NSString *, id> *)config {
@@ -539,50 +724,55 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (!config[@"audioCodecId"]) {
     return NO;
   }
-  
+
   // Clean up old audio context and resampler
   if (_audioCodecContext) {
     avcodec_free_context(&_audioCodecContext);
     _audioCodecContext = NULL;
   }
-  
+
   if (_swrContext) {
     swr_free(&_swrContext);
     _swrContext = NULL;
   }
-  
+
   // Reset audio time base
   _audioTimeBaseNum = [config[@"audioTimeBaseNum"] intValue];
   _audioTimeBaseDen = [config[@"audioTimeBaseDen"] intValue];
-  
+
   // Initialize new audio codec
   int audioCodecId = [config[@"audioCodecId"] intValue];
-  const AVCodec *audioCodec = avcodec_find_decoder((enum AVCodecID)audioCodecId);
+  const AVCodec *audioCodec =
+      avcodec_find_decoder((enum AVCodecID)audioCodecId);
   if (!audioCodec) {
-    NSLog(@"[FFmpegDecoder] Failed to find audio codec for id %d", audioCodecId);
+    NSLog(@"[FFmpegDecoder] Failed to find audio codec for id %d",
+          audioCodecId);
     return NO;
   }
-  
+
   _audioCodecContext = avcodec_alloc_context3(audioCodec);
   if (!_audioCodecContext) {
     NSLog(@"[FFmpegDecoder] Failed to allocate audio codec context");
     return NO;
   }
-  
+
   // Set audio parameters
   _audioCodecContext->sample_rate = [config[@"audioSampleRate"] intValue];
-  av_channel_layout_default(&_audioCodecContext->ch_layout, [config[@"audioChannels"] intValue]);
-  
+  av_channel_layout_default(&_audioCodecContext->ch_layout,
+                            [config[@"audioChannels"] intValue]);
+
   // Set extradata if present
   NSData *audioExtradata = config[@"audioExtradata"];
   if (audioExtradata && audioExtradata.length > 0) {
-    _audioCodecContext->extradata = (uint8_t *)av_malloc(audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+    _audioCodecContext->extradata = (uint8_t *)av_malloc(
+        audioExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
     if (_audioCodecContext->extradata) {
-      memcpy(_audioCodecContext->extradata, audioExtradata.bytes, audioExtradata.length);
+      memcpy(_audioCodecContext->extradata, audioExtradata.bytes,
+             audioExtradata.length);
       _audioCodecContext->extradata_size = (int)audioExtradata.length;
     }
   }
-  
+
   // Open the codec
   if (avcodec_open2(_audioCodecContext, audioCodec, NULL) < 0) {
     NSLog(@"[FFmpegDecoder] Failed to open audio codec");
@@ -590,20 +780,22 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _audioCodecContext = NULL;
     return NO;
   }
-  
+
   _audioStreamIndex = [config[@"audioStreamIndex"] intValue];
   if (_audioStreamIndex == 0 && config[@"audioStreamIndex"] == nil) {
     _audioStreamIndex = 1; // Fallback
   }
-  
+
   // Update videoInfo with new audio details
   _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
   _videoInfo.audioSampleRate = _audioCodecContext->sample_rate;
   _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
-  
-  NSLog(@"[FFmpegDecoder] Switched to audio stream with codec: %s, sampleRate: %d, channels: %d",
-        audioCodec->name, _audioCodecContext->sample_rate, _audioCodecContext->ch_layout.nb_channels);
-  
+
+  NSLog(@"[FFmpegDecoder] Switched to audio stream with codec: %s, sampleRate: "
+        @"%d, channels: %d",
+        audioCodec->name, _audioCodecContext->sample_rate,
+        _audioCodecContext->ch_layout.nb_channels);
+
   return YES;
 }
 
@@ -683,7 +875,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return pixelBuffer;
   }
 
-
   return NULL;
 }
 
@@ -703,11 +894,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   } else {
     pixelBuffer = [self convertFrameToPixelBuffer:_frame];
   }
-  
+
   if (!pixelBuffer) {
     return nil;
   }
-  
+
   FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
   videoFrame.type = FFmpegFrameTypeVideo;
   videoFrame.pixelBuffer = pixelBuffer;
@@ -769,6 +960,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (_audioCodecContext) {
     avcodec_free_context(&_audioCodecContext);
     _audioCodecContext = NULL;
+  }
+
+  if (_subtitleCodecContext) {
+    avcodec_free_context(&_subtitleCodecContext);
+    _subtitleCodecContext = NULL;
   }
 
   if (_hwDeviceCtx) {

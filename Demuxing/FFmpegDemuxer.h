@@ -6,10 +6,10 @@
 //  Separated from FFmpegDecoder to enable clean decoder architecture.
 //
 
-#import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
-#import <AVFoundation/AVFoundation.h>
+#import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -53,6 +53,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) BOOL isDefault;
 @end
 
+/// Subtitle track metadata for multi-track files.
+@interface FFmpegSubtitleTrackInfo : NSObject
+@property(nonatomic, assign) int streamIndex;
+@property(nonatomic, copy, nullable) NSString *language;
+@property(nonatomic, copy, nullable) NSString *title;
+@property(nonatomic, copy) NSString *codecName;
+@property(nonatomic, assign) BOOL isDefault;
+@property(nonatomic, assign) BOOL isBitmap;
+@end
+
 /// Packet data for decoder consumption.
 @interface FFmpegDemuxerPacket : NSObject
 @property(nonatomic, strong) NSData *data;
@@ -62,6 +72,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int64_t duration;
 @property(nonatomic, assign) BOOL isVideo;
 @property(nonatomic, assign) BOOL isAudio;
+@property(nonatomic, assign) BOOL isSubtitle;
 @property(nonatomic, assign) BOOL isKeyframe;
 @property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
 
@@ -109,8 +120,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// Keys: audioCodecId, audioSampleRate, audioChannels, audioTimeBaseNum,
 ///       audioTimeBaseDen, audioExtradata, audioStreamIndex
 /// @param streamIndex The audio stream index to get configuration for.
-/// @return Dictionary with audio codec config, or nil if invalid/not an audio stream.
-- (nullable NSDictionary<NSString *, id> *)getAudioDecoderConfigForStream:(int)streamIndex;
+/// @return Dictionary with audio codec config, or nil if invalid/not an audio
+/// stream.
+- (nullable NSDictionary<NSString *, id> *)getAudioDecoderConfigForStream:
+    (int)streamIndex;
+
+/// Get subtitle decoder configuration for a specific subtitle stream.
+/// Used for FFmpegDecoder.switchSubtitleStream.
+/// Keys: subtitleCodecId, subtitleTimeBaseNum, subtitleTimeBaseDen,
+/// subtitleExtradata, subtitleStreamIndex
+/// @param streamIndex The subtitle stream index.
+/// @return Dictionary with subtitle codec config.
+- (nullable NSDictionary<NSString *, id> *)getSubtitleDecoderConfigForStream:
+    (int)streamIndex;
 
 /// Whether the video stream uses supported hardware codec (HEVC/H264).
 @property(nonatomic, readonly) BOOL supportsHardwareDecode;
@@ -151,7 +173,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Also queues relevant audio packets.
 /// @param targetPTS Target presentation time in seconds.
 /// @return Array of video packets to decode, or nil on error.
-- (nullable NSArray<FFmpegDemuxerPacket *> *)collectPacketsUntil:(double)targetPTS;
+- (nullable NSArray<FFmpegDemuxerPacket *> *)collectPacketsUntil:
+    (double)targetPTS;
 
 /// Collect video packets for inaccurate seek (keyframe only).
 /// @return Array containing just the keyframe packet(s).
@@ -176,9 +199,20 @@ NS_ASSUME_NONNULL_BEGIN
 /// @return The selected stream index, or -1 if no audio.
 - (int)selectedAudioStreamIndex;
 
+/// Get all available subtitle tracks.
+- (nullable NSArray<FFmpegSubtitleTrackInfo *> *)getSubtitleTracks;
+
+/// Select a subtitle stream by its stream index.
+/// @param streamIndex The stream index to select, or -1 to disable subtitles.
+/// @return YES if successful.
+- (BOOL)selectSubtitleStream:(int)streamIndex;
+
+/// Get the currently selected subtitle stream index.
+/// @return The selected stream index, or -1 if none.
+- (int)selectedSubtitleStreamIndex;
+
 /// Release all demuxer resources.
 - (void)close;
-
 
 /// Whether extradata was manually synthesized due to missing headers.
 @property(nonatomic, readonly) BOOL didSynthesizeExtradata;
