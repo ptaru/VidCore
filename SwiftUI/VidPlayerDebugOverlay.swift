@@ -233,7 +233,7 @@ struct VidPlayerDebugOverlay: View {
                       .foregroundColor(isSelected ? .green : .white)
                       .fontWeight(isSelected ? .bold : .regular)
                     if track.isDefault {
-                      Text("Forced")
+                      Text("Default")
                         .font(.system(size: 9))
                         .foregroundColor(.yellow)
                         .padding(.horizontal, 4)
