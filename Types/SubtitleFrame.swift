@@ -12,12 +12,27 @@ import Foundation
 public enum SubtitleContent: Sendable {
   /// Plain text or marked up text (e.g. ASS/SSA, SRT).
   case text(String)
-  /// Bitmap image for image-based subtitles (e.g. PGS, VobSub).
-  /// - data: Raw RGBA pixel data.
-  /// - width: Raw (pixel) width of the bitmap.
-  /// - height: Raw (pixel) height of the bitmap.
-  /// - rect: Normalized frame (x, y, width, height) relative to video size (0.0-1.0).
-  case bitmap(data: Data, width: Int, height: Int, rect: CGRect)
+  /// Bitmap images for image-based subtitles (e.g. PGS, VobSub).
+  case bitmaps([SubtitleBitmap])
+}
+
+/// A single bitmap element in a subtitle frame.
+public struct SubtitleBitmap: Sendable {
+  /// Raw RGBA pixel data.
+  public let data: Data
+  /// Raw (pixel) width of the bitmap.
+  public let width: Int
+  /// Raw (pixel) height of the bitmap.
+  public let height: Int
+  /// Normalized frame (x, y, width, height) relative to video size (0.0-1.0).
+  public let rect: CGRect
+
+  public init(data: Data, width: Int, height: Int, rect: CGRect) {
+    self.data = data
+    self.width = width
+    self.height = height
+    self.rect = rect
+  }
 }
 
 /// A decoded subtitle frame with timing and content.

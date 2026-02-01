@@ -25,7 +25,8 @@ public struct SubtitleView: View {
           } else {
             VStack {
               Spacer()
-              Text(text)
+              // Use SubtitleParser to render styled text
+              Text(SubtitleParser.parse(text, isASS: false))  // isASS info lost in Frame, defaults to false/markdown check
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .foregroundColor(.white)
                 .padding(.horizontal, 12)
@@ -40,30 +41,34 @@ public struct SubtitleView: View {
             }
           }
 
-        case .bitmap(let data, let width, let height, let rect):
+        case .bitmaps(let bitmaps):
           GeometryReader { geometry in
-            // Create image using RAW pixel dimensions
-            if let cgImage = createCGImage(from: data, width: width, height: height) {
+            ForEach(0..<bitmaps.count, id: \.self) { index in
+              let bitmap = bitmaps[index]
+              if let cgImage = createCGImage(
+                from: bitmap.data, width: bitmap.width, height: bitmap.height)
+              {
 
-              // dimensions in points based on normalized rect and view size
-              let viewWidth = geometry.size.width
-              let viewHeight = geometry.size.height
+                // dimensions in points based on normalized rect and view size
+                let viewWidth = geometry.size.width
+                let viewHeight = geometry.size.height
 
-              let frameWidth = rect.width * viewWidth
-              let frameHeight = rect.height * viewHeight
-              let frameX = rect.minX * viewWidth
-              let frameY = rect.minY * viewHeight
+                let frameWidth = bitmap.rect.width * viewWidth
+                let frameHeight = bitmap.rect.height * viewHeight
+                let frameX = bitmap.rect.minX * viewWidth
+                let frameY = bitmap.rect.minY * viewHeight
 
-              Image(decorative: cgImage, scale: 1.0)
-                .resizable()
-                .interpolation(.medium)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: frameWidth, height: frameHeight)
-                // Position is center-based in SwiftUI, so we need to offset from top-left (frameX, frameY)
-                .position(
-                  x: frameX + frameWidth / 2,
-                  y: frameY + frameHeight / 2
-                )
+                Image(decorative: cgImage, scale: 1.0)
+                  .resizable()
+                  .interpolation(.medium)
+                  .aspectRatio(contentMode: .fit)
+                  .frame(width: frameWidth, height: frameHeight)
+                  // Position is center-based in SwiftUI
+                  .position(
+                    x: frameX + frameWidth / 2,
+                    y: frameY + frameHeight / 2
+                  )
+              }
             }
           }
         }

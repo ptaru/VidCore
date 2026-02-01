@@ -94,6 +94,17 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, strong) AVAudioPCMBuffer *pcmBuffer;
 @end
 
+/// A single bitmap element in a subtitle frame.
+@interface FFmpegSubtitleBitmap : NSObject
+@property(nonatomic, strong) NSData *data;
+@property(nonatomic, assign) int width;
+@property(nonatomic, assign) int height;
+@property(nonatomic, assign) double normalizedX;
+@property(nonatomic, assign) double normalizedY;
+@property(nonatomic, assign) double normalizedWidth;
+@property(nonatomic, assign) double normalizedHeight;
+@end
+
 /// A decoded subtitle frame.
 @interface FFmpegSubtitleFrame : FFmpegFrame
 /// Start time of the subtitle.
@@ -102,7 +113,7 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) double endTime;
 /// Text content (if text-based).
 @property(nonatomic, copy, nullable) NSString *text;
-/// Bitmap content data (if bitmap-based).
+/// Bitmap content (if single bitmap-based) - Deprecated, use bitmaps array.
 @property(nonatomic, strong, nullable) NSData *bitmapData;
 @property(nonatomic, assign) int bitmapWidth;
 @property(nonatomic, assign) int bitmapHeight;
@@ -110,6 +121,10 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) double normalizedY;
 @property(nonatomic, assign) double normalizedWidth;
 @property(nonatomic, assign) double normalizedHeight;
+
+/// Array of FFmpegSubtitleBitmap objects.
+@property(nonatomic, copy, nullable) NSArray<FFmpegSubtitleBitmap *> *bitmaps;
+
 /// Whether the text is in ASS/SSA format.
 @property(nonatomic, assign) BOOL isASS;
 @end

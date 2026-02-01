@@ -408,21 +408,41 @@ public final class VideoDecoder: @unchecked Sendable {
               }
               subtitleContent = .text(cleanText)
               subtitleContent = .text(cleanText)
+            } else if let bitmaps = subtitleFrameObj.bitmaps, !bitmaps.isEmpty {
+              var swiftBitmaps: [SubtitleBitmap] = []
+              for bitmapObj in bitmaps {
+                let rect = CGRect(
+                  x: bitmapObj.normalizedX,
+                  y: bitmapObj.normalizedY,
+                  width: bitmapObj.normalizedWidth,
+                  height: bitmapObj.normalizedHeight
+                )
+                let swiftBitmap = SubtitleBitmap(
+                  data: bitmapObj.data,
+                  width: Int(bitmapObj.width),
+                  height: Int(bitmapObj.height),
+                  rect: rect
+                )
+                swiftBitmaps.append(swiftBitmap)
+              }
+              subtitleContent = .bitmaps(swiftBitmaps)
             } else if let bitmapData = subtitleFrameObj.bitmapData,
               subtitleFrameObj.bitmapWidth > 0, subtitleFrameObj.bitmapHeight > 0
             {
+              // Legacy fallback
               let rect = CGRect(
                 x: subtitleFrameObj.normalizedX,
                 y: subtitleFrameObj.normalizedY,
                 width: subtitleFrameObj.normalizedWidth,
                 height: subtitleFrameObj.normalizedHeight
               )
-              subtitleContent = .bitmap(
+              let swiftBitmap = SubtitleBitmap(
                 data: bitmapData,
                 width: Int(subtitleFrameObj.bitmapWidth),
                 height: Int(subtitleFrameObj.bitmapHeight),
                 rect: rect
               )
+              subtitleContent = .bitmaps([swiftBitmap])
             }
 
             let frame = SubtitleFrame(

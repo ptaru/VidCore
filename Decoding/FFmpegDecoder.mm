@@ -47,6 +47,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @implementation FFmpegAudioFrame
 @end
 
+@implementation FFmpegSubtitleBitmap
+@end
+
 @implementation FFmpegSubtitleFrame
 @end
 
@@ -615,9 +618,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   frame.endTime = endTime;
 
   if (subtitle.num_rects > 0) {
-    // We only handle the first rect for now for simplicity, or merge text.
-    // Usually text subtitles have one rect.
+    // We handle all rects. Text is merged, bitmaps are collected.
     NSMutableString *fullText = [NSMutableString string];
+    NSMutableArray *bitmaps = [NSMutableArray array];
+
     for (unsigned int i = 0; i < subtitle.num_rects; i++) {
       AVSubtitleRect *rect = subtitle.rects[i];
 
@@ -632,101 +636,104 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         }
       } else if (rect->type == SUBTITLE_BITMAP) {
         // Bitmap support
-        // We'll store the first bitmap we find
-        if (frame.bitmapData == nil) {
-          int w = rect->w;
-          int h = rect->h;
+        int w = rect->w;
+        int h = rect->h;
 
-          if (w > 0 && h > 0) {
-            // Allocate RGBA buffer (4 bytes per pixel)
-            size_t dataSize = w * h * 4;
-            uint8_t *rgbaData = (uint8_t *)malloc(dataSize);
+        if (w > 0 && h > 0) {
+          // Allocate RGBA buffer (4 bytes per pixel)
+          size_t dataSize = w * h * 4;
+          uint8_t *rgbaData = (uint8_t *)malloc(dataSize);
+
+          if (rgbaData) {
+            uint8_t *srcData = rect->data[0];
+            int srcLinesize = rect->linesize[0];
+            uint32_t *palette =
+                (uint32_t *)rect->data[1]; // AVPacket usually provides
+                                           // palette in data[1] for bitmaps
+
+            if (rect->nb_colors > 0 && palette) {
+              // Paletted image (e.g. DVD/VobSub or PGS)
+              for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                  uint8_t colorIndex = srcData[y * srcLinesize + x];
+                  // palette is likely BGRA or RGBA depending on platform,
+                  // FFmpeg usually outputs in native endian or specific
+                  // format FFmpeg palette is usually 0xAABBGGRR (little
+                  // endian) -> R, G, B, A in byte order? Actually FFmpeg
+                  // palettes are typically 32-bit AABBGGRR. Let's copy it
+                  // directly for now and fix color components if needed
+                  // during rendering or testing. AVPalette is uint32_t.
+
+                  uint32_t color = palette[colorIndex];
+                  // Write to output buffer
+                  uint32_t *dstPixel = (uint32_t *)(rgbaData + (y * w + x) * 4);
+                  *dstPixel = color;
+                }
+              }
+            } else {
+              // Non-paletted (presumably already RGBA or similar, though rare
+              // for basic rects without swscale) If it's not paletted, we
+              // might need more complex handling, but PGS/VobSub are usually
+              // paletted. For safety, if no palette, we just zero it out or
+              // copy if format known. Assuming it *might* be raw RGB if
+              // encoded that way? Let's log warning and fill transparent.
+              NSLog(@"[FFmpegDecoder] Warning: Bitmap subtitle without "
+                    @"palette (nb_colors=%d). Skipping.",
+                    rect->nb_colors);
+              free(rgbaData);
+              rgbaData = NULL;
+            }
 
             if (rgbaData) {
-              uint8_t *srcData = rect->data[0];
-              int srcLinesize = rect->linesize[0];
-              uint32_t *palette =
-                  (uint32_t *)rect->data[1]; // AVPacket usually provides
-                                             // palette in data[1] for bitmaps
-
-              if (rect->nb_colors > 0 && palette) {
-                // Paletted image (e.g. DVD/VobSub or PGS)
-                for (int y = 0; y < h; y++) {
-                  for (int x = 0; x < w; x++) {
-                    uint8_t colorIndex = srcData[y * srcLinesize + x];
-                    // palette is likely BGRA or RGBA depending on platform,
-                    // FFmpeg usually outputs in native endian or specific
-                    // format FFmpeg palette is usually 0xAABBGGRR (little
-                    // endian) -> R, G, B, A in byte order? Actually FFmpeg
-                    // palettes are typically 32-bit AABBGGRR. Let's copy it
-                    // directly for now and fix color components if needed
-                    // during rendering or testing. AVPalette is uint32_t.
-
-                    uint32_t color = palette[colorIndex];
-                    // Write to output buffer
-                    uint32_t *dstPixel =
-                        (uint32_t *)(rgbaData + (y * w + x) * 4);
-                    *dstPixel = color;
-                  }
-                }
-              } else {
-                // Non-paletted (presumably already RGBA or similar, though rare
-                // for basic rects without swscale) If it's not paletted, we
-                // might need more complex handling, but PGS/VobSub are usually
-                // paletted. For safety, if no palette, we just zero it out or
-                // copy if format known. Assuming it *might* be raw RGB if
-                // encoded that way? Let's log warning and fill transparent.
-                NSLog(@"[FFmpegDecoder] Warning: Bitmap subtitle without "
-                      @"palette (nb_colors=%d). Skipping.",
-                      rect->nb_colors);
-                free(rgbaData);
-                rgbaData = NULL;
-              }
-
-              if (rgbaData) {
-                frame.bitmapData = [NSData dataWithBytesNoCopy:rgbaData
+              NSData *bitmapData = [NSData dataWithBytesNoCopy:rgbaData
                                                         length:dataSize
                                                   freeWhenDone:YES];
 
-                // Raw pixel dimensions for image creation
-                frame.bitmapWidth = w;
-                frame.bitmapHeight = h;
+              // Raw pixel dimensions for image creation
+              // Normalize coordinates
+              // Prefer subtitle codec dimensions (canvas size) if available
+              double refWidth = 0;
+              double refHeight = 0;
 
-                // Normalize coordinates
-                // Prefer subtitle codec dimensions (canvas size) if available
-                double refWidth = 0;
-                double refHeight = 0;
-
-                if (_subtitleCodecContext && _subtitleCodecContext->width > 0 &&
-                    _subtitleCodecContext->height > 0) {
-                  refWidth = (double)_subtitleCodecContext->width;
-                  refHeight = (double)_subtitleCodecContext->height;
-                } else if (_codecContext && _codecContext->width > 0 &&
-                           _codecContext->height > 0) {
-                  // Fallback to video dimensions
-                  refWidth = (double)_codecContext->width;
-                  refHeight = (double)_codecContext->height;
-                }
-
-                if (refWidth > 0 && refHeight > 0) {
-                  frame.normalizedX = (double)rect->x / refWidth;
-                  frame.normalizedY = (double)rect->y / refHeight;
-                  frame.normalizedWidth = (double)w / refWidth;
-                  frame.normalizedHeight = (double)h / refHeight;
-                } else {
-                  frame.normalizedX = 0;
-                  frame.normalizedY = 0;
-                  frame.normalizedWidth = 0;
-                  frame.normalizedHeight = 0;
-                }
+              if (_subtitleCodecContext && _subtitleCodecContext->width > 0 &&
+                  _subtitleCodecContext->height > 0) {
+                refWidth = (double)_subtitleCodecContext->width;
+                refHeight = (double)_subtitleCodecContext->height;
+              } else if (_codecContext && _codecContext->width > 0 &&
+                         _codecContext->height > 0) {
+                // Fallback to video dimensions
+                refWidth = (double)_codecContext->width;
+                refHeight = (double)_codecContext->height;
               }
+
+              double normX = 0, normY = 0, normW = 0, normH = 0;
+              if (refWidth > 0 && refHeight > 0) {
+                normX = (double)rect->x / refWidth;
+                normY = (double)rect->y / refHeight;
+                normW = (double)w / refWidth;
+                normH = (double)h / refHeight;
+              }
+
+              FFmpegSubtitleBitmap *bitmap =
+                  [[FFmpegSubtitleBitmap alloc] init];
+              bitmap.data = bitmapData;
+              bitmap.width = w;
+              bitmap.height = h;
+              bitmap.normalizedX = normX;
+              bitmap.normalizedY = normY;
+              bitmap.normalizedWidth = normW;
+              bitmap.normalizedHeight = normH;
+
+              [bitmaps addObject:bitmap];
             }
           }
         }
       }
     }
 
-    if (fullText.length > 0) {
+    if (bitmaps.count > 0) {
+      frame.bitmaps = bitmaps;
+    } else if (fullText.length > 0) {
       frame.text = fullText;
     }
   }
