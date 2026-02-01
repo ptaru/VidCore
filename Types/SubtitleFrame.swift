@@ -13,9 +13,11 @@ public enum SubtitleContent: Sendable {
   /// Plain text or marked up text (e.g. ASS/SSA, SRT).
   case text(String)
   /// Bitmap image for image-based subtitles (e.g. PGS, VobSub).
-  /// Contained as Data (usually PNG or raw bitmap) with dimensions.
-  /// This is a placeholder for future bitmap support.
-  case bitmap(Data, width: Int, height: Int)
+  /// - data: Raw RGBA pixel data.
+  /// - width: Raw (pixel) width of the bitmap.
+  /// - height: Raw (pixel) height of the bitmap.
+  /// - rect: Normalized frame (x, y, width, height) relative to video size (0.0-1.0).
+  case bitmap(data: Data, width: Int, height: Int, rect: CGRect)
 }
 
 /// A decoded subtitle frame with timing and content.

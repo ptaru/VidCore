@@ -276,6 +276,39 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       }
     }
 
+    // Setup default subtitle codec if present
+    if (config[@"subtitleCodecId"]) {
+      int subtitleCodecId = [config[@"subtitleCodecId"] intValue];
+      const AVCodec *subtitleCodec =
+          avcodec_find_decoder((enum AVCodecID)subtitleCodecId);
+      if (subtitleCodec) {
+        _subtitleCodecContext = avcodec_alloc_context3(subtitleCodec);
+        if (_subtitleCodecContext) {
+          _subtitleTimeBaseNum = [config[@"subtitleTimeBaseNum"] intValue];
+          _subtitleTimeBaseDen = [config[@"subtitleTimeBaseDen"] intValue];
+          _subtitleStreamIndex = [config[@"subtitleStreamIndex"] intValue];
+
+          NSData *subtitleExtradata = config[@"subtitleExtradata"];
+          if (subtitleExtradata && subtitleExtradata.length > 0) {
+            _subtitleCodecContext->extradata = (uint8_t *)av_malloc(
+                subtitleExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (_subtitleCodecContext->extradata) {
+              memcpy(_subtitleCodecContext->extradata, subtitleExtradata.bytes,
+                     subtitleExtradata.length);
+              _subtitleCodecContext->extradata_size =
+                  (int)subtitleExtradata.length;
+            }
+          }
+
+          if (avcodec_open2(_subtitleCodecContext, subtitleCodec, NULL) < 0) {
+            avcodec_free_context(&_subtitleCodecContext);
+            _subtitleCodecContext = NULL;
+            _subtitleStreamIndex = -1;
+          }
+        }
+      }
+    }
+
     // Allocate frames
     _frame = av_frame_alloc();
     _swFrame = av_frame_alloc();
@@ -601,19 +634,94 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         // Bitmap support
         // We'll store the first bitmap we find
         if (frame.bitmapData == nil) {
-          // Extract bitmap data.
-          // rect->pict is an AVPicture (deprecated) or AVFrame-like structure
-          // in newer ffmpeg Usually linesize[0] * h is size? But for paletted
-          // it is linesize[0] * h.
+          int w = rect->w;
+          int h = rect->h;
 
-          // Let's defer full bitmap support or do a simple copy.
-          // Assuming 8-bit paletted or RGBA.
-          // But without swscale it's hard to guarantee format.
-          // For now, let's skip bitmap to allow "Extendable to bitmap"
-          // requirement but finish text first. Or provide a placeholder.
-          // frame.bitmapData = ...
-          frame.bitmapWidth = rect->w;
-          frame.bitmapHeight = rect->h;
+          if (w > 0 && h > 0) {
+            // Allocate RGBA buffer (4 bytes per pixel)
+            size_t dataSize = w * h * 4;
+            uint8_t *rgbaData = (uint8_t *)malloc(dataSize);
+
+            if (rgbaData) {
+              uint8_t *srcData = rect->data[0];
+              int srcLinesize = rect->linesize[0];
+              uint32_t *palette =
+                  (uint32_t *)rect->data[1]; // AVPacket usually provides
+                                             // palette in data[1] for bitmaps
+
+              if (rect->nb_colors > 0 && palette) {
+                // Paletted image (e.g. DVD/VobSub or PGS)
+                for (int y = 0; y < h; y++) {
+                  for (int x = 0; x < w; x++) {
+                    uint8_t colorIndex = srcData[y * srcLinesize + x];
+                    // palette is likely BGRA or RGBA depending on platform,
+                    // FFmpeg usually outputs in native endian or specific
+                    // format FFmpeg palette is usually 0xAABBGGRR (little
+                    // endian) -> R, G, B, A in byte order? Actually FFmpeg
+                    // palettes are typically 32-bit AABBGGRR. Let's copy it
+                    // directly for now and fix color components if needed
+                    // during rendering or testing. AVPalette is uint32_t.
+
+                    uint32_t color = palette[colorIndex];
+                    // Write to output buffer
+                    uint32_t *dstPixel =
+                        (uint32_t *)(rgbaData + (y * w + x) * 4);
+                    *dstPixel = color;
+                  }
+                }
+              } else {
+                // Non-paletted (presumably already RGBA or similar, though rare
+                // for basic rects without swscale) If it's not paletted, we
+                // might need more complex handling, but PGS/VobSub are usually
+                // paletted. For safety, if no palette, we just zero it out or
+                // copy if format known. Assuming it *might* be raw RGB if
+                // encoded that way? Let's log warning and fill transparent.
+                NSLog(@"[FFmpegDecoder] Warning: Bitmap subtitle without "
+                      @"palette (nb_colors=%d). Skipping.",
+                      rect->nb_colors);
+                free(rgbaData);
+                rgbaData = NULL;
+              }
+
+              if (rgbaData) {
+                frame.bitmapData = [NSData dataWithBytesNoCopy:rgbaData
+                                                        length:dataSize
+                                                  freeWhenDone:YES];
+
+                // Raw pixel dimensions for image creation
+                frame.bitmapWidth = w;
+                frame.bitmapHeight = h;
+
+                // Normalize coordinates
+                // Prefer subtitle codec dimensions (canvas size) if available
+                double refWidth = 0;
+                double refHeight = 0;
+
+                if (_subtitleCodecContext && _subtitleCodecContext->width > 0 &&
+                    _subtitleCodecContext->height > 0) {
+                  refWidth = (double)_subtitleCodecContext->width;
+                  refHeight = (double)_subtitleCodecContext->height;
+                } else if (_codecContext && _codecContext->width > 0 &&
+                           _codecContext->height > 0) {
+                  // Fallback to video dimensions
+                  refWidth = (double)_codecContext->width;
+                  refHeight = (double)_codecContext->height;
+                }
+
+                if (refWidth > 0 && refHeight > 0) {
+                  frame.normalizedX = (double)rect->x / refWidth;
+                  frame.normalizedY = (double)rect->y / refHeight;
+                  frame.normalizedWidth = (double)w / refWidth;
+                  frame.normalizedHeight = (double)h / refHeight;
+                } else {
+                  frame.normalizedX = 0;
+                  frame.normalizedY = 0;
+                  frame.normalizedWidth = 0;
+                  frame.normalizedHeight = 0;
+                }
+              }
+            }
+          }
         }
       }
     }

@@ -160,11 +160,12 @@ public struct VidPlayer<Overlay: View>: View {
       // System Rendering Indicator
 
       // Subtitles
-      VStack {
-        Spacer()
+      if let videoInfo = activePlayer.videoInfo {
+        SubtitleView(subtitle: activePlayer.currentSubtitle)
+          .aspectRatio(CGSize(width: videoInfo.width, height: videoInfo.height), contentMode: .fit)
+      } else {
         SubtitleView(subtitle: activePlayer.currentSubtitle)
       }
-      .padding()
       // User overlay
       overlay
     }

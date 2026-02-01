@@ -106,6 +106,10 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, strong, nullable) NSData *bitmapData;
 @property(nonatomic, assign) int bitmapWidth;
 @property(nonatomic, assign) int bitmapHeight;
+@property(nonatomic, assign) double normalizedX;
+@property(nonatomic, assign) double normalizedY;
+@property(nonatomic, assign) double normalizedWidth;
+@property(nonatomic, assign) double normalizedHeight;
 /// Whether the text is in ASS/SSA format.
 @property(nonatomic, assign) BOOL isASS;
 @end

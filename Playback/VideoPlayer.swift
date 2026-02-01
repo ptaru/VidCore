@@ -476,8 +476,8 @@ public class VideoPlayer {
 
   private func updateSubtitles(for time: Double) {
     // Find the subtitle that matches current time
-    // For simplicity, find the first active one.
-    let newSubtitle = subtitles.first { sub in
+    // Use last (most recent) to ensure newer subtitles replace older overlapping ones
+    let newSubtitle = subtitles.last { sub in
       time >= sub.startTime && (sub.endTime == nil || time <= sub.endTime!)
     }
 

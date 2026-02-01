@@ -407,9 +407,22 @@ public final class VideoDecoder: @unchecked Sendable {
                 cleanText = self.cleanSubtitleText(text)
               }
               subtitleContent = .text(cleanText)
-            } else if subtitleFrameObj.bitmapWidth > 0 && subtitleFrameObj.bitmapHeight > 0 {
-              // Placeholder for bitmap subtitles
-              subtitleContent = .text("[Bitmap Subtitle]")
+              subtitleContent = .text(cleanText)
+            } else if let bitmapData = subtitleFrameObj.bitmapData,
+              subtitleFrameObj.bitmapWidth > 0, subtitleFrameObj.bitmapHeight > 0
+            {
+              let rect = CGRect(
+                x: subtitleFrameObj.normalizedX,
+                y: subtitleFrameObj.normalizedY,
+                width: subtitleFrameObj.normalizedWidth,
+                height: subtitleFrameObj.normalizedHeight
+              )
+              subtitleContent = .bitmap(
+                data: bitmapData,
+                width: Int(subtitleFrameObj.bitmapWidth),
+                height: Int(subtitleFrameObj.bitmapHeight),
+                rect: rect
+              )
             }
 
             let frame = SubtitleFrame(
