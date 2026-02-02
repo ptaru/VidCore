@@ -1,19 +1,18 @@
 # VidCore
 
-A video decoding and rendering framework for macOS built on FFmpeg and Metal.
+A video decoding and rendering framework for macOS built on FFmpeg.
 
 ## Overview
 
-VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated decoding via VideoToolbox, and system-integrated rendering via `AVSampleBufferDisplayLayer` with custom Metal fallback for Dolby Vision.
+VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated decoding via VideoToolbox, and system-integrated rendering via `AVSampleBufferDisplayLayer`.
 
 ## Features
 
 - **FFmpeg Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
 - **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
 - **System-Integrated Rendering**: Uses `AVSampleBufferDisplayLayer` for power-efficient, color-perfect rendering of SDR, and HDR content
-- **Dolby Vision Support**: Custom Metal pipeline for Profile 5 (IPTPQc2) frames, converting them to HDR10 in real-time for system display
-- **HDR Support**: Full HDR10 and HLG support with BT.2020 color primaries and proper EDR signaling
-- **Tone Mapping**: Automatic system-level tone mapping using L1 scene brightness metadata extracted from Dolby Vision streams
+- **HDR Support**: DoVi, HDR10, and HLG support with BT.2020 color primaries and proper EDR signaling
+- **Tone Mapping**: Automatic system-level tone mapping using dynamic metadata where available
 - **Audio Playback**: Synchronized audio via AVAudioEngine with A/V sync correction
 - **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
@@ -25,26 +24,11 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - macOS 15.0+
 - Xcode 15.0+
 
-## Installation
+## Building
 
 ### Embedding VidCore.framework
 
-VidCore includes bundled FFmpeg + dav1d libraries—no external dependencies required.
-
-1. **Build VidCore** (if not pre-built):
-   ```bash
-   cd /path/to/VidPreview
-   xcodebuild -scheme VidCore -configuration Release build
-   ```
-
-2. **Embed in your project**:
-   - Drag `VidCore.framework` into your app target
-   - In **General > Frameworks, Libraries, and Embedded Content**, set to "Embed & Sign"
-
-3. **Import and use**:
-   ```swift
-   import VidCore
-   ```
+Look at https://github.com/ptaru/VidPreview for an example of VidCore usage in an Xcode project. 
 
 ### Building FFmpeg + dav1d (One-Time)
 
@@ -65,6 +49,8 @@ This creates universal static libraries (arm64 + x86_64) in `VidCore/Frameworks/
 - `libdav1d.a` (fast AV1 decoder)
 
 ---
+
+The following documentation may be out of date and not fully reflect the latest features of VidCore, please rely on the DocC documentation where possible. 
 
 ## Quick Start
 
@@ -381,22 +367,12 @@ Unlike traditional players that use custom Metal shaders for all rendering, VidC
 
 - **HDR10 (PQ)**: Passed as 10-bit buffers with BT.2020 primaries and SMPTE ST 2084 transfer function. macOS handles tone mapping to the display's capabilities.
 - **HLG**: Passed as 10-bit HLG buffers. macOS handles the OETF/OOTF processing.
+- **Dynamic HDR metadata**: Automatically passed to AVSBDL where supported (DoVi Profiles 5, 8.4 on iOS and macOS, possibly also Profile 8.1 and HDR10+ on tvOS)
 - **SDR**: Standard Rec.709 handling.
 
 This approach provides:
 - **Perfect Color Matching**: Identical to QuickTime Player and Safari.
 - **Power Efficiency**: Uses the dedicated hardware compositor.
-- **AirPlay Support**: Native HDR support over AirPlay.
-
-#### Dolby Vision Support (Profile 5)
-
-Since macOS does not natively support the Dolby Vision Profile 5 (IPTPQc2) colorspace in `AVSampleBufferDisplayLayer`, VidCore leverages VideoToolbox to handle the conversion.
-
-**The Pipeline:**
-1.  **Decode**: Frame is decoded via VideoToolbox with Dolby Vision configuration.
-2.  **Hardware Processing**: VideoToolbox handles the Profile 5 IPTPQc2 to HDR10 (PQ/BT.2020) conversion internally.
-3.  **Metadata Handling**: VidCore configures the decoder with proper Dolby Vision atoms (dvcC) to enable hardware-accelerated processing.
-4.  **Display**: The converted frame is handed to `AVSampleBufferDisplayLayer`, tagged with HDR metadata for accurate tone mapping.
 
 #### Automatic HDR Detection
 
@@ -416,15 +392,6 @@ if decoder.videoInfo.isHDR {
     }
 }
 ```
-
-#### Dynamic Tone Mapping
-
-VidCore preserves dynamic metadata throughout the pipeline:
-
-- **HDR10**: Uses static MaxCLL/MaxFALL if present in the container.
-- **Dolby Vision**: Extracts **L1 Scene Brightness** (per-frame dynamic metadata) and attaches it to the converted HDR10 frames.
-
-This allows the system renderer to adjust tone mapping on a scene-by-scene basis, preserving highlights in dark scenes and avoiding clipping in bright ones.
 
 ---
 
@@ -656,49 +623,6 @@ Real-time playback statistics for debugging and monitoring.
 | `droppedFrameCount` | `Int` | Number of frames dropped |
 | `isHardwareDecoded` | `Bool` | Whether hardware decoding is active |
 | `decoderName` | `String` | Name of active decoder |
-
----
-
-## Performance Optimizations
-
-VidCore includes several performance optimizations for efficient video playback:
-
-### Efficient System Integration
-- **Direct System Pass-through**: Standard SDR and HDR content is passed directly to `AVSampleBufferDisplayLayer` without unnecessary copying or shader processing.
-- **Hardware Compositing**: Utilizes the macOS hardware compositor for power-efficient scaling and color management.
-
-### Hardware Dolby Vision Decoding
-- **VideoToolbox Acceleration**: Uses hardware-accelerated VideoToolbox decoding for Dolby Vision Profile 5, 7, and 8 content.
-- **Native DoVi Support**: Configures the decoder with proper Dolby Vision configuration atoms (dvcC) to enable system-level processing.
-- **Profile 5 Compatibility**: Enables playback of Profile 5 (IPTPQc2) content on macOS by leveraging VideoToolbox's internal conversion to display-compatible formats.
-- **Zero-Copy Rendering**: When possible, frames are passed directly to `AVSampleBufferDisplayLayer` without format conversion.
-
-### CVPixelBufferPool Management
-- **Reusable buffer pools** for both SDR (I420) and HDR (P010) frames
-- **Lazy initialization** of HDR pool (only created when first 10-bit frame detected)
-- **Reduces memory fragmentation** for high-resolution playback
-- **Automatic pool recreation** on resolution changes
-- **Periodic flushing** every 60 frames to reduce transient texture memory
-
-### 10-bit to P010 Conversion
-- **Optimized bit-shift conversion** from YUV420P10LE to P010 format
-- **Unrolled loops** for Y plane processing (4-pixel chunks)
-- **Row-wise processing** for cache efficiency
-- **Efficient UV interleaving** with proper stride handling
-
-### Frame Reordering
-- **Automatic PTS-based sorting** for multi-threaded decoders
-- Handles out-of-order frames from dav1d, libvpx, and other parallel decoders
-- **Binary insertion** for efficient sorted buffer maintenance
-- **1-frame reorder delay** to allow out-of-order arrivals
-
-### Optimized Seeking
-- **Zero-Latency Interaction**: Immediate visual feedback during scrubbing by prioritizing the nearest keyframe for display while refining position in the background.
-- **Two-Phase Strategy**: Implements a hybrid approach for frame-accurate seeking:
-  1. **Fast Seek**: Jumps to the nearest keyframe before the target timestamp using `avformat_seek_file`.
-  2. **Precise Catch-up**: Decodes frames sequentially from the keyframe until the exact target timestamp is reached.
-- **Performance Optimization**: During the catch-up phase, the decoder automatically skips non-reference frames (`AVDISCARD_NONREF`) to speed up processing.
-- **Safety Margin**: The optimization is automatically disabled 0.5s before the target timestamp to ensure all necessary reference frames are decoded for a clean image.
 
 ---
 

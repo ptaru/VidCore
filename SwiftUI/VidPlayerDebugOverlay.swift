@@ -147,36 +147,42 @@ struct VidPlayerDebugOverlay: View {
           .buttonStyle(PlainButtonStyle())
 
           if isAudioTracksExpanded {
-            VStack(alignment: .leading, spacing: 2) {
-              ForEach(Array(info.audioTracks.enumerated()), id: \.element.id) { index, track in
-                let isSelected = index == selectedAudioTrackIndex
-                Button(action: {
-                  onAudioTrackSelected?(index)
-                }) {
-                  HStack {
-                    Text(isSelected ? "●" : "○")
-                      .foregroundColor(isSelected ? .green : .gray)
-                      .font(.system(size: 8))
-                    Text(track.displayName)
-                      .foregroundColor(isSelected ? .green : .white)
-                      .fontWeight(isSelected ? .bold : .regular)
-                    if track.isDefault {
-                      Text("Default")
-                        .font(.system(size: 9))
-                        .foregroundColor(.yellow)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.yellow.opacity(0.2))
-                        .cornerRadius(2)
+            ScrollView {
+              VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(info.audioTracks.enumerated()), id: \.element.id) { index, track in
+                  let isSelected = index == selectedAudioTrackIndex
+                  Button(action: {
+                    onAudioTrackSelected?(index)
+                  }) {
+                    HStack {
+                      Text(isSelected ? "●" : "○")
+                        .foregroundColor(isSelected ? .green : .gray)
+                        .font(.system(size: 8))
+                      Text(track.displayName)
+                        .foregroundColor(isSelected ? .green : .white)
+                        .fontWeight(isSelected ? .bold : .regular)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(track.displayName)
+                      if track.isDefault {
+                        Text("Default")
+                          .font(.system(size: 9))
+                          .foregroundColor(.yellow)
+                          .padding(.horizontal, 4)
+                          .padding(.vertical, 1)
+                          .background(Color.yellow.opacity(0.2))
+                          .cornerRadius(2)
+                      }
+                      Spacer()
                     }
-                    Spacer()
                   }
+                  .buttonStyle(PlainButtonStyle())
+                  .padding(.leading, 8)
+                  .padding(.vertical, 1)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .padding(.leading, 8)
-                .padding(.vertical, 1)
               }
             }
+            .frame(maxWidth: 300, maxHeight: 200)
           }
 
           Divider().background(Color.white.opacity(0.3))
@@ -201,54 +207,60 @@ struct VidPlayerDebugOverlay: View {
           .buttonStyle(PlainButtonStyle())
 
           if isSubtitleTracksExpanded {
-            VStack(alignment: .leading, spacing: 2) {
-              // "None" option
-              Button(action: {
-                onSubtitleTrackSelected?(-1)
-              }) {
-                HStack {
-                  Text(selectedSubtitleTrackIndex == -1 ? "●" : "○")
-                    .foregroundColor(selectedSubtitleTrackIndex == -1 ? .green : .gray)
-                    .font(.system(size: 8))
-                  Text("None")
-                    .foregroundColor(selectedSubtitleTrackIndex == -1 ? .green : .white)
-                    .fontWeight(selectedSubtitleTrackIndex == -1 ? .bold : .regular)
-                  Spacer()
-                }
-              }
-              .buttonStyle(PlainButtonStyle())
-              .padding(.leading, 8)
-              .padding(.vertical, 1)
-
-              ForEach(Array(info.subtitleTracks.enumerated()), id: \.element.id) { index, track in
-                let isSelected = index == selectedSubtitleTrackIndex
+            ScrollView {
+              VStack(alignment: .leading, spacing: 2) {
+                // "None" option
                 Button(action: {
-                  onSubtitleTrackSelected?(index)
+                  onSubtitleTrackSelected?(-1)
                 }) {
                   HStack {
-                    Text(isSelected ? "●" : "○")
-                      .foregroundColor(isSelected ? .green : .gray)
+                    Text(selectedSubtitleTrackIndex == -1 ? "●" : "○")
+                      .foregroundColor(selectedSubtitleTrackIndex == -1 ? .green : .gray)
                       .font(.system(size: 8))
-                    Text(track.displayName)
-                      .foregroundColor(isSelected ? .green : .white)
-                      .fontWeight(isSelected ? .bold : .regular)
-                    if track.isDefault {
-                      Text("Default")
-                        .font(.system(size: 9))
-                        .foregroundColor(.yellow)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.yellow.opacity(0.2))
-                        .cornerRadius(2)
-                    }
+                    Text("None")
+                      .foregroundColor(selectedSubtitleTrackIndex == -1 ? .green : .white)
+                      .fontWeight(selectedSubtitleTrackIndex == -1 ? .bold : .regular)
                     Spacer()
                   }
                 }
                 .buttonStyle(PlainButtonStyle())
                 .padding(.leading, 8)
                 .padding(.vertical, 1)
+
+                ForEach(Array(info.subtitleTracks.enumerated()), id: \.element.id) { index, track in
+                  let isSelected = index == selectedSubtitleTrackIndex
+                  Button(action: {
+                    onSubtitleTrackSelected?(index)
+                  }) {
+                    HStack {
+                      Text(isSelected ? "●" : "○")
+                        .foregroundColor(isSelected ? .green : .gray)
+                        .font(.system(size: 8))
+                      Text(track.displayName)
+                        .foregroundColor(isSelected ? .green : .white)
+                        .fontWeight(isSelected ? .bold : .regular)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(track.displayName)
+                      if track.isDefault {
+                        Text("Default")
+                          .font(.system(size: 9))
+                          .foregroundColor(.yellow)
+                          .padding(.horizontal, 4)
+                          .padding(.vertical, 1)
+                          .background(Color.yellow.opacity(0.2))
+                          .cornerRadius(2)
+                      }
+                      Spacer()
+                    }
+                  }
+                  .buttonStyle(PlainButtonStyle())
+                  .padding(.leading, 8)
+                  .padding(.vertical, 1)
+                }
               }
             }
+            .frame(maxWidth: 300, maxHeight: 200)
           }
 
           Divider().background(Color.white.opacity(0.3))
