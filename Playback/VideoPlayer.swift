@@ -66,6 +66,17 @@ public class VideoPlayer {
     didSet { audioPlayer.volume = Float(volume) }
   }
 
+  /// Playback rate (0.25 to 3.0 recommended)
+  public var playbackRate: Double = 1.0 {
+    didSet {
+      let clamped = max(0.1, min(playbackRate, 32.0))
+      audioPlayer.rate = Float(clamped)
+      Task {
+        await displayLoop.setRate(clamped)
+      }
+    }
+  }
+
   private var preMuteVolume: Double = 1.0
 
   /// Whether audio is muted

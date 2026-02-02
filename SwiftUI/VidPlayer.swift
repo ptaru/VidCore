@@ -153,6 +153,10 @@ public struct VidPlayer<Overlay: View>: View {
             Task {
               await activePlayer.selectSubtitleTrack(at: index)
             }
+          },
+          playbackRate: activePlayer.playbackRate,
+          onPlaybackRateChanged: { rate in
+            activePlayer.playbackRate = rate
           }
         )
       }

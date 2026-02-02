@@ -17,6 +17,8 @@ struct VidPlayerDebugOverlay: View {
   let onAudioTrackSelected: ((Int) -> Void)?
   let selectedSubtitleTrackIndex: Int
   let onSubtitleTrackSelected: ((Int) -> Void)?
+  let playbackRate: Double
+  let onPlaybackRateChanged: ((Double) -> Void)?
 
   @State private var isAttachmentsExpanded = false
   @State private var isAudioTracksExpanded = true
@@ -73,6 +75,8 @@ struct VidPlayerDebugOverlay: View {
 
         Divider().background(Color.white.opacity(0.3))
 
+        Divider().background(Color.white.opacity(0.3))
+
         // Timing
         Group {
           debugRow("PTS", String(format: "%.3fs", frame.presentationTime))
@@ -80,6 +84,24 @@ struct VidPlayerDebugOverlay: View {
             let frameNumber = Int(frame.presentationTime * info.frameRate)
             debugRow("Frame #", "\(frameNumber)")
           }
+          // Speed Control
+          HStack {
+            Text("Speed:")
+              .foregroundColor(.gray)
+            Text(String(format: "%.2fx", playbackRate))
+              .foregroundColor(.white)
+              .frame(width: 40, alignment: .leading)
+
+            Slider(
+              value: Binding(
+                get: { playbackRate },
+                set: { onPlaybackRateChanged?($0) }
+              ), in: 0.25...3.0, step: 0.25
+            )
+            .controlSize(.mini)
+            .frame(width: 100)
+          }
+
           if let stats = debugStats {
             let driftMs = stats.avDrift * 1000
             let color: Color = abs(driftMs) > 100 ? .red : abs(driftMs) > 50 ? .orange : .white

@@ -30,10 +30,9 @@ public actor VideoDisplayLoop {
   private var reachedEndOfStream = false
 
   // Timing state
-  private var playbackStartTime: CFTimeInterval = 0
-  private var pauseTimestamp: CFTimeInterval = 0
-  private var firstFramePTS: Double = 0
-  private var audioStartOffset: Double = 0
+  private var anchorWallTime: CFTimeInterval = 0
+  private var anchorMediaTime: Double = 0
+  private var rate: Double = 1.0
 
   // Cached info
   private var frameRate: Double = 30.0
@@ -87,6 +86,19 @@ public actor VideoDisplayLoop {
     self.decoderName = info?.decoderName ?? "Unknown"
   }
 
+  public func setRate(_ newRate: Double) {
+    guard newRate != rate else { return }
+    let now = CACurrentMediaTime()
+    // Re-anchor to preserve continuity
+    // Current media time based on old rate:
+    let currentMedia = anchorMediaTime + (now - anchorWallTime) * rate
+
+    // Update state
+    rate = newRate
+    anchorWallTime = now
+    anchorMediaTime = currentMedia
+  }
+
   /// Update the frame buffer and packet queue references.
   /// Used when buffer sizes need to change (e.g., auto-detected hardware vs software).
   public func updateBuffers(frameBuffer: VideoFrameBuffer, packetQueue: PacketQueue) {
@@ -132,6 +144,12 @@ public actor VideoDisplayLoop {
   public func start() {
     guard !isRunning else { return }
     isRunning = true
+
+    // Re-anchor on resume
+    anchorWallTime = CACurrentMediaTime()
+    // anchorMediaTime remains what it was (stopped at)
+    // If not started, processFrame will init it from first frame
+
     let link = self.displayLink
     Task { @MainActor in
       link?.start()
@@ -139,18 +157,15 @@ public actor VideoDisplayLoop {
   }
 
   public func stop() {
+    guard isRunning else { return }
     isRunning = false
-    Task { @MainActor [weak self] in
-      // Capture link safely if needed, but here we just need to stop it
-      // Since displayLink is private to actor, we must access it carefully.
-      // Actually, since DisplayLinkDriver is MainActor, we should have the actor
-      // manage the reference but dispatch calls.
-      // However, `displayLink` property access from inside the Task (closure)
-      // is cross-actor if `self` is captured.
-      // Best pattern: `let link = self.displayLink` (captured in actor context)
-      // then use `link` in Task.
-    }
-    // Correct approach:
+
+    // Update anchorMediaTime to where we stopped
+    // This allows resuming from correct time
+    let now = CACurrentMediaTime()
+    anchorMediaTime = anchorMediaTime + (now - anchorWallTime) * rate
+    anchorWallTime = now
+
     let link = self.displayLink
     Task { @MainActor in
       link?.stop()
@@ -164,6 +179,9 @@ public actor VideoDisplayLoop {
   /// Manually display a frame (e.g. after seeking while paused)
   public func displayFrame(_ frame: VideoFrame) {
     renderer?.enqueue(frame)
+    // Update anchor so if we resume, we start from here
+    anchorMediaTime = frame.presentationTime
+    anchorWallTime = CACurrentMediaTime()
 
     // Fire frame update to mirror
     if let frameHandler = frameUpdateHandler {
@@ -186,8 +204,8 @@ public actor VideoDisplayLoop {
     }
 
     if !hasStarted {
-      playbackStartTime = CACurrentMediaTime()
-      firstFramePTS = nextFrame.presentationTime
+      anchorWallTime = CACurrentMediaTime()
+      anchorMediaTime = nextFrame.presentationTime
       hasStarted = true
     }
 
@@ -195,8 +213,12 @@ public actor VideoDisplayLoop {
     let currentPlaybackTime: Double
     if await audioPlayer.hasBufferedAudio && audioPlayer.isPlaying {
       currentPlaybackTime = audioPlayer.getMediaTime()
+      // Sync anchor to audio time to ensure smooth fallback if audio drops
+      anchorMediaTime = currentPlaybackTime
+      anchorWallTime = CACurrentMediaTime()
     } else {
-      currentPlaybackTime = (CACurrentMediaTime() - playbackStartTime) + firstFramePTS
+      // Wall clock sync
+      currentPlaybackTime = anchorMediaTime + (CACurrentMediaTime() - anchorWallTime) * rate
     }
 
     var waitTime = nextFrame.presentationTime - currentPlaybackTime
@@ -236,7 +258,7 @@ public actor VideoDisplayLoop {
         let newTime = audioPlayer.getMediaTime()
         waitTime = next.presentationTime - newTime
       } else {
-        let newTime = (CACurrentMediaTime() - playbackStartTime) + firstFramePTS
+        let newTime = anchorMediaTime + (CACurrentMediaTime() - anchorWallTime) * rate
         waitTime = next.presentationTime - newTime
       }
     }
