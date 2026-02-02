@@ -164,7 +164,10 @@ public class VideoPlayer {
   private func setupCallbacks() {
     Task {
       await displayLoop.setStatsHandler { [weak self] stats in
-        self?.debugStats = stats
+        guard let self = self else { return }
+        var updatedStats = stats
+        updatedStats.keyframeCount = self.decoder?.keyframeCount ?? 0
+        self.debugStats = updatedStats
       }
       await displayLoop.setFrameUpdateHandler { [weak self] frame in
         guard let self = self else { return }
@@ -253,6 +256,9 @@ public class VideoPlayer {
         }
 
         await displayLoop.setVideoInfo(decoder.videoInfo)
+
+        // Start background generation of keyframe index for accurate seeking
+        decoder.startKeyframeIndexing()
 
         while !Task.isCancelled {
           guard let packet = await decoder.demuxNextPacket() else { break }
@@ -775,4 +781,6 @@ public struct PlayerDebugStats: Sendable {
   public var droppedFrameCount: Int = 0
   public var isHardwareDecoded: Bool = false
   public var decoderName: String = "Unknown"
+  public var displayRefreshRate: Double = 0.0
+  public var keyframeCount: Int = 0
 }

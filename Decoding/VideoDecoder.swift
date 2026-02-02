@@ -518,6 +518,22 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
+  // MARK: - Keyframe Indexing
+
+  /// Start generating keyframe index asynchronously for optimized seeking.
+  public func startKeyframeIndexing() {
+    lock.lock()
+    defer { lock.unlock() }  // Use defer to ensure unlock
+    demuxer?.generateKeyframeIndex()
+  }
+
+  /// Number of indexed keyframes (0 if indexing not started or ongoing)
+  public var keyframeCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return demuxer?.keyframeIndex?.count ?? 0
+  }
+
   // MARK: - Cover Image Extraction
 
   /// Extracts an embedded cover image from the video container, if present.

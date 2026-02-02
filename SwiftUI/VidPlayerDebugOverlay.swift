@@ -41,6 +41,14 @@ struct VidPlayerDebugOverlay: View {
           Group {
             debugRow("State", "Playing")  // Dynamic in future
             debugRow("Decoder", stats.decoderName)
+            if stats.displayRefreshRate > 0 {
+              debugRow("Display Link", String(format: "%.0f Hz", stats.displayRefreshRate))
+            }
+            if stats.keyframeCount > 0 {
+              debugRow("Keyframes", "\(stats.keyframeCount)")
+            } else {
+              debugRow("Keyframes", "Indexing...", color: .gray)
+            }
 
             // Buffer Health
             let pqPct = Double(stats.packetQueueCount) / Double(max(1, stats.packetQueueMax)) * 100
