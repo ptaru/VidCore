@@ -67,7 +67,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     AVCodecContext *audioCodecContext; // Audio codec context
 @property(nonatomic, assign)
     AVCodecContext *subtitleCodecContext; // Subtitle codec context
-@property(nonatomic, assign) SwsContext *swsContext;
+
 @property(nonatomic, assign) SwrContext *swrContext;
 @property(nonatomic, assign) AVFrame *frame;
 @property(nonatomic, assign) AVFrame *swFrame; // For hardware frame transfer
@@ -133,7 +133,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     // Initialize state
     _codecContext = NULL;
     _audioCodecContext = NULL;
-    _swsContext = NULL;
     _swrContext = NULL;
     _frame = NULL;
     _swFrame = NULL;
@@ -330,13 +329,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       }
       [self close];
       return nil;
-    }
-
-    // Initialize scaler for software path
-    if (!_usingHardwareDecoder) {
-      _swsContext = sws_getContext(
-          width, height, (enum AVPixelFormat)pixelFormat, width, height,
-          AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL, NULL);
     }
 
     // Create video info
@@ -1031,11 +1023,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   NSLog(@"[FFmpegDecoder] Decoder closed and cleaned up");
-
-  if (_swsContext) {
-    sws_freeContext(_swsContext);
-    _swsContext = NULL;
-  }
 
   if (_swrContext) {
     swr_free(&_swrContext);

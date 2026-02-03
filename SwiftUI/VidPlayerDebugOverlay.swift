@@ -43,9 +43,7 @@ struct VidPlayerDebugOverlay: View {
           Group {
             debugRow("State", "Playing")  // Dynamic in future
             debugRow("Decoder", stats.decoderName)
-            if stats.displayRefreshRate > 0 {
-              debugRow("Display Link", String(format: "%.0f Hz", stats.displayRefreshRate))
-            }
+            debugRow("Clock Rate", String(format: "%.2fx", stats.syncRate))
             if stats.keyframeCount > 0 {
               debugRow("Keyframes", "\(stats.keyframeCount)")
             } else {
@@ -54,22 +52,24 @@ struct VidPlayerDebugOverlay: View {
 
             // Buffer Health
             let pqPct = Double(stats.packetQueueCount) / Double(max(1, stats.packetQueueMax)) * 100
-            let fbPct = Double(stats.frameBufferCount) / Double(max(1, stats.frameBufferMax)) * 100
 
             // Pad current count based on max value digits to prevent jumping
             let pqWidth = String(stats.packetQueueMax).count
-            let fbWidth = String(stats.frameBufferMax).count
             let pqLabel = String(
               format: "%\(pqWidth)d/\(stats.packetQueueMax)", stats.packetQueueCount)
-            let fbLabel = String(
-              format: "%\(fbWidth)d/\(stats.frameBufferMax)", stats.frameBufferCount)
 
             debugBar("Packet Queue", percent: pqPct, label: pqLabel)
-            debugBar("Frame Buffer", percent: fbPct, label: fbLabel)
-
-            if stats.droppedFrameCount > 0 {
-              debugRow("Dropped Frames", "\(stats.droppedFrameCount)", color: .orange)
-            }
+            debugRow(
+              "Video Renderer",
+              stats.videoRendererReady ? "Ready" : "Backpressure",
+              color: stats.videoRendererReady ? .green : .orange
+            )
+            debugRow(
+              "Audio Renderer",
+              stats.audioRendererReady ? "Ready" : "Backpressure",
+              color: stats.audioRendererReady ? .green : .orange
+            )
+            debugRow("Audio Path", stats.audioBackend)
           }
         }
 
@@ -80,6 +80,9 @@ struct VidPlayerDebugOverlay: View {
         // Timing
         Group {
           debugRow("PTS", String(format: "%.3fs", frame.presentationTime))
+          if let stats = debugStats {
+            debugRow("Audio PTS", String(format: "%.3fs", stats.lastAudioPTS))
+          }
           if let info = videoInfo {
             let frameNumber = Int(frame.presentationTime * info.frameRate)
             debugRow("Frame #", "\(frameNumber)")
@@ -96,7 +99,7 @@ struct VidPlayerDebugOverlay: View {
               value: Binding(
                 get: { playbackRate },
                 set: { onPlaybackRateChanged?($0) }
-              ), in: 0.25...3.0, step: 0.25
+            ), in: 0.25...4.0, step: 0.25
             )
             .controlSize(.mini)
             .frame(width: 100)
@@ -421,24 +424,9 @@ struct VidPlayerDebugOverlay: View {
     }
   }
 
-  /// Converts PQ value (0.0-1.0) to nits for display
-  private func pqToNits(_ pq: Float) -> Float {
-    guard pq > 0 else { return 0 }
-    let m1: Float = 0.1593017578125
-    let m2: Float = 78.84375
-    let c1: Float = 0.8359375
-    let c2: Float = 18.8515625
-    let c3: Float = 18.6875
-
-    let p = pow(pq, 1.0 / m2)
-    let num = max(p - c1, 0)
-    let den = c2 - c3 * p
-    return pow(num / max(den, 1e-6), 1.0 / m1) * 10000.0
-  }
-
   /// Extracts attachments from CVPixelBuffer as key-value pairs
   private func getAttachments(from pixelBuffer: CVPixelBuffer) -> [(String, String)] {
-    guard let attachments = CVBufferGetAttachments(pixelBuffer, .shouldPropagate) as? [String: Any]
+    guard let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate) as? [String: Any]
     else {
       return []
     }

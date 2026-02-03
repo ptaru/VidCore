@@ -13,3 +13,14 @@ public protocol VideoRendererTarget: AnyObject, Sendable {
     /// Enqueue a frame for display
     func enqueue(_ frame: VideoFrame)
 }
+
+/// Optional protocol for renderers that can await readiness without polling.
+public protocol MediaDataReadinessAwaiting: AnyObject, Sendable {
+    func waitUntilReady() async
+}
+
+/// Optional protocol for renderers that accept sample buffers and can be flushed.
+public protocol SampleBufferRenderer: AnyObject, Sendable {
+    var isReadyForMoreMediaData: Bool { get }
+    func flush()
+}

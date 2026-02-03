@@ -42,14 +42,6 @@ public enum SubtitleParser {
 
   // MARK: - SRT Parsing
 
-  private enum SRTToken {
-    case text(Substring)
-    case boldStart, boldEnd
-    case italicStart, italicEnd
-    case underlineStart, underlineEnd
-    case fontColorStart(Color), fontEnd
-  }
-
   private static func parseSRT(_ text: String) -> AttributedString {
     var attributed = AttributedString()
 

@@ -6,17 +6,10 @@
 //
 //  Decoupled Architecture:
 //  - VideoPlayer (MainActor): Orchestrates high-level state, user input, and UI/Debug mirroring.
-//  - VideoDisplayLoop (Actor): Runs the display loop on a background thread, pushing frames to renderer.
 //
 
 import Foundation
 import Observation
-import QuartzCore
-
-// MARK: - Timing Constants
-private enum PlaybackTiming {
-  static let seekPauseDelay: UInt64 = 50_000_000  // 50ms
-}
 
 /// High-level video player that orchestrates decoding, rendering, and audio playback.
 ///
@@ -62,17 +55,15 @@ public class VideoPlayer {
   // MARK: - Volume Control
 
   /// Playback volume (0.0 to 1.0)
-  public var volume: Double = 1.0 {
-    didSet { audioPlayer.volume = Float(volume) }
-  }
+  public var volume: Double = 1.0
 
   /// Playback rate (0.25 to 3.0 recommended)
   public var playbackRate: Double = 1.0 {
     didSet {
       let clamped = max(0.1, min(playbackRate, 32.0))
-      audioPlayer.rate = Float(clamped)
-      Task {
-        await displayLoop.setRate(clamped)
+      if state == .playing {
+        playbackClock.setRate(clamped)
+        audioOutput.play(rate: clamped)
       }
     }
   }
@@ -99,18 +90,25 @@ public class VideoPlayer {
 
   // MARK: - Internal Components
 
-  private let audioPlayer = AudioPlayer()
+  private var audioOutput: AudioRendering
   private var decoder: VideoDecoder?
-  private var frameBuffer: VideoFrameBuffer
   private var packetQueue: PacketQueue
   private var buffers: Buffers
 
-  // Decoupled Display Loop
-  private let displayLoop: VideoDisplayLoop
+  private var playbackClock: PlaybackClock
+  private weak var renderer: VideoRendererTarget?
+
+  // Debug/stat tracking
+  private var lastAudioPTS: Double = 0
+  private var lastVideoPTS: Double = 0
+  private var lastStatsUpdateTime: TimeInterval = 0
 
   // Task management
+  @ObservationIgnored
   nonisolated(unsafe) private var demuxTask: Task<Void, Never>?
+  @ObservationIgnored
   nonisolated(unsafe) private var decodeTask: Task<Void, Never>?
+  @ObservationIgnored
   nonisolated(unsafe) private var currentSeekTask: Task<Void, Never>?
 
   private var subtitles: [SubtitleFrame] = []
@@ -128,17 +126,19 @@ public class VideoPlayer {
     self.buffers = buffers
 
     // Create initial buffers with appropriate sizes
-    let frameBufferSize = buffers.frameBufferSize
     let packetQueueSize = buffers.packetQueueSize
+    self.packetQueue = PacketQueue(maxSize: packetQueueSize)
 
-    let frameBuffer = VideoFrameBuffer(maxSize: frameBufferSize)
-    let packetQueue = PacketQueue(maxSize: packetQueueSize)
-    self.frameBuffer = frameBuffer
-    self.packetQueue = packetQueue
-    self.displayLoop = VideoDisplayLoop(
-      frameBuffer: frameBuffer, packetQueue: packetQueue, audioPlayer: audioPlayer)
-
-    setupCallbacks()
+    let forceFallback = SystemAudioRenderer.isForceFallbackEnabled
+    let audioRenderer = SystemAudioRenderer(
+      enabled: SystemAudioRenderer.isSupportedInCurrentProcess && !forceFallback
+    )
+    if audioRenderer.isEnabled {
+      self.audioOutput = audioRenderer
+    } else {
+      self.audioOutput = AudioEngineRenderer()
+    }
+    self.playbackClock = PlaybackClock(audioRenderer: audioRenderer.renderer)
   }
 
   /// Creates a new video player and immediately loads a video.
@@ -163,46 +163,30 @@ public class VideoPlayer {
       )
     default:
       effectiveBuffers = buffers
-      print("[VideoPlayer] Using explicit buffer config: \(buffers)")
+      // Debug logging removed: noisy in Quick Look extensions.
     }
 
-    print(
-      "[VideoPlayer] Buffer sizes: frameBuffer=\(effectiveBuffers.frameBufferSize), packetQueue=\(effectiveBuffers.packetQueueSize)"
-    )
+    // Debug logging removed: noisy in Quick Look extensions.
     self.init(buffers: effectiveBuffers)
-  }
-
-  private func setupCallbacks() {
-    Task {
-      await displayLoop.setStatsHandler { [weak self] stats in
-        guard let self = self else { return }
-        var updatedStats = stats
-        updatedStats.keyframeCount = self.decoder?.keyframeCount ?? 0
-        self.debugStats = updatedStats
-      }
-      await displayLoop.setFrameUpdateHandler { [weak self] frame in
-        guard let self = self else { return }
-        self.currentFrame = frame  // Update mirror
-        self.currentTime = frame.presentationTime
-        self.updateSubtitles(for: frame.presentationTime)
-      }
-      await displayLoop.setCompletionHandler { [weak self] in
-        guard let self = self else { return }
-        if self.state == .playing {
-          self.state = .finished
-          // Ensure audio is paused so it doesn't try to continue or hold resources
-          self.audioPlayer.pause()
-        }
-      }
-    }
   }
 
   // MARK: - Public API
 
-  /// Sets the target renderer for video frames.
-  /// This connects the decoupled display loop to the screen.
+  /// Sets the target renderer for video frames and applies the shared timebase.
   public func setRenderer(_ target: VideoRendererTarget?) async {
-    await displayLoop.setRenderer(target)
+    await MainActor.run {
+      self.renderer = target
+      self.configureRenderers(for: target)
+    }
+  }
+
+  @MainActor
+  private func configureRenderers(for target: VideoRendererTarget?) {
+    if let layerRenderer = target as? LayerRenderer {
+      playbackClock.attachVideoRenderer(layerRenderer.displayLayer)
+    } else {
+      playbackClock.attachVideoRenderer(nil)
+    }
   }
 
   /// Load a video file for playback.
@@ -218,25 +202,16 @@ public class VideoPlayer {
       let targetBuffer: Buffers = isHardware ? .hardware : .software
 
       // Check if we need to resize buffers
-      let currentFrameSize = await frameBuffer.maxSize
-      let currentPacketSize = await packetQueue.maxSize
-      let targetFrameSize = targetBuffer.frameBufferSize
+      let currentPacketSize = packetQueue.maxSize
       let targetPacketSize = targetBuffer.packetQueueSize
 
-      if currentFrameSize != targetFrameSize || currentPacketSize != targetPacketSize {
-        print(
-          "[VideoPlayer] Resizing buffers for \(isHardware ? "hardware" : "software") decoding: frameBuffer \(currentFrameSize)->\(targetFrameSize), packetQueue \(currentPacketSize)->\(targetPacketSize)"
-        )
+      if currentPacketSize != targetPacketSize {
+        // Debug logging removed: noisy in Quick Look extensions.
 
         // Recreate buffers with correct sizes
-        await frameBuffer.reset()
         await packetQueue.reset()
 
-        frameBuffer = VideoFrameBuffer(maxSize: targetFrameSize)
         packetQueue = PacketQueue(maxSize: targetPacketSize)
-
-        // Update displayLoop with new buffers
-        await displayLoop.updateBuffers(frameBuffer: frameBuffer, packetQueue: packetQueue)
       }
     }
 
@@ -266,10 +241,9 @@ public class VideoPlayer {
           selectedSubtitleTrackIndex = -1
         }
 
-        await displayLoop.setVideoInfo(decoder.videoInfo)
-
         // Start background generation of keyframe index for accurate seeking
         decoder.startKeyframeIndexing()
+        await refreshDebugStats()
 
         while !Task.isCancelled {
           guard let packet = await decoder.demuxNextPacket() else { break }
@@ -279,8 +253,14 @@ public class VideoPlayer {
             return nil
           }).first {
             currentFrame = videoFrame
-            // Push initial frame to buffer so loop picks it up immediately
-            await frameBuffer.push(videoFrame)
+            renderer?.enqueue(videoFrame)
+            currentTime = videoFrame.presentationTime
+            if state == .playing {
+              playbackClock.setTime(videoFrame.presentationTime)
+            } else {
+              playbackClock.seek(to: videoFrame.presentationTime)
+            }
+            await refreshDebugStats(videoPTS: videoFrame.presentationTime)
             break
           }
         }
@@ -303,41 +283,35 @@ public class VideoPlayer {
     guard state == .ready || state == .paused || state == .finished else { return }
 
     if state == .finished {
-      print("[VideoPlayer] Play called in .finished state. Restarting...")
+      // Debug logging removed: noisy in Quick Look extensions.
       Task {
         await seek(to: 0)
         await packetQueue.resume()
-        await frameBuffer.resume()
         state = .ready
-        print("[VideoPlayer] State unset to .ready, calling play()")
+        // Debug logging removed: noisy in Quick Look extensions.
         play()
       }
       return
     }
 
     if state == .paused {
-      print("[VideoPlayer] Play called in .paused state. Resuming...")
+      // Debug logging removed: noisy in Quick Look extensions.
       state = .playing
-      audioPlayer.play()
-      Task {
-        await displayLoop.start()
-      }
+      playbackClock.play(rate: playbackRate)
+      audioOutput.play(rate: playbackRate)
 
       Task {
         await packetQueue.resume()
-        await frameBuffer.resume()
       }
 
       startTasks()
       return
     }
 
-    print("[VideoPlayer] Play called. Starting from fresh.")
+    // Debug logging removed: noisy in Quick Look extensions.
     state = .playing
-    audioPlayer.play()
-    Task {
-      await displayLoop.start()
-    }
+    playbackClock.play(rate: playbackRate)
+    audioOutput.play(rate: playbackRate)
 
     startTasks()
   }
@@ -347,14 +321,11 @@ public class VideoPlayer {
     guard state == .playing else { return }
 
     state = .paused
-    audioPlayer.pause()
-    Task {
-      await displayLoop.pause()
-    }
+    playbackClock.pause()
+    audioOutput.pause()
 
     Task {
       await packetQueue.suspend()
-      await frameBuffer.suspend()
     }
   }
 
@@ -389,39 +360,33 @@ public class VideoPlayer {
 
       // Enter seeking state to prevent race conditions
       state = .seeking
-      audioPlayer.pause()
-
-      await displayLoop.pause()
+      playbackClock.pause()
+      audioOutput.pause()
       await packetQueue.suspend()
-      await frameBuffer.suspend()
 
       guard !Task.isCancelled else {
         // Restore previous state if cancelled
         state = previousState
         if wasPlaying {
-          audioPlayer.play()
-          await displayLoop.start()
+          playbackClock.play(rate: playbackRate)
           await packetQueue.resume()
-          await frameBuffer.resume()
         }
         return
       }
 
       await packetQueue.reset()
-      await frameBuffer.reset()
       subtitles.removeAll()
       currentSubtitle = nil
-      await displayLoop.reset()  // Ensure loop state is clean
+      if let sbRenderer = renderer as? SampleBufferRenderer {
+        sbRenderer.flush()
+      }
 
       do {
         if let seekFrame = try await decoder.seek(to: clampedSeconds, accurate: accurate) {
           guard !Task.isCancelled else { return }
           currentFrame = seekFrame
-          // Force display the frame immediately since loop might be paused
-          await displayLoop.displayFrame(seekFrame)
-
-          // Push the seek frame to buffer so it flows into the display loop when playing
-          await frameBuffer.push(seekFrame)
+          playbackClock.seek(to: seekFrame.presentationTime)
+          renderer?.enqueue(seekFrame)
 
           // Update timing to match the actual frame found
           currentTime = seekFrame.presentationTime
@@ -431,7 +396,7 @@ public class VideoPlayer {
           currentTime = clampedSeconds
         }
 
-        audioPlayer.seek(to: currentTime)
+        audioOutput.flush()
 
         guard !Task.isCancelled else {
           return
@@ -442,14 +407,12 @@ public class VideoPlayer {
 
         if wasPlaying {
           state = .playing
-          audioPlayer.play()
-          await displayLoop.start()
+          playbackClock.play(rate: playbackRate)
+          audioOutput.play(rate: playbackRate)
           await packetQueue.resume()
-          await frameBuffer.resume()
         } else {
           // We already have the frame displayed, so just pause
           await packetQueue.suspend()
-          await frameBuffer.suspend()
           state = .paused
         }
       } catch {
@@ -470,16 +433,19 @@ public class VideoPlayer {
       pause()
     }
 
-    audioPlayer.cleanup()
+    audioOutput.flush()
 
     await stopTasks()
-    await displayLoop.stop()
+    playbackClock.pause()
+    if let sbRenderer = renderer as? SampleBufferRenderer {
+      sbRenderer.flush()
+    }
+    audioOutput.flush()
 
     currentSeekTask?.cancel()
     currentSeekTask = nil
 
     await packetQueue.reset()
-    await frameBuffer.reset()
 
     decoder?.close()
     decoder = nil
@@ -577,11 +543,23 @@ public class VideoPlayer {
           guard let frame = await decoder.drainVideoFrame() else {
             break
           }
-          await frameBuffer.pushWithBackpressure(frame)
+          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
+            await readinessAwaiter.waitUntilReady()
+          }
+          guard !Task.isCancelled else { break }
+          renderer?.enqueue(frame)
+          currentFrame = frame
+          currentTime = frame.presentationTime
+          updateSubtitles(for: frame.presentationTime)
+          await refreshDebugStats(videoPTS: frame.presentationTime)
           drainedCount += 1
         }
 
-        await frameBuffer.close()
+        if state == .playing {
+          state = .finished
+          playbackClock.pause()
+          audioOutput.flush()
+        }
         break
       }
 
@@ -591,11 +569,22 @@ public class VideoPlayer {
       for frame in decodedFrames {
         switch frame {
         case .video(let videoFrame):
-          await frameBuffer.pushWithBackpressure(videoFrame)
+          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
+            await readinessAwaiter.waitUntilReady()
+          }
+          guard !Task.isCancelled else { break }
+          renderer?.enqueue(videoFrame)
+          currentFrame = videoFrame
+          currentTime = videoFrame.presentationTime
+          updateSubtitles(for: videoFrame.presentationTime)
+          await refreshDebugStats(videoPTS: videoFrame.presentationTime)
         case .audio(let buffer, let pts):
-          await MainActor.run {
+          guard audioOutput.isEnabled else { break }
+          await audioOutput.waitUntilReady()
+          if !Task.isCancelled {
+            audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
             hasAudio = true
-            audioPlayer.enqueue(buffer, pts: pts)
+            await refreshDebugStats(audioPTS: pts)
           }
         case .subtitle(let subtitleFrame):
           await MainActor.run {
@@ -629,13 +618,14 @@ public class VideoPlayer {
           pause()
         }
 
-        audioPlayer.cleanup()
+        audioOutput.flush()
         decoder?.close()
         decoder = nil
         currentFrame = nil
 
-        Task {
-          await displayLoop.stop()
+        playbackClock.pause()
+        if let sbRenderer = renderer as? SampleBufferRenderer {
+          sbRenderer.flush()
         }
 
         demuxTask = nil
@@ -645,10 +635,8 @@ public class VideoPlayer {
         state = .idle
 
         let pq = packetQueue
-        let fb = frameBuffer
         Task.detached(priority: .high) {
           await pq.reset()
-          await fb.reset()
         }
       }
     } else {
@@ -658,13 +646,14 @@ public class VideoPlayer {
             pause()
           }
 
-          audioPlayer.cleanup()
+          audioOutput.flush()
           decoder?.close()
           decoder = nil
           currentFrame = nil
 
-          Task {
-            await displayLoop.stop()
+          playbackClock.pause()
+          if let sbRenderer = renderer as? SampleBufferRenderer {
+            sbRenderer.flush()
           }
 
           demuxTask = nil
@@ -674,10 +663,8 @@ public class VideoPlayer {
           state = .idle
 
           let pq = packetQueue
-          let fb = frameBuffer
           Task.detached(priority: .high) {
             await pq.reset()
-            await fb.reset()
           }
         }
       }
@@ -780,18 +767,58 @@ public class VideoPlayer {
   nonisolated deinit {
     cancelAllTasks()
   }
+
+  private func refreshDebugStats(videoPTS: Double? = nil, audioPTS: Double? = nil) async {
+    if let videoPTS = videoPTS {
+      lastVideoPTS = videoPTS
+    }
+    if let audioPTS = audioPTS {
+      lastAudioPTS = audioPTS
+    }
+
+    let now = ProcessInfo.processInfo.systemUptime
+    if now - lastStatsUpdateTime < 0.2 {
+      return
+    }
+    lastStatsUpdateTime = now
+
+    let queueCount = await packetQueue.count
+    let queueMax = packetQueue.maxSize
+    let videoReady = (renderer as? SampleBufferRenderer)?.isReadyForMoreMediaData ?? false
+    let audioReady = audioOutput.isReadyForMoreMediaData
+    let audioBackend: String = (audioOutput is SystemAudioRenderer) ? "System" : "AudioEngine"
+    let syncRate = playbackClock.rate
+    let keyframeCount = decoder?.keyframeCount ?? 0
+    let decoderName = decoder?.videoInfo.decoderName ?? "Unknown"
+    let isHardwareDecoded = decoder?.videoInfo.isHardwareAccelerated ?? false
+
+    debugStats.packetQueueCount = queueCount
+    debugStats.packetQueueMax = queueMax
+    debugStats.videoRendererReady = videoReady
+    debugStats.audioRendererReady = audioReady
+    debugStats.audioBackend = audioBackend
+    debugStats.lastVideoPTS = lastVideoPTS
+    debugStats.lastAudioPTS = lastAudioPTS
+    debugStats.avDrift = lastAudioPTS - lastVideoPTS
+    debugStats.syncRate = syncRate
+    debugStats.keyframeCount = keyframeCount
+    debugStats.decoderName = decoderName
+    debugStats.isHardwareDecoded = isHardwareDecoded
+  }
 }
 
 /// Real-time debug statistics for the video player
 public struct PlayerDebugStats: Sendable {
   public var packetQueueCount: Int = 0
   public var packetQueueMax: Int = 0
-  public var frameBufferCount: Int = 0
-  public var frameBufferMax: Int = 0
+  public var videoRendererReady: Bool = false
+  public var audioRendererReady: Bool = false
+  public var audioBackend: String = "Unknown"
+  public var lastVideoPTS: Double = 0
+  public var lastAudioPTS: Double = 0
   public var avDrift: Double = 0.0
-  public var droppedFrameCount: Int = 0
   public var isHardwareDecoded: Bool = false
   public var decoderName: String = "Unknown"
-  public var displayRefreshRate: Double = 0.0
+  public var syncRate: Double = 0.0
   public var keyframeCount: Int = 0
 }

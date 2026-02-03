@@ -9,9 +9,9 @@ import Foundation
 
 /// Buffer configuration preset for video decoding.
 ///
-/// `Buffers` provides preset configurations for frame buffer and packet queue sizes,
-/// optimized for hardware vs software decoding scenarios. Hardware decoding can afford
-/// larger buffers, while software decoding requires more conservative memory usage.
+/// `Buffers` provides preset configurations for packet queue sizes.
+/// Frame buffer sizing is retained for API compatibility but is no longer used in
+/// system-scheduled playback.
 ///
 /// ## Example
 /// ```swift
@@ -24,32 +24,15 @@ public enum Buffers: Sendable {
     case auto
     
     /// Conservative buffer sizes for software decoding.
-    /// - Frame buffer: 3 frames
     /// - Packet queue: 15 packets
     case software
     
     /// Aggressive buffer sizes for hardware decoding.
-    /// - Frame buffer: 10 frames
     /// - Packet queue: 120 packets
     case hardware
     
     /// Custom buffer sizes.
     case custom(frameBuffer: Int, packetQueue: Int)
-    
-    /// Size of the frame buffer in frames.
-    public var frameBufferSize: Int {
-        switch self {
-        case .auto:
-            // Default to software sizes for deferred initialization
-            return Buffers.software.frameBufferSize
-        case .software:
-            return 3
-        case .hardware:
-            return 10
-        case .custom(let frameBuffer, _):
-            return frameBuffer
-        }
-    }
     
     /// Size of the packet queue in packets.
     public var packetQueueSize: Int {

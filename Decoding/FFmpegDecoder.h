@@ -113,14 +113,6 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) double endTime;
 /// Text content (if text-based).
 @property(nonatomic, copy, nullable) NSString *text;
-/// Bitmap content (if single bitmap-based) - Deprecated, use bitmaps array.
-@property(nonatomic, strong, nullable) NSData *bitmapData;
-@property(nonatomic, assign) int bitmapWidth;
-@property(nonatomic, assign) int bitmapHeight;
-@property(nonatomic, assign) double normalizedX;
-@property(nonatomic, assign) double normalizedY;
-@property(nonatomic, assign) double normalizedWidth;
-@property(nonatomic, assign) double normalizedHeight;
 
 /// Array of FFmpegSubtitleBitmap objects.
 @property(nonatomic, copy, nullable) NSArray<FFmpegSubtitleBitmap *> *bitmaps;

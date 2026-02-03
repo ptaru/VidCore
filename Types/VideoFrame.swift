@@ -60,13 +60,13 @@ public struct VideoFrame {
         ]
         
         for (key, value) in attachments {
-            if CVBufferGetAttachment(pixelBuffer, key, nil) == nil {
+            if CVBufferCopyAttachment(pixelBuffer, key, nil) == nil {
                 CVBufferSetAttachment(pixelBuffer, key, value, .shouldPropagate)
             }
         }
         
         // Transfer Function
-        if CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
+        if CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) == nil {
             let TransferFunction_HLG = kCVImageBufferTransferFunction_ITU_R_2100_HLG
             let TransferFunction_PQ = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
             
@@ -80,4 +80,3 @@ public struct VideoFrame {
         }
     }
 }
-

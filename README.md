@@ -13,7 +13,9 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - **System-Integrated Rendering**: Uses `AVSampleBufferDisplayLayer` for power-efficient, color-perfect rendering of SDR, and HDR content
 - **HDR Support**: DoVi, HDR10, and HLG support with BT.2020 color primaries and proper EDR signaling
 - **Tone Mapping**: Automatic system-level tone mapping using dynamic metadata where available
-- **Audio Playback**: Synchronized audio via AVAudioEngine with A/V sync correction
+- **Audio Playback**: System-scheduled audio via AVSampleBufferAudioRenderer (with AVAudioEngine fallback for app extensions; best-effort sync)
+  - Quick Look runs in an app extension, so VidCore automatically switches to AVAudioEngine there.
+  - For testing the fallback in a normal app, set `VIDCORE_FORCE_AUDIO_ENGINE=1` in the environment.
 - **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
 - **Optimized Buffering**: Intelligent buffer management with CVPixelBufferPool and frame reordering for multi-threaded decoders
@@ -416,7 +418,7 @@ High-level playback orchestrator with A/V sync and state management.
 
 ### Buffer Configuration
 
-The `Buffers` enum configures frame buffer and packet queue sizes:
+The `Buffers` enum configures packet queue sizes:
 
 ```swift
 public enum Buffers {
@@ -617,12 +619,22 @@ Real-time playback statistics for debugging and monitoring.
 |----------|------|-------------|
 | `packetQueueCount` | `Int` | Current packets in queue |
 | `packetQueueMax` | `Int` | Maximum queue size |
-| `frameBufferCount` | `Int` | Current frames buffered |
-| `frameBufferMax` | `Int` | Maximum frame buffer size |
+| `videoRendererReady` | `Bool` | Whether the video renderer is ready for more data |
+| `audioRendererReady` | `Bool` | Whether the audio renderer is ready for more data |
+| `audioBackend` | `String` | Active audio backend (`System` or `AudioEngine`) |
+| `lastVideoPTS` | `Double` | Last video presentation timestamp |
+| `lastAudioPTS` | `Double` | Last audio presentation timestamp |
 | `avDrift` | `Double` | Audio/video synchronization drift in seconds |
-| `droppedFrameCount` | `Int` | Number of frames dropped |
 | `isHardwareDecoded` | `Bool` | Whether hardware decoding is active |
 | `decoderName` | `String` | Name of active decoder |
+| `syncRate` | `Double` | Current AVSampleBufferRenderSynchronizer playback rate |
+
+You can detect which audio backend is active by checking the `SystemAudioRenderer` flags when you construct a player:
+
+```swift
+let usesSystemAudio = SystemAudioRenderer.isSupportedInCurrentProcess
+  && !SystemAudioRenderer.isForceFallbackEnabled
+```
 
 ---
 
@@ -642,12 +654,12 @@ graph TD
 
         subgraph Playback [Playback Layer]
             VP[VideoPlayer]
-            VDL[VideoDisplayLoop<br/>Actor]
-            AP[AudioPlayer]
+            PC[PlaybackClock]
+            SAR[SystemAudioRenderer]
+            AER[AudioEngineRenderer]
         end
 
         subgraph Buffers [Buffer Management]
-            VFB[VideoFrameBuffer]
             PQ[PacketQueue]
         end
 
@@ -666,8 +678,11 @@ graph TD
     subgraph System [System Dependencies]
         FF[FFmpeg Libraries]
         VT[VideoToolbox]
-        AV[AVAudioEngine]
         ASBDL[AVSampleBufferDisplayLayer]
+        ASBAR[AVSampleBufferAudioRenderer]
+        AVAE[AVAudioEngine]
+        ASBRS[AVSampleBufferRenderSynchronizer]
+        CMTB[CMTimebase]
     end
 
     UI --> VPV
@@ -677,19 +692,21 @@ graph TD
     ASVR --> LR
     LR --> ASBDL
 
-    VP --> VDL
     VP --> VD
-    VP --> AP
-    VP -.-> VFB
+    VP --> SAR
+    VP --> AER
+    VP --> PC
     VP -.-> PQ
-    
-    VDL --> VFB
-    VDL --> LR
     
     VD --> FD
     VD --> VTD
     FD --> FF
     VTD --> VT
-    
-    AP --> AV
+
+    SAR --> ASBAR
+    AER --> AVAE
+    PC --> ASBRS
+    ASBRS --> ASBDL
+    ASBRS --> ASBAR
+    ASBRS --> CMTB
 ```

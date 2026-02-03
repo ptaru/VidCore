@@ -272,12 +272,6 @@ public final class VideoDecoder: @unchecked Sendable {
     demuxer = nil
   }
 
-  private var isDecoderClosed: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return isClosed
-  }
-
   // MARK: - Parallel Demux/Decode API
 
   /// Demux next packet from the container (runs on demux queue)
@@ -426,23 +420,6 @@ public final class VideoDecoder: @unchecked Sendable {
                 swiftBitmaps.append(swiftBitmap)
               }
               subtitleContent = .bitmaps(swiftBitmaps)
-            } else if let bitmapData = subtitleFrameObj.bitmapData,
-              subtitleFrameObj.bitmapWidth > 0, subtitleFrameObj.bitmapHeight > 0
-            {
-              // Legacy fallback
-              let rect = CGRect(
-                x: subtitleFrameObj.normalizedX,
-                y: subtitleFrameObj.normalizedY,
-                width: subtitleFrameObj.normalizedWidth,
-                height: subtitleFrameObj.normalizedHeight
-              )
-              let swiftBitmap = SubtitleBitmap(
-                data: bitmapData,
-                width: Int(subtitleFrameObj.bitmapWidth),
-                height: Int(subtitleFrameObj.bitmapHeight),
-                rect: rect
-              )
-              subtitleContent = .bitmaps([swiftBitmap])
             }
 
             let frame = SubtitleFrame(
@@ -935,10 +912,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
         if streamIndex == -1 {
           // Disable subtitles
-          // We might need a method to clear subtitle context in decoder if supported,
-          // or just selecting -1 in demuxer prevents new packets.
           _ = demuxer.selectSubtitleStream(-1)
-          // TODO: Implement disable in decoder if needed
           continuation.resume(returning: true)
           return
         }

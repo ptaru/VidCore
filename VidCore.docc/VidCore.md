@@ -40,6 +40,8 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 
 ## Topics
 
+> Note: In app extension contexts (e.g. Quick Look), VidCore falls back to `AVAudioEngine` for audio playback. This is best-effort and may not be sample-accurate.
+
 ### SwiftUI Views
 
 - ``VidPlayer``
@@ -51,6 +53,23 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 - ``PlaybackState``
 - ``VideoPlayerError``
 - ``PlayerDebugStats``
+- ``PlaybackClock``
+- ``SystemAudioRenderer``
+- ``AudioEngineRenderer``
+- ``AudioRendering``
+
+### Audio Routing
+
+`AudioRendering` abstracts the audio output backend. On macOS app extensions (e.g. Quick Look), VidCore falls back to ``AudioEngineRenderer`` (AVAudioEngine) because ``SystemAudioRenderer`` (AVSampleBufferAudioRenderer) is unavailable. This fallback is best-effort and may not be sample-accurate.
+
+To detect which audio backend is active:
+
+```swift
+let usesSystemAudio = SystemAudioRenderer.isSupportedInCurrentProcess
+  && !SystemAudioRenderer.isForceFallbackEnabled
+```
+
+For testing the fallback in a normal app, set `VIDCORE_FORCE_AUDIO_ENGINE=1` in the environment.
 
 ### Decoding
 
@@ -60,10 +79,6 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 - ``DecodedFrame``
 - ``AudioTrackInfo``
 
-### Audio
-
-- ``AudioPlayer``
-
 ### Buffer Configuration
 
 - ``Buffers``
@@ -72,4 +87,3 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 
 - ``LayerRenderer``
 - ``VideoRendererTarget``
-

@@ -32,8 +32,6 @@ public struct SubtitleTrackInfo: Sendable, Equatable, Identifiable {
   public var displayName: String {
     let codecUpper = codecName.uppercased()
     let lang = language?.uppercased() ?? "Unknown"
-    let typeInfo = isBitmap ? "Bitmap" : "Text"
-
     if let title = title, !title.isEmpty {
       return "\(title) - \(lang)"
     } else {
