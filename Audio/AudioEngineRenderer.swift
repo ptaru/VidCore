@@ -2,7 +2,7 @@
 //  AudioEngineRenderer.swift
 //  VidCore
 //
-//  Fallback audio output for app extensions (e.g., Quick Look).
+//  PTS-based audio output for app extensions (e.g., Quick Look).
 //
 
 import AVFoundation
@@ -18,6 +18,11 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
   private var configuredFormat: AVAudioFormat?
   private var isPlaying: Bool = false
   private var pendingPlay: Bool = false
+
+  // Buffer queue management for pre-roll and smooth playback
+  private var enqueuedBufferCount: Int = 0
+  private let minimumBufferCount: Int = 3
+  private let bufferCountLock = NSLock()
 
   public init() {
     engine.attach(playerNode)
@@ -44,10 +49,20 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
       self.startEngineIfNeeded()
       self.playerNode.volume = max(0.0, min(volume, 1.0))
 
-      // Best-effort for Quick Look: queue buffers sequentially without explicit timing.
-      self.playerNode.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+      // Schedule immediately - AVAudioEngine handles timing
+      self.playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+        self?.bufferCountLock.lock()
+        self?.enqueuedBufferCount -= 1
+        self?.bufferCountLock.unlock()
+      }
 
-      if self.pendingPlay && !self.isPlaying {
+      self.bufferCountLock.lock()
+      self.enqueuedBufferCount += 1
+      let count = self.enqueuedBufferCount
+      self.bufferCountLock.unlock()
+
+      // Start playback once we have minimum buffers
+      if self.pendingPlay && !self.isPlaying && count >= self.minimumBufferCount {
         self.playerNode.play()
         self.isPlaying = true
       }
@@ -60,6 +75,10 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
       playerNode.reset()
       isPlaying = false
       pendingPlay = false
+      // Reset buffer count
+      bufferCountLock.lock()
+      enqueuedBufferCount = 0
+      bufferCountLock.unlock()
     }
   }
 
@@ -67,7 +86,8 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
     enqueueQueue.async { [weak self] in
       guard let self else { return }
       self.pendingPlay = isPlaying
-      self.timePitch.rate = Float(max(0.25, min(rate, 4.0)))
+      let clampedRate = max(0.25, min(rate, 4.0))
+      self.timePitch.rate = Float(clampedRate)
       self.startEngineIfNeeded()
 
       if isPlaying && self.configuredFormat != nil && !self.isPlaying {
@@ -114,5 +134,11 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
       && lhs.channelCount == rhs.channelCount
       && lhs.commonFormat == rhs.commonFormat
       && lhs.isInterleaved == rhs.isInterleaved
+  }
+
+  /// Returns the PTS currently being played, if available.
+  /// AudioEngineRenderer doesn't track precise PTS - this is a fallback renderer.
+  public func currentPlaybackPTS() -> Double? {
+    return nil
   }
 }

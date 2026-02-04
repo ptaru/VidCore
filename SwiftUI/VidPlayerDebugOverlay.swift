@@ -44,11 +44,6 @@ struct VidPlayerDebugOverlay: View {
             debugRow("State", "Playing")  // Dynamic in future
             debugRow("Decoder", stats.decoderName)
             debugRow("Clock Rate", String(format: "%.2fx", stats.syncRate))
-            if stats.keyframeCount > 0 {
-              debugRow("Keyframes", "\(stats.keyframeCount)")
-            } else {
-              debugRow("Keyframes", "Indexing...", color: .gray)
-            }
 
             // Buffer Health
             let pqPct = Double(stats.packetQueueCount) / Double(max(1, stats.packetQueueMax)) * 100
@@ -80,9 +75,6 @@ struct VidPlayerDebugOverlay: View {
         // Timing
         Group {
           debugRow("PTS", String(format: "%.3fs", frame.presentationTime))
-          if let stats = debugStats {
-            debugRow("Audio PTS", String(format: "%.3fs", stats.lastAudioPTS))
-          }
           if let info = videoInfo {
             let frameNumber = Int(frame.presentationTime * info.frameRate)
             debugRow("Frame #", "\(frameNumber)")
@@ -99,16 +91,10 @@ struct VidPlayerDebugOverlay: View {
               value: Binding(
                 get: { playbackRate },
                 set: { onPlaybackRateChanged?($0) }
-            ), in: 0.25...4.0, step: 0.25
+              ), in: 0.25...4.0, step: 0.25
             )
             .controlSize(.mini)
             .frame(width: 100)
-          }
-
-          if let stats = debugStats {
-            let driftMs = stats.avDrift * 1000
-            let color: Color = abs(driftMs) > 100 ? .red : abs(driftMs) > 50 ? .orange : .white
-            debugRow("A/V Drift", String(format: "%+.1f ms", driftMs), color: color)
           }
         }
       }

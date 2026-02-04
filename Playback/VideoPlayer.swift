@@ -99,7 +99,6 @@ public class VideoPlayer {
   private weak var renderer: VideoRendererTarget?
 
   // Debug/stat tracking
-  private var lastAudioPTS: Double = 0
   private var lastVideoPTS: Double = 0
   private var lastStatsUpdateTime: TimeInterval = 0
 
@@ -241,8 +240,6 @@ public class VideoPlayer {
           selectedSubtitleTrackIndex = -1
         }
 
-        // Start background generation of keyframe index for accurate seeking
-        decoder.startKeyframeIndexing()
         await refreshDebugStats()
 
         while !Task.isCancelled {
@@ -584,7 +581,7 @@ public class VideoPlayer {
           if !Task.isCancelled {
             audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
             hasAudio = true
-            await refreshDebugStats(audioPTS: pts)
+            await refreshDebugStats()
           }
         case .subtitle(let subtitleFrame):
           await MainActor.run {
@@ -768,12 +765,9 @@ public class VideoPlayer {
     cancelAllTasks()
   }
 
-  private func refreshDebugStats(videoPTS: Double? = nil, audioPTS: Double? = nil) async {
+  private func refreshDebugStats(videoPTS: Double? = nil) async {
     if let videoPTS = videoPTS {
       lastVideoPTS = videoPTS
-    }
-    if let audioPTS = audioPTS {
-      lastAudioPTS = audioPTS
     }
 
     let now = ProcessInfo.processInfo.systemUptime
@@ -788,7 +782,6 @@ public class VideoPlayer {
     let audioReady = audioOutput.isReadyForMoreMediaData
     let audioBackend: String = (audioOutput is SystemAudioRenderer) ? "System" : "AudioEngine"
     let syncRate = playbackClock.rate
-    let keyframeCount = decoder?.keyframeCount ?? 0
     let decoderName = decoder?.videoInfo.decoderName ?? "Unknown"
     let isHardwareDecoded = decoder?.videoInfo.isHardwareAccelerated ?? false
 
@@ -798,17 +791,7 @@ public class VideoPlayer {
     debugStats.audioRendererReady = audioReady
     debugStats.audioBackend = audioBackend
     debugStats.lastVideoPTS = lastVideoPTS
-    debugStats.lastAudioPTS = lastAudioPTS
-
-    // A/V drift is only meaningful with SystemAudioRenderer (PTS-based timing).
-    // AudioEngineRenderer queues buffers without timing, so lastAudioPTS reflects
-    // what's enqueued (ahead of playback), not what's actually playing.
-    let isSystemRenderer = audioOutput is SystemAudioRenderer
-    debugStats.avDrift = isSystemRenderer ? (lastAudioPTS - lastVideoPTS) : 0.0
-    debugStats.isAvDriftValid = isSystemRenderer
-
     debugStats.syncRate = syncRate
-    debugStats.keyframeCount = keyframeCount
     debugStats.decoderName = decoderName
     debugStats.isHardwareDecoded = isHardwareDecoded
   }
@@ -822,8 +805,6 @@ public struct PlayerDebugStats: Sendable {
   public var audioRendererReady: Bool = false
   public var audioBackend: String = "Unknown"
   public var lastVideoPTS: Double = 0
-  public var lastAudioPTS: Double = 0
-  public var avDrift: Double = 0.0
   public var isHardwareDecoded: Bool = false
   public var decoderName: String = "Unknown"
   public var syncRate: Double = 0.0

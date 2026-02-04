@@ -48,7 +48,6 @@
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *subtitleStreamIndices;
 
 @property(nonatomic, copy) NSString *filePath;
-@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *keyframeIndex;
 
 @property(nonatomic, strong) FFmpegDemuxerVideoInfo *videoInfo;
 @property(nonatomic, strong)
@@ -849,34 +848,8 @@ static const NSUInteger kMaxQueuedAudioPackets =
 
   AVStream *stream = _formatContext->streams[_videoStreamIndex];
 
-  // Use index for precise seek if available
-  double searchTime = seconds;
-  NSArray<NSNumber *> *index = nil;
-  @synchronized(self) {
-    index = self.keyframeIndex;
-  }
-
-  if (index && index.count > 0) {
-    // index is already captured in local variable
-    double bestTime = [index[0] doubleValue];
-
-    NSInteger low = 0;
-    NSInteger high = index.count - 1;
-
-    while (low <= high) {
-      NSInteger mid = (low + high) / 2;
-      double val = [index[mid] doubleValue];
-      if (val <= seconds) {
-        bestTime = val;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-    searchTime = bestTime;
-  }
-
-  int64_t timestamp = (int64_t)(searchTime / av_q2d(stream->time_base));
+  // Use pure FFmpeg seeking without custom index
+  int64_t timestamp = (int64_t)(seconds / av_q2d(stream->time_base));
 
   if (avformat_seek_file(_formatContext, _videoStreamIndex, INT64_MIN,
                          timestamp, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
@@ -884,60 +857,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   }
 
   return YES;
-}
-
-- (void)generateKeyframeIndex {
-  if (self.keyframeIndex)
-    return;
-
-  NSString *path = [self.filePath copy];
-  if (!path)
-    return;
-
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-    AVFormatContext *fmtCtx = NULL;
-    // Open new context for scanning
-    if (avformat_open_input(&fmtCtx, [path UTF8String], NULL, NULL) < 0) {
-      return;
-    }
-
-    if (avformat_find_stream_info(fmtCtx, NULL) < 0) {
-      avformat_close_input(&fmtCtx);
-      return;
-    }
-
-    int videoStreamIndex =
-        av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (videoStreamIndex < 0) {
-      avformat_close_input(&fmtCtx);
-      return;
-    }
-
-    AVStream *stream = fmtCtx->streams[videoStreamIndex];
-    AVPacket *packet = av_packet_alloc();
-    NSMutableArray<NSNumber *> *index = [NSMutableArray array];
-
-    // Scan file
-    while (av_read_frame(fmtCtx, packet) >= 0) {
-      if (packet->stream_index == videoStreamIndex) {
-        if (packet->flags & AV_PKT_FLAG_KEY) {
-          double pts = packet->pts * av_q2d(stream->time_base);
-          [index addObject:@(pts)];
-        }
-      }
-      av_packet_unref(packet);
-    }
-
-    av_packet_free(&packet);
-    avformat_close_input(&fmtCtx);
-
-    // Thread-safe update (no need for main thread)
-    @synchronized(self) {
-      self->_keyframeIndex = index;
-    }
-    NSLog(@"[FFmpegDemuxer] Generated keyframe index with %lu frames",
-          (unsigned long)index.count);
-  });
 }
 
 - (nullable NSArray<FFmpegDemuxerPacket *> *)collectPacketsUntil:

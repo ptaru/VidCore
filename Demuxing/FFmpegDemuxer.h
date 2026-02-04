@@ -217,15 +217,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether extradata was manually synthesized due to missing headers.
 @property(nonatomic, readonly) BOOL didSynthesizeExtradata;
 
-/// Generated keyframe timestamps (in seconds).
-/// Populated asynchronously by generateKeyframeIndex.
-@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *keyframeIndex;
-
-/// Start background generation of keyframe index.
-/// Scans the file to find all keyframe timestamps for accurate seeking.
-/// Uses a separate context so it is safe to call during playback.
-- (void)generateKeyframeIndex;
-
 @end
 
 NS_ASSUME_NONNULL_END
