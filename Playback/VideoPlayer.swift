@@ -63,7 +63,7 @@ public class VideoPlayer {
       let clamped = max(0.1, min(playbackRate, 32.0))
       if state == .playing {
         playbackClock.setRate(clamped)
-        audioOutput.play(rate: clamped)
+        audioOutput.setPlaybackState(isPlaying: true, rate: clamped)
       }
     }
   }
@@ -163,7 +163,7 @@ public class VideoPlayer {
       )
     default:
       effectiveBuffers = buffers
-      // Debug logging removed: noisy in Quick Look extensions.
+    // Debug logging removed: noisy in Quick Look extensions.
     }
 
     // Debug logging removed: noisy in Quick Look extensions.
@@ -298,7 +298,7 @@ public class VideoPlayer {
       // Debug logging removed: noisy in Quick Look extensions.
       state = .playing
       playbackClock.play(rate: playbackRate)
-      audioOutput.play(rate: playbackRate)
+      audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
 
       Task {
         await packetQueue.resume()
@@ -311,7 +311,7 @@ public class VideoPlayer {
     // Debug logging removed: noisy in Quick Look extensions.
     state = .playing
     playbackClock.play(rate: playbackRate)
-    audioOutput.play(rate: playbackRate)
+    audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
 
     startTasks()
   }
@@ -322,7 +322,7 @@ public class VideoPlayer {
 
     state = .paused
     playbackClock.pause()
-    audioOutput.pause()
+    audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
 
     Task {
       await packetQueue.suspend()
@@ -361,7 +361,7 @@ public class VideoPlayer {
       // Enter seeking state to prevent race conditions
       state = .seeking
       playbackClock.pause()
-      audioOutput.pause()
+      audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
       await packetQueue.suspend()
 
       guard !Task.isCancelled else {
@@ -408,7 +408,7 @@ public class VideoPlayer {
         if wasPlaying {
           state = .playing
           playbackClock.play(rate: playbackRate)
-          audioOutput.play(rate: playbackRate)
+          audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
           await packetQueue.resume()
         } else {
           // We already have the frame displayed, so just pause
@@ -799,7 +799,14 @@ public class VideoPlayer {
     debugStats.audioBackend = audioBackend
     debugStats.lastVideoPTS = lastVideoPTS
     debugStats.lastAudioPTS = lastAudioPTS
-    debugStats.avDrift = lastAudioPTS - lastVideoPTS
+
+    // A/V drift is only meaningful with SystemAudioRenderer (PTS-based timing).
+    // AudioEngineRenderer queues buffers without timing, so lastAudioPTS reflects
+    // what's enqueued (ahead of playback), not what's actually playing.
+    let isSystemRenderer = audioOutput is SystemAudioRenderer
+    debugStats.avDrift = isSystemRenderer ? (lastAudioPTS - lastVideoPTS) : 0.0
+    debugStats.isAvDriftValid = isSystemRenderer
+
     debugStats.syncRate = syncRate
     debugStats.keyframeCount = keyframeCount
     debugStats.decoderName = decoderName

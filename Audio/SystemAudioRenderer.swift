@@ -174,7 +174,8 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
 
   private func makeFormatDescription(for format: AVAudioFormat) -> CMAudioFormatDescription? {
     guard isEnabled else { return nil }
-    let key = "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
+    let key =
+      "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
     if key == cachedFormatKey, let cached = cachedFormatDescription {
       return cached
     }
@@ -216,15 +217,8 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
     return desc
   }
 
-  public func play(rate: Double) {
+  public func setPlaybackState(isPlaying: Bool, rate: Double) {
     // System audio renderer follows the synchronizer timebase.
-  }
-
-  public func pause() {
-    // System audio renderer follows the synchronizer timebase.
-  }
-
-  public func seek(to seconds: Double) {
-    // System audio renderer follows the synchronizer timebase.
+    // State is managed externally by PlaybackClock.
   }
 }

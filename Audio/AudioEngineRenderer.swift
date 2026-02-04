@@ -63,29 +63,21 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
     }
   }
 
-  public func play(rate: Double) {
+  public func setPlaybackState(isPlaying: Bool, rate: Double) {
     enqueueQueue.async { [weak self] in
       guard let self else { return }
-      self.pendingPlay = true
+      self.pendingPlay = isPlaying
       self.timePitch.rate = Float(max(0.25, min(rate, 4.0)))
       self.startEngineIfNeeded()
-      if self.configuredFormat != nil, !self.isPlaying {
+
+      if isPlaying && self.configuredFormat != nil && !self.isPlaying {
         self.playerNode.play()
         self.isPlaying = true
+      } else if !isPlaying && self.isPlaying {
+        self.playerNode.pause()
+        self.isPlaying = false
       }
     }
-  }
-
-  public func pause() {
-    enqueueQueue.sync {
-      playerNode.pause()
-      isPlaying = false
-      pendingPlay = false
-    }
-  }
-
-  public func seek(to seconds: Double) {
-    flush()
   }
 
   private func configureIfNeeded(for format: AVAudioFormat) {
