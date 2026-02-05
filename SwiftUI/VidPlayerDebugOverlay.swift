@@ -19,6 +19,7 @@ struct VidPlayerDebugOverlay: View {
   let onSubtitleTrackSelected: ((Int) -> Void)?
   let playbackRate: Double
   let onPlaybackRateChanged: ((Double) -> Void)?
+  let currentTime: Double
 
   @State private var isAttachmentsExpanded = false
   @State private var isAudioTracksExpanded = true
@@ -74,7 +75,7 @@ struct VidPlayerDebugOverlay: View {
 
         // Timing
         Group {
-          debugRow("PTS", String(format: "%.3fs", frame.presentationTime))
+          debugRow("PTS", String(format: "%.3fs", max(frame.presentationTime, currentTime)))
           if let info = videoInfo {
             let frameNumber = Int(frame.presentationTime * info.frameRate)
             debugRow("Frame #", "\(frameNumber)")

@@ -157,7 +157,8 @@ public struct VidPlayer<Overlay: View>: View {
           playbackRate: activePlayer.playbackRate,
           onPlaybackRateChanged: { rate in
             activePlayer.playbackRate = rate
-          }
+          },
+          currentTime: activePlayer.currentTime
         )
       }
 
