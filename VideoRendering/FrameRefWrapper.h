@@ -42,9 +42,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Transfers ownership back to ARC which triggers av_frame_unref.
 /// Signature must match CVPixelBufferReleasePlanarBytesCallback:
 /// void (*)(void *, const void *, size_t, size_t, const void **)
-void FrameRefWrapper_ReleaseCallback(void *refCon, const void *dataPtr,
-                                     size_t dataSize, size_t numberOfPlanes,
-                                     const void *planeAddresses[]);
+void FrameRefWrapper_ReleaseCallback(
+    void *refCon, const void *dataPtr, size_t dataSize, size_t numberOfPlanes,
+    const void *_Nonnull *_Nonnull planeAddresses);
 
 @end
 

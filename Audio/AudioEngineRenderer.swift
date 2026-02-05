@@ -128,7 +128,7 @@ public actor AudioEngineRenderer: AudioRendering {
     }
   }
 
-  private func startEngineIfNeeded() {
+  nonisolated private func startEngineIfNeeded() {
     if engine.isRunning { return }
     do {
       try engine.start()

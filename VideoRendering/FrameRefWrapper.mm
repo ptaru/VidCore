@@ -59,9 +59,9 @@
 
 #pragma mark - CVPixelBuffer Release Callback
 
-void FrameRefWrapper_ReleaseCallback(void *refCon, const void *dataPtr,
-                                     size_t dataSize, size_t numberOfPlanes,
-                                     const void *planeAddresses[]) {
+void FrameRefWrapper_ReleaseCallback(
+    void *refCon, const void *dataPtr, size_t dataSize, size_t numberOfPlanes,
+    const void *_Nonnull *_Nonnull planeAddresses) {
   // Transfer ownership from __bridge_retained back to ARC
   // This will trigger dealloc when the transfer completes
   FrameRefWrapper *wrapper = (__bridge_transfer FrameRefWrapper *)refCon;

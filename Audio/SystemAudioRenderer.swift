@@ -57,7 +57,7 @@ public actor SystemAudioRenderer: AudioRendering {
           try? await Task.sleep(nanoseconds: readinessTimeoutNanos)
           var shouldStop = false
           var waiter: CheckedContinuation<Void, Never>?
-          await self.timeoutWaiter(waiterID: waiterID) { stop, w in
+          self.timeoutWaiter(waiterID: waiterID) { stop, w in
             shouldStop = stop
             waiter = w
           }

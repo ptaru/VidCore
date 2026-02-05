@@ -11,6 +11,9 @@ import CoreMedia
 import SwiftUI
 import VideoToolbox
 
+// Fix for Sendable warning
+extension AVSampleBufferDisplayLayer: @unchecked Sendable {}
+
 /// Renderer target that wraps AVSampleBufferDisplayLayer.
 /// It is Sendable and can be called from background threads.
 public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaDataReadinessAwaiting {
@@ -33,19 +36,19 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
 
   private func _enqueue(_ frame: VideoFrame) {
     guard let sampleBuffer = createSampleBuffer(from: frame) else { return }
-    if displayLayer.status == .failed {
-      displayLayer.flush()
+    if displayLayer.sampleBufferRenderer.status == .failed {
+      displayLayer.sampleBufferRenderer.flush()
     }
 
-    displayLayer.enqueue(sampleBuffer)
+    displayLayer.sampleBufferRenderer.enqueue(sampleBuffer)
   }
 
   public nonisolated var isReadyForMoreMediaData: Bool {
-    displayLayer.isReadyForMoreMediaData
+    displayLayer.sampleBufferRenderer.isReadyForMoreMediaData
   }
 
   public func waitUntilReady() async {
-    if displayLayer.isReadyForMoreMediaData {
+    if displayLayer.sampleBufferRenderer.isReadyForMoreMediaData {
       return
     }
 
@@ -62,22 +65,24 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
           try? await Task.sleep(nanoseconds: readinessTimeoutNanos)
           var shouldStop = false
           var waiter: CheckedContinuation<Void, Never>?
-          await self.timeoutWaiter(waiterID: waiterID) { stop, w in
+          self.timeoutWaiter(waiterID: waiterID) { stop, w in
             shouldStop = stop
             waiter = w
           }
           if shouldStop {
-            self.displayLayer.stopRequestingMediaData()
+            self.displayLayer.sampleBufferRenderer.stopRequestingMediaData()
           }
           waiter?.resume()
         }
 
         if shouldStart {
-          self.displayLayer.requestMediaDataWhenReady(on: DispatchQueue.global()) { [weak self] in
+          self.displayLayer.sampleBufferRenderer.requestMediaDataWhenReady(
+            on: DispatchQueue.global()
+          ) { [weak self] in
             guard let self else { return }
-            guard self.displayLayer.isReadyForMoreMediaData else { return }
+            guard self.displayLayer.sampleBufferRenderer.isReadyForMoreMediaData else { return }
 
-            self.displayLayer.stopRequestingMediaData()
+            self.displayLayer.sampleBufferRenderer.stopRequestingMediaData()
 
             Task {
               await self.resumeAllWaiters()
@@ -121,14 +126,14 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
     }
 
     if shouldStop {
-      displayLayer.stopRequestingMediaData()
+      displayLayer.sampleBufferRenderer.stopRequestingMediaData()
     }
 
     waiter?.resume()
   }
 
   public nonisolated func flush() {
-    displayLayer.flush()
+    displayLayer.sampleBufferRenderer.flush()
   }
 
   private func createSampleBuffer(from frame: VideoFrame) -> CMSampleBuffer? {
