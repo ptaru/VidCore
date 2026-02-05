@@ -12,7 +12,7 @@ import SwiftUI
 import VideoToolbox
 
 // Fix for Sendable warning
-extension AVSampleBufferDisplayLayer: @unchecked Sendable {}
+ extension AVSampleBufferDisplayLayer: @unchecked @retroactive Sendable {}
 
 /// Renderer target that wraps AVSampleBufferDisplayLayer.
 /// It is Sendable and can be called from background threads.

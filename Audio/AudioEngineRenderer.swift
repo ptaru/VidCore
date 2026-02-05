@@ -74,14 +74,18 @@ public actor AudioEngineRenderer: AudioRendering {
   }
 
   public nonisolated func flush() {
-    Task {
-      await _flush()
+    // Synchronous flush to prevent race conditions with subsequent enqueue calls.
+    // playerNode.stop() and reset() are thread-safe and can be called from any thread.
+    playerNode.stop()
+    playerNode.reset()
+
+    // Update actor state synchronously
+    Task { @MainActor in
+      await self.resetFlushState()
     }
   }
 
-  private func _flush() {
-    playerNode.stop()
-    playerNode.reset()
+  private func resetFlushState() {
     isPlaying = false
     pendingPlay = false
     enqueuedBufferCount = 0
