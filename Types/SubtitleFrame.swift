@@ -9,7 +9,7 @@ import CoreGraphics
 import Foundation
 
 /// Represents a decoded subtitle content.
-public enum SubtitleContent: Sendable {
+public enum SubtitleContent: Sendable, Equatable {
   /// Plain text or marked up text (e.g. ASS/SSA, SRT).
   case text(String)
   /// Bitmap images for image-based subtitles (e.g. PGS, VobSub).
@@ -17,7 +17,7 @@ public enum SubtitleContent: Sendable {
 }
 
 /// A single bitmap element in a subtitle frame.
-public struct SubtitleBitmap: Sendable {
+public struct SubtitleBitmap: Sendable, Equatable {
   /// Raw RGBA pixel data.
   public let data: Data
   /// Raw (pixel) width of the bitmap.
@@ -36,7 +36,7 @@ public struct SubtitleBitmap: Sendable {
 }
 
 /// A decoded subtitle frame with timing and content.
-public struct SubtitleFrame: Sendable {
+public struct SubtitleFrame: Sendable, Equatable {
   /// The actual content of the subtitle.
   public let content: SubtitleContent
   /// Start time of the subtitle in seconds.

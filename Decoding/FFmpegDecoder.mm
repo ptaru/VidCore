@@ -619,11 +619,17 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
       if (rect->type == SUBTITLE_TEXT) {
         if (rect->text) {
-          [fullText appendFormat:@"%s", rect->text];
+          NSString *textStr = [NSString stringWithUTF8String:rect->text];
+          if (textStr) {
+            [fullText appendString:textStr];
+          }
         }
       } else if (rect->type == SUBTITLE_ASS) {
         if (rect->ass) {
-          [fullText appendFormat:@"%s", rect->ass];
+          NSString *assStr = [NSString stringWithUTF8String:rect->ass];
+          if (assStr) {
+            [fullText appendString:assStr];
+          }
           frame.isASS = YES;
         }
       } else if (rect->type == SUBTITLE_BITMAP) {

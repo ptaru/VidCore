@@ -111,6 +111,7 @@ public class VideoPlayer {
   nonisolated(unsafe) private var currentSeekTask: Task<Void, Never>?
 
   private var subtitles: [SubtitleFrame] = []
+  private var lastSubtitleUpdateTime: Double = 0
 
   // MARK: - Initialization
 
@@ -374,6 +375,7 @@ public class VideoPlayer {
       await packetQueue.reset()
       subtitles.removeAll()
       currentSubtitle = nil
+      lastSubtitleUpdateTime = 0
       if let sbRenderer = renderer as? SampleBufferRenderer {
         sbRenderer.flush()
       }
@@ -455,15 +457,21 @@ public class VideoPlayer {
   }
 
   private func updateSubtitles(for time: Double) {
+    // Ignore out-of-order frames to prevent flickering at subtitle boundaries
+    // Only allow backwards jumps if they're significant (>1s, indicating a real seek)
+    if time < lastSubtitleUpdateTime && (lastSubtitleUpdateTime - time) < 1.0 {
+      return
+    }
+    lastSubtitleUpdateTime = time
+
     // Find the subtitle that matches current time
     // Use last (most recent) to ensure newer subtitles replace older overlapping ones
     let newSubtitle = subtitles.last { sub in
       time >= sub.startTime && (sub.endTime == nil || time <= sub.endTime!)
     }
 
-    // Only update if changed (to avoid excessive view updates, though SwiftUI handles it)
-    // using startTime as identity for now
-    if newSubtitle?.startTime != currentSubtitle?.startTime {
+    // Only update if changed to avoid excessive SwiftUI view updates and flickering
+    if newSubtitle != currentSubtitle {
       currentSubtitle = newSubtitle
     }
   }
