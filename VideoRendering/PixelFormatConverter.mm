@@ -10,7 +10,6 @@
 #import "FFmpegBridge.h"
 #undef AVMediaType
 
-#import "AccelerateHelper.h"
 #import "PixelFormatConverter.h"
 
 @interface PixelFormatConverter ()
@@ -112,14 +111,46 @@
     return NULL;
   }
 
-  // Delegate copy to AccelerateHelper (avoids header conflicts)
-  [AccelerateHelper copyYUV420PToBuffer:pixelBuffer
-                                   srcY:frame->data[0]
-                                   srcU:frame->data[1]
-                                   srcV:frame->data[2]
-                            srcLinesize:frame->linesize
-                                  width:frame->width
-                                 height:frame->height];
+  // Direct memcpy for each plane - simple and efficient
+  CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+
+  // Copy Y plane
+  uint8_t *yDest =
+      (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+  size_t yDestStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+  const uint8_t *ySrc = frame->data[0];
+  int ySrcStride = frame->linesize[0];
+
+  for (int row = 0; row < frame->height; row++) {
+    memcpy(yDest + row * yDestStride, ySrc + row * ySrcStride, frame->width);
+  }
+
+  // Copy U plane
+  int uvHeight = frame->height / 2;
+  int uvWidth = frame->width / 2;
+
+  uint8_t *uDest =
+      (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
+  size_t uDestStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+  const uint8_t *uSrc = frame->data[1];
+  int uSrcStride = frame->linesize[1];
+
+  for (int row = 0; row < uvHeight; row++) {
+    memcpy(uDest + row * uDestStride, uSrc + row * uSrcStride, uvWidth);
+  }
+
+  // Copy V plane
+  uint8_t *vDest =
+      (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 2);
+  size_t vDestStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 2);
+  const uint8_t *vSrc = frame->data[2];
+  int vSrcStride = frame->linesize[2];
+
+  for (int row = 0; row < uvHeight; row++) {
+    memcpy(vDest + row * vDestStride, vSrc + row * vSrcStride, uvWidth);
+  }
+
+  CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
   return pixelBuffer;
 }
 
@@ -171,13 +202,57 @@
     return NULL;
   }
 
-  [AccelerateHelper copyYUV420P10LEToBuffer:pixelBuffer
-                                       srcY:(const uint16_t *)frame->data[0]
-                                       srcU:(const uint16_t *)frame->data[1]
-                                       srcV:(const uint16_t *)frame->data[2]
-                                srcLinesize:frame->linesize
-                                      width:frame->width
-                                     height:frame->height];
+  // Direct copy with bit-shifting for 10-bit to P010 conversion
+  CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+
+  // Y plane - copy with 6-bit left shift (10-bit LE → 16-bit MSB-aligned)
+  uint16_t *yDest =
+      (uint16_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+  size_t yDestBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+  const uint16_t *ySrc = (const uint16_t *)frame->data[0];
+  int ySrcStride = frame->linesize[0] / 2;
+
+  for (int row = 0; row < frame->height; row++) {
+    const uint16_t *srcRow = ySrc + row * ySrcStride;
+    uint16_t *dstRow = (uint16_t *)((uint8_t *)yDest + row * yDestBytesPerRow);
+
+    // Unrolled loop for better performance
+    int col = 0;
+    for (; col + 4 <= frame->width; col += 4) {
+      dstRow[col] = srcRow[col] << 6;
+      dstRow[col + 1] = srcRow[col + 1] << 6;
+      dstRow[col + 2] = srcRow[col + 2] << 6;
+      dstRow[col + 3] = srcRow[col + 3] << 6;
+    }
+    for (; col < frame->width; col++) {
+      dstRow[col] = srcRow[col] << 6;
+    }
+  }
+
+  // UV plane - interleave U and V with bit shift
+  uint16_t *uvDest =
+      (uint16_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
+  size_t uvDestBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+  const uint16_t *uSrc = (const uint16_t *)frame->data[1];
+  const uint16_t *vSrc = (const uint16_t *)frame->data[2];
+  int uSrcStride = frame->linesize[1] / 2;
+  int vSrcStride = frame->linesize[2] / 2;
+  int uvHeight = frame->height / 2;
+  int uvWidth = frame->width / 2;
+
+  for (int row = 0; row < uvHeight; row++) {
+    const uint16_t *uRow = uSrc + row * uSrcStride;
+    const uint16_t *vRow = vSrc + row * vSrcStride;
+    uint16_t *dstRow =
+        (uint16_t *)((uint8_t *)uvDest + row * uvDestBytesPerRow);
+
+    for (int col = 0; col < uvWidth; col++) {
+      dstRow[col * 2] = uRow[col] << 6;
+      dstRow[col * 2 + 1] = vRow[col] << 6;
+    }
+  }
+
+  CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
   return pixelBuffer;
 }
 
