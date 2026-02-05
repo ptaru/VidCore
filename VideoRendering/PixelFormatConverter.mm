@@ -10,6 +10,7 @@
 #import "FFmpegBridge.h"
 #undef AVMediaType
 
+#import "FrameRefWrapper.h"
 #import "PixelFormatConverter.h"
 
 @interface PixelFormatConverter ()
@@ -19,6 +20,9 @@
 @property(nonatomic, assign) int poolWidth;
 @property(nonatomic, assign) int poolHeight;
 @property(nonatomic, assign) BOOL hasCreatedP010Pool;
+// Statistics for monitoring zero-copy effectiveness
+@property(nonatomic, assign) int zeroCopyCount;
+@property(nonatomic, assign) int fallbackCopyCount;
 @end
 
 @implementation PixelFormatConverter
@@ -65,6 +69,94 @@
 #pragma mark - Private Conversion Methods
 
 - (nullable CVPixelBufferRef)convertYUV420PFrame:(AVFrame *)frame {
+  // Check if zero-copy is possible
+  // Requirements: width-aligned strides, no padding
+  BOOL canUseZeroCopy = [self isFrameSuitableForZeroCopy:frame];
+
+  if (canUseZeroCopy) {
+    CVPixelBufferRef pixelBuffer = [self convertYUV420PFrameZeroCopy:frame];
+    if (pixelBuffer) {
+      _zeroCopyCount++;
+      if (_zeroCopyCount == 1) {
+        NSLog(@"[PixelFormatConverter] Zero-copy path activated for %dx%d",
+              frame->width, frame->height);
+      }
+      return pixelBuffer;
+    }
+    // Zero-copy failed, fall through to legacy path
+  }
+
+  // Fallback to memcpy path for non-aligned frames
+  _fallbackCopyCount++;
+  if (_fallbackCopyCount == 1) {
+    NSLog(@"[PixelFormatConverter] Fallback to memcpy path for %dx%d (stride "
+          @"Y:%d U:%d V:%d)",
+          frame->width, frame->height, frame->linesize[0], frame->linesize[1],
+          frame->linesize[2]);
+  }
+  return [self convertYUV420PFrameLegacy:frame];
+}
+
+/// Check if frame has contiguous, aligned memory suitable for zero-copy
+/// wrapping
+- (BOOL)isFrameSuitableForZeroCopy:(AVFrame *)frame {
+  // Zero-copy only works if FFmpeg buffer is contiguous and properly aligned
+  // Check for padding in strides (linesize should equal width for packed data)
+  return (frame->linesize[0] == frame->width) &&
+         (frame->linesize[1] == frame->width / 2) &&
+         (frame->linesize[2] == frame->width / 2);
+}
+
+/// Zero-copy conversion: wrap AVFrame buffers directly in CVPixelBuffer
+- (nullable CVPixelBufferRef)convertYUV420PFrameZeroCopy:(AVFrame *)frame {
+  // Create wrapper to manage AVFrame lifetime
+  FrameRefWrapper *wrapper = [[FrameRefWrapper alloc] initWithFrame:frame];
+  if (!wrapper) {
+    return NULL;
+  }
+
+  void *planeAddresses[3] = {
+      frame->data[0], // Y plane
+      frame->data[1], // U plane
+      frame->data[2]  // V plane
+  };
+
+  size_t planeWidths[3] = {(size_t)frame->width, (size_t)(frame->width / 2),
+                           (size_t)(frame->width / 2)};
+
+  size_t planeHeights[3] = {(size_t)frame->height, (size_t)(frame->height / 2),
+                            (size_t)(frame->height / 2)};
+
+  size_t planeBytesPerRow[3] = {(size_t)frame->linesize[0],
+                                (size_t)frame->linesize[1],
+                                (size_t)frame->linesize[2]};
+
+  CVPixelBufferRef pixelBuffer = NULL;
+  CVReturn status = CVPixelBufferCreateWithPlanarBytes(
+      kCFAllocatorDefault, frame->width, frame->height,
+      kCVPixelFormatType_420YpCbCr8Planar,
+      NULL, // dataPtr (not used for planar)
+      0,    // dataSize
+      3,    // numberOfPlanes
+      planeAddresses, planeWidths, planeHeights, planeBytesPerRow,
+      FrameRefWrapper_ReleaseCallback,
+      (__bridge_retained void *)wrapper, // Transfer ownership to callback
+      NULL, &pixelBuffer);
+
+  if (status != kCVReturnSuccess) {
+    // Release wrapper if CVPixelBuffer creation failed
+    CFRelease((__bridge CFTypeRef)wrapper);
+    NSLog(
+        @"[PixelFormatConverter] CVPixelBufferCreateWithPlanarBytes failed: %d",
+        status);
+    return NULL;
+  }
+
+  return pixelBuffer;
+}
+
+/// Legacy conversion: allocate from pool and memcpy plane data
+- (nullable CVPixelBufferRef)convertYUV420PFrameLegacy:(AVFrame *)frame {
   // Use CVPixelBufferPool for efficient buffer reuse
   // This significantly reduces memory fragmentation for high-resolution video
 
