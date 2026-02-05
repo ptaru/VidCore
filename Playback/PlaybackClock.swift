@@ -44,6 +44,10 @@ public actor PlaybackClock {
     synchronizer.setRate(synchronizer.rate, time: time)
   }
 
+  public func getCurrentTime() -> Double {
+    synchronizer.currentTime().seconds
+  }
+
   public var rate: Double {
     Double(synchronizer.rate)
   }

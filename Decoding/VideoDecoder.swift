@@ -513,7 +513,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
   // MARK: - Seeking
 
-  public func seek(to seconds: Double, accurate: Bool = true) async throws -> VideoFrame? {
+  public func seek(to seconds: Double) async throws -> VideoFrame? {
     try await withCheckedThrowingContinuation {
       (continuation: CheckedContinuation<VideoFrame?, Error>) in
       demuxQueue.async { [weak self] in
@@ -537,14 +537,14 @@ public final class VideoDecoder: @unchecked Sendable {
         // Dispatch based on available decoder
         if self.vtDecoder != nil {
           do {
-            let frame = try self.seekVTDecoder(to: seconds, accurate: accurate)
+            let frame = try self.seekVTDecoder(to: seconds)
             continuation.resume(returning: frame)
           } catch {
             continuation.resume(throwing: error)
           }
         } else if self.decoder != nil {
           do {
-            let frame = try self.seekFFmpeg(to: seconds, accurate: accurate)
+            let frame = try self.seekFFmpeg(to: seconds)
             continuation.resume(returning: frame)
           } catch {
             continuation.resume(throwing: error)
@@ -637,7 +637,7 @@ public final class VideoDecoder: @unchecked Sendable {
     )
   }
 
-  private func seekVTDecoder(to seconds: Double, accurate: Bool) throws -> VideoFrame? {
+  private func seekVTDecoder(to seconds: Double) throws -> VideoFrame? {
     guard let demuxer = self.demuxer, let vtDecoder = self.vtDecoder else { return nil }
 
     // VTDecoder path: use demuxer for seeking and getting packets
@@ -649,18 +649,8 @@ public final class VideoDecoder: @unchecked Sendable {
     }
 
     // Collect packets from demuxer
-    var packets: [FFmpegDemuxerPacket] = []
-    if accurate {
-      if let collectedPackets = demuxer.collectPackets(until: seconds) {
-        packets = collectedPackets
-      }
-    } else {
-      if let keyframePackets = demuxer.collectKeyframePackets() {
-        packets = keyframePackets
-      }
-    }
-
-    guard !packets.isEmpty else {
+    // Always collect until target for accurate seek
+    guard let packets = demuxer.collectPackets(until: seconds), !packets.isEmpty else {
       throw NSError(
         domain: "VideoDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packets"])
@@ -669,49 +659,41 @@ public final class VideoDecoder: @unchecked Sendable {
     // Decode packets through VTDecoder
     var lastFrame: VTDecodedFrame?
 
-    if !accurate && packets.count == 1 {
-      // For non-accurate seek (single keyframe), use SYNCHRONOUS decoding
-      // This ensures we get a frame immediately for responsiveness during scrubbing
-      let packet = packets[0]
+    // Always use async pipeline for accurate seek
+    for packet in packets {
       do {
-        if let pixelBuffer = try vtDecoder.decodePacketSync(
+        try vtDecoder.sendPacket(
           data: packet.data,
           pts: packet.pts,
           dts: packet.dts,
-          duration: packet.duration
-        ) {
-          let pts = CMTime(
-            value: packet.pts * Int64(vtDecoder.timeBaseNum),
-            timescale: vtDecoder.timeBaseDen)
-          lastFrame = VTDecodedFrame(pixelBuffer: pixelBuffer, presentationTime: pts)
-        }
+          duration: packet.duration,
+          ambientMetadata: packet.ambientLightMetadata
+        )
       } catch {
-        print("[VideoDecoder] VTDecoder sync decode error: \(error)")
+        print("[VideoDecoder] VTDecoder seek error: \(error)")
       }
-    } else {
-      // For accurate seek (multiple packets), use async pipeline
-      for packet in packets {
-        do {
-          try vtDecoder.sendPacket(
-            data: packet.data,
-            pts: packet.pts,
-            dts: packet.dts,
-            duration: packet.duration
-          )
 
-          // Pop all available frames, keep the last one at or after target
-          while let frame = vtDecoder.popFrame() {
-            let framePTS = CMTimeGetSeconds(frame.presentationTime)
-            if framePTS >= seconds - 0.01 {
-              lastFrame = frame
-            } else {
-              // Haven't reached target yet, keep this as backup
-              lastFrame = frame
-            }
-          }
-        } catch {
-          print("[VideoDecoder] VTDecoder seek error: \(error)")
+      // Pop available frames as we go
+      while let frame = vtDecoder.popFrame() {
+        let framePTS = CMTimeGetSeconds(frame.presentationTime)
+        if framePTS >= seconds - 0.01 {
+          lastFrame = frame
+        } else {
+          lastFrame = frame
         }
+      }
+    }
+
+    // CRITICAL: Wait for any pending async frames to complete
+    vtDecoder.finish()
+
+    // Final drain of the queue
+    while let frame = vtDecoder.popFrame() {
+      let framePTS = CMTimeGetSeconds(frame.presentationTime)
+      if framePTS >= seconds - 0.01 {
+        lastFrame = frame
+      } else {
+        lastFrame = frame
       }
     }
 
@@ -730,7 +712,7 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  private func seekFFmpeg(to seconds: Double, accurate: Bool) throws -> VideoFrame? {
+  private func seekFFmpeg(to seconds: Double) throws -> VideoFrame? {
     guard let demuxer = self.demuxer, let decoder = self.decoder else { return nil }
 
     // Non-VTDecoder path: use demuxer to seek, decoder to decode
@@ -765,9 +747,8 @@ public final class VideoDecoder: @unchecked Sendable {
             for ffmpegFrame in ffmpegFrames {
               let framePTS = ffmpegFrame.presentationTime
 
-              // For accurate seek: wait for target
-              // For fast seek: take first frame (keyframe or first available)
-              if framePTS >= seconds - 0.05 || !accurate {
+              // Always wait for target (accurate seek)
+              if framePTS >= seconds - 0.05 {
                 let frame = self.makeVideoFrame(
                   pixelBuffer: ffmpegFrame.pixelBuffer,
                   presentationTime: framePTS,

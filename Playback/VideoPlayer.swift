@@ -109,6 +109,10 @@ public class VideoPlayer {
   nonisolated(unsafe) private var decodeTask: Task<Void, Never>?
   @ObservationIgnored
   nonisolated(unsafe) private var currentSeekTask: Task<Void, Never>?
+  @ObservationIgnored
+  nonisolated(unsafe) private var scrubTask: Task<Void, Never>?
+  @ObservationIgnored
+  nonisolated(unsafe) private var scrubContinuation: AsyncStream<Double>.Continuation?
 
   private var subtitles: [SubtitleFrame] = []
   private var lastSubtitleUpdateTime: Double = 0
@@ -251,11 +255,11 @@ public class VideoPlayer {
             return nil
           }).first {
             currentFrame = videoFrame
-            renderer?.enqueue(videoFrame)
-            currentTime = videoFrame.presentationTime
+            await renderer?.enqueue(videoFrame)
             if state == .playing {
-              await playbackClock.setTime(videoFrame.presentationTime)
+              currentTime = await playbackClock.getCurrentTime()
             } else {
+              currentTime = videoFrame.presentationTime
               await playbackClock.seek(to: videoFrame.presentationTime)
             }
             await refreshDebugStats(videoPTS: videoFrame.presentationTime)
@@ -340,8 +344,7 @@ public class VideoPlayer {
   ///
   /// - Parameters:
   ///   - seconds: Target time in seconds.
-  ///   - accurate: If true, seeks to exact frame; if false, seeks to nearest keyframe.
-  public func seek(to seconds: Double, accurate: Bool = true) async {
+  public func seek(to seconds: Double) async {
     currentSeekTask?.cancel()
 
     let task = Task { @MainActor [weak self] in
@@ -381,11 +384,11 @@ public class VideoPlayer {
       }
 
       do {
-        if let seekFrame = try await decoder.seek(to: clampedSeconds, accurate: accurate) {
+        if let seekFrame = try await decoder.seek(to: clampedSeconds) {
           guard !Task.isCancelled else { return }
           currentFrame = seekFrame
           await playbackClock.seek(to: seekFrame.presentationTime)
-          renderer?.enqueue(seekFrame)
+          await renderer?.enqueue(seekFrame)
 
           // Update timing to match the actual frame found
           currentTime = seekFrame.presentationTime
@@ -456,6 +459,121 @@ public class VideoPlayer {
     state = .idle
   }
 
+  // MARK: - Scrubbing
+
+  /// Begin a scrubbing session.
+  ///
+  /// This pauses playback, stops the decode loop, and prepares the player for rapid
+  /// coalesced seeking. Use `scrub(to:)` to update the position.
+  public func beginScrub() async {
+    // Prevent re-entrancy
+    // Move state transition to start to prevent race with scrub(to:)
+    let previousState = state
+    state = .scrubbing
+
+    // Stop existing tasks
+    await stopTasks()
+    currentSeekTask?.cancel()
+
+    await playbackClock.pause()
+    audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
+    await packetQueue.suspend()
+
+    // Create a stream for coalesced scrubbing updates
+    // bufferingNewest(1) ensures we drop intermediate updates and only process the latest
+    let (stream, continuation) = AsyncStream<Double>.makeStream(
+      bufferingPolicy: .bufferingNewest(1))
+    self.scrubContinuation = continuation
+
+    // Start the dedicated scrub task
+    scrubTask = Task { [weak self, stream] in
+      guard let self = self else { return }
+
+      for await targetTime in stream {
+        guard !Task.isCancelled else { break }
+        guard let decoder = await self.decoder else { continue }
+
+        do {
+          // Perform accurate seek
+          // Note: VideoDecoder.seek is now always accurate
+          if let frame = try await decoder.seek(to: targetTime) {
+            let renderer = await MainActor.run {
+              self.currentFrame = frame
+              self.currentTime = frame.presentationTime
+              self.updateSubtitles(for: frame.presentationTime)
+              return self.renderer
+            }
+
+            if let r = renderer {
+              if let sbRenderer = r as? SampleBufferRenderer {
+                sbRenderer.flush()
+              }
+              await r.enqueue(frame)
+            }
+            await self.refreshDebugStats(videoPTS: frame.presentationTime)
+          }
+        } catch {
+          print("[VideoPlayer] Scrub seek failed: \(error)")
+        }
+      }
+    }
+  }
+
+  /// Update the scrub position.
+  ///
+  /// This method is lightweight and designed to be called frequently (e.g., from a slider drag).
+  /// Updates are coalesced so that the decoder only processes the latest request.
+  ///
+  /// - Parameter time: The target time to scrub to.
+  public func scrub(to time: Double) {
+    guard state == .scrubbing else {
+      // If not in scrubbing state, just do a one-off seek (less efficient for dragging)
+      Task { await seek(to: time) }
+      return
+    }
+    let clamped = max(0, min(time, duration))
+    scrubContinuation?.yield(clamped)
+  }
+
+  /// End the scrubbing session.
+  ///
+  /// - Parameter resumePlayback: Whether to resume playback after scrubbing ends.
+  public func endScrub(resumePlayback: Bool) async {
+    guard state == .scrubbing else { return }
+
+    // Stop scrub task
+    scrubContinuation?.finish()
+    scrubContinuation = nil
+    scrubTask?.cancel()
+    _ = await scrubTask?.result
+    scrubTask = nil
+
+    // Resume normal operation
+    // We are already at the correct frame from the last scrub update
+
+    // Sync clock to the new position
+    // Use MainActor to safely read the final scrub time
+    let resumeTime = await MainActor.run { self.currentTime }
+    await playbackClock.seek(to: resumeTime)
+    await audioOutput.flush()
+
+    // Restart the pipeline
+    // Reset queue to clear old packets from before scrub
+    // This is CRITICAL: otherwise the decoder processes old frames and video appears stuck
+    await packetQueue.reset()
+    startTasks()
+
+    if resumePlayback {
+      state = .playing
+      await playbackClock.play(rate: playbackRate)
+      audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
+    } else {
+      state = .paused
+      // Re-suspend if staying paused
+      await packetQueue.suspend()
+    }
+  }
+
   private func updateSubtitles(for time: Double) {
     // Ignore out-of-order frames to prevent flickering at subtitle boundaries
     // Only allow backwards jumps if they're significant (>1s, indicating a real seek)
@@ -496,6 +614,12 @@ public class VideoPlayer {
   private func stopTasks() async {
     demuxTask?.cancel()
     decodeTask?.cancel()
+
+    // Deadlock Fix: Packets might be stuck pushing to a full queue.
+    // We must suspend the queue to wake up any blocked producers/consumers
+    // so they can check cancellation and exit.
+    await packetQueue.suspend()
+
     // Display loop is controlled separately
 
     await demuxTask?.value
@@ -552,10 +676,10 @@ public class VideoPlayer {
             await readinessAwaiter.waitUntilReady()
           }
           guard !Task.isCancelled else { break }
-          renderer?.enqueue(frame)
+          await renderer?.enqueue(frame)
           currentFrame = frame
-          currentTime = frame.presentationTime
-          updateSubtitles(for: frame.presentationTime)
+          currentTime = await playbackClock.getCurrentTime()
+          updateSubtitles(for: currentTime)
           await refreshDebugStats(videoPTS: frame.presentationTime)
           drainedCount += 1
         }
@@ -578,10 +702,10 @@ public class VideoPlayer {
             await readinessAwaiter.waitUntilReady()
           }
           guard !Task.isCancelled else { break }
-          renderer?.enqueue(videoFrame)
+          await renderer?.enqueue(videoFrame)
           currentFrame = videoFrame
-          currentTime = videoFrame.presentationTime
-          updateSubtitles(for: videoFrame.presentationTime)
+          currentTime = await playbackClock.getCurrentTime()
+          updateSubtitles(for: currentTime)
           await refreshDebugStats(videoPTS: videoFrame.presentationTime)
         case .audio(let buffer, let pts):
           guard audioOutput.isEnabled else { break }
@@ -611,6 +735,8 @@ public class VideoPlayer {
     demuxTask?.cancel()
     decodeTask?.cancel()
     currentSeekTask?.cancel()
+    scrubContinuation?.finish()
+    scrubTask?.cancel()
   }
 
   /// Synchronous close for use from deinit or when async cannot be awaited.
@@ -718,7 +844,7 @@ public class VideoPlayer {
     videoInfo = decoder.videoInfo
 
     // 3. Accurate seek to reset state and maintain position
-    await seek(to: currentPosition, accurate: true)
+    await seek(to: currentPosition)
 
     // 4. Resume playback if we were playing
     if wasPlaying {

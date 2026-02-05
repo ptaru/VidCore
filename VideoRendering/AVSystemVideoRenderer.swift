@@ -12,7 +12,7 @@ import SwiftUI
 import VideoToolbox
 
 // Fix for Sendable warning
- extension AVSampleBufferDisplayLayer: @unchecked @retroactive Sendable {}
+extension AVSampleBufferDisplayLayer: @unchecked @retroactive Sendable {}
 
 /// Renderer target that wraps AVSampleBufferDisplayLayer.
 /// It is Sendable and can be called from background threads.
@@ -28,10 +28,8 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
     displayLayer.videoGravity = .resizeAspect
   }
 
-  public nonisolated func enqueue(_ frame: VideoFrame) {
-    Task {
-      await _enqueue(frame)
-    }
+  public nonisolated func enqueue(_ frame: VideoFrame) async {
+    await _enqueue(frame)
   }
 
   private func _enqueue(_ frame: VideoFrame) {
