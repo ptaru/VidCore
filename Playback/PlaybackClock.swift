@@ -10,7 +10,7 @@ import CoreMedia
 import Foundation
 
 /// Owns a system synchronizer to drive AVSampleBuffer renderers (video + audio).
-public final class PlaybackClock: @unchecked Sendable {
+public actor PlaybackClock {
   private let synchronizer: AVSampleBufferRenderSynchronizer
   private weak var currentVideoRenderer: AVQueuedSampleBufferRendering?
 

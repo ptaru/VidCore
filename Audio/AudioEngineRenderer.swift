@@ -8,13 +8,12 @@
 import AVFoundation
 import Foundation
 
-public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
-  public let isEnabled: Bool = true
+public actor AudioEngineRenderer: AudioRendering {
+  public nonisolated let isEnabled: Bool = true
 
-  private let engine = AVAudioEngine()
-  private let playerNode = AVAudioPlayerNode()
-  private let timePitch = AVAudioUnitTimePitch()
-  private let enqueueQueue = DispatchQueue(label: "VidCore.AudioEngineRenderer")
+  nonisolated private let engine = AVAudioEngine()
+  nonisolated private let playerNode = AVAudioPlayerNode()
+  nonisolated private let timePitch = AVAudioUnitTimePitch()
   private var configuredFormat: AVAudioFormat?
   private var isPlaying: Bool = false
   private var pendingPlay: Bool = false
@@ -22,7 +21,6 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
   // Buffer queue management for pre-roll and smooth playback
   private var enqueuedBufferCount: Int = 0
   private let minimumBufferCount: Int = 3
-  private let bufferCountLock = NSLock()
 
   public init() {
     engine.attach(playerNode)
@@ -33,7 +31,7 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
     startEngineIfNeeded()
   }
 
-  public var isReadyForMoreMediaData: Bool {
+  public nonisolated var isReadyForMoreMediaData: Bool {
     // AVAudioPlayerNode has no explicit backpressure; accept buffers freely.
     true
   }
@@ -42,61 +40,71 @@ public final class AudioEngineRenderer: AudioRendering, @unchecked Sendable {
     // No backpressure; always ready.
   }
 
-  public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
-    enqueueQueue.async { [weak self] in
-      guard let self else { return }
-      self.configureIfNeeded(for: buffer.format)
-      self.startEngineIfNeeded()
-      self.playerNode.volume = max(0.0, min(volume, 1.0))
-
-      // Schedule immediately - AVAudioEngine handles timing
-      self.playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
-        self?.bufferCountLock.lock()
-        self?.enqueuedBufferCount -= 1
-        self?.bufferCountLock.unlock()
-      }
-
-      self.bufferCountLock.lock()
-      self.enqueuedBufferCount += 1
-      let count = self.enqueuedBufferCount
-      self.bufferCountLock.unlock()
-
-      // Start playback once we have minimum buffers
-      if self.pendingPlay && !self.isPlaying && count >= self.minimumBufferCount {
-        self.playerNode.play()
-        self.isPlaying = true
-      }
+  public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
+    Task {
+      await _enqueue(buffer, pts: pts, volume: volume)
     }
   }
 
-  public func flush() {
-    enqueueQueue.sync {
-      playerNode.stop()
-      playerNode.reset()
-      isPlaying = false
-      pendingPlay = false
-      // Reset buffer count
-      bufferCountLock.lock()
-      enqueuedBufferCount = 0
-      bufferCountLock.unlock()
+  private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
+    configureIfNeeded(for: buffer.format)
+    startEngineIfNeeded()
+    playerNode.volume = max(0.0, min(volume, 1.0))
+
+    // Schedule immediately - AVAudioEngine handles timing
+    playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+      guard let self else { return }
+      Task {
+        await self.decrementBufferCount()
+      }
+    }
+
+    enqueuedBufferCount += 1
+    let count = enqueuedBufferCount
+
+    // Start playback once we have minimum buffers
+    if pendingPlay && !isPlaying && count >= minimumBufferCount {
+      playerNode.play()
+      isPlaying = true
     }
   }
 
-  public func setPlaybackState(isPlaying: Bool, rate: Double) {
-    enqueueQueue.async { [weak self] in
-      guard let self else { return }
-      self.pendingPlay = isPlaying
-      let clampedRate = max(0.25, min(rate, 4.0))
-      self.timePitch.rate = Float(clampedRate)
-      self.startEngineIfNeeded()
+  private func decrementBufferCount() {
+    enqueuedBufferCount -= 1
+  }
 
-      if isPlaying && self.configuredFormat != nil && !self.isPlaying {
-        self.playerNode.play()
-        self.isPlaying = true
-      } else if !isPlaying && self.isPlaying {
-        self.playerNode.pause()
-        self.isPlaying = false
-      }
+  public nonisolated func flush() {
+    Task {
+      await _flush()
+    }
+  }
+
+  private func _flush() {
+    playerNode.stop()
+    playerNode.reset()
+    isPlaying = false
+    pendingPlay = false
+    enqueuedBufferCount = 0
+  }
+
+  public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
+    Task {
+      await _setPlaybackState(isPlaying: isPlaying, rate: rate)
+    }
+  }
+
+  private func _setPlaybackState(isPlaying: Bool, rate: Double) {
+    self.pendingPlay = isPlaying
+    let clampedRate = max(0.25, min(rate, 4.0))
+    self.timePitch.rate = Float(clampedRate)
+    self.startEngineIfNeeded()
+
+    if isPlaying && self.configuredFormat != nil && !self.isPlaying {
+      self.playerNode.play()
+      self.isPlaying = true
+    } else if !isPlaying && self.isPlaying {
+      self.playerNode.pause()
+      self.isPlaying = false
     }
   }
 

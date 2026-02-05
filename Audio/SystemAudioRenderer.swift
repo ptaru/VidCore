@@ -9,24 +9,22 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
-  public static var isSupportedInCurrentProcess: Bool {
+public actor SystemAudioRenderer: AudioRendering {
+  public nonisolated static var isSupportedInCurrentProcess: Bool {
     // AVSampleBufferAudioRenderer is not supported in app extensions (e.g. QuickLook).
     Bundle.main.bundleURL.pathExtension != "appex"
   }
 
-  public static var isForceFallbackEnabled: Bool {
+  public nonisolated static var isForceFallbackEnabled: Bool {
     let value = ProcessInfo.processInfo.environment["VIDCORE_FORCE_AUDIO_ENGINE"] ?? "0"
     return value == "1" || value.lowercased() == "true"
   }
 
-  public let renderer: AVSampleBufferAudioRenderer?
-  public let isEnabled: Bool
+  public nonisolated let renderer: AVSampleBufferAudioRenderer?
+  public nonisolated let isEnabled: Bool
 
   private var cachedFormatDescription: CMAudioFormatDescription?
   private var cachedFormatKey: String?
-  private let readinessQueue = DispatchQueue(label: "VidCore.SystemAudioRenderer.Readiness")
-  private let readinessLock = NSLock()
   private var readinessWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
   private var isRequestingReadiness: Bool = false
   private let readinessTimeoutNanos: UInt64 = 250_000_000
@@ -36,7 +34,7 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
     self.renderer = enabled ? AVSampleBufferAudioRenderer() : nil
   }
 
-  public var isReadyForMoreMediaData: Bool {
+  public nonisolated var isReadyForMoreMediaData: Bool {
     renderer?.isReadyForMoreMediaData ?? false
   }
 
@@ -49,25 +47,20 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
     let waiterID = UUID()
     await withTaskCancellationHandler {
       await withCheckedContinuation { continuation in
-        readinessLock.lock()
         readinessWaiters[waiterID] = continuation
         let shouldStart = !isRequestingReadiness
         if shouldStart {
           isRequestingReadiness = true
         }
-        readinessLock.unlock()
 
         Task {
           try? await Task.sleep(nanoseconds: readinessTimeoutNanos)
           var shouldStop = false
           var waiter: CheckedContinuation<Void, Never>?
-          readinessLock.lock()
-          waiter = readinessWaiters.removeValue(forKey: waiterID)
-          shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-          if shouldStop {
-            isRequestingReadiness = false
+          await self.timeoutWaiter(waiterID: waiterID) { stop, w in
+            shouldStop = stop
+            waiter = w
           }
-          readinessLock.unlock()
           if shouldStop {
             renderer.stopRequestingMediaData()
           }
@@ -75,46 +68,71 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
         }
 
         if shouldStart {
-          renderer.requestMediaDataWhenReady(on: readinessQueue) { [weak self, weak renderer] in
-            guard let self, let renderer else { return }
+          renderer.requestMediaDataWhenReady(on: DispatchQueue.global()) { [weak self] in
+            guard let self, let renderer = self.renderer else { return }
             guard renderer.isReadyForMoreMediaData else { return }
 
             renderer.stopRequestingMediaData()
 
-            self.readinessLock.lock()
-            let waiters = self.readinessWaiters.values
-            self.readinessWaiters.removeAll()
-            self.isRequestingReadiness = false
-            self.readinessLock.unlock()
-
-            for waiter in waiters {
-              waiter.resume()
+            Task {
+              await self.resumeAllWaiters()
             }
           }
         }
       }
     } onCancel: {
-      readinessLock.lock()
-      let waiter = readinessWaiters.removeValue(forKey: waiterID)
-      let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-      if shouldStop {
-        isRequestingReadiness = false
+      Task {
+        await self.cancelWaiter(waiterID: waiterID, renderer: renderer)
       }
-      readinessLock.unlock()
-
-      if shouldStop {
-        renderer.stopRequestingMediaData()
-      }
-
-      waiter?.resume()
     }
   }
 
-  public func flush() {
+  private func timeoutWaiter(
+    waiterID: UUID, completion: (Bool, CheckedContinuation<Void, Never>?) -> Void
+  ) {
+    let waiter = readinessWaiters.removeValue(forKey: waiterID)
+    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
+    if shouldStop {
+      isRequestingReadiness = false
+    }
+    completion(shouldStop, waiter)
+  }
+
+  private func resumeAllWaiters() {
+    let waiters = readinessWaiters.values
+    readinessWaiters.removeAll()
+    isRequestingReadiness = false
+
+    for waiter in waiters {
+      waiter.resume()
+    }
+  }
+
+  private func cancelWaiter(waiterID: UUID, renderer: AVSampleBufferAudioRenderer) {
+    let waiter = readinessWaiters.removeValue(forKey: waiterID)
+    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
+    if shouldStop {
+      isRequestingReadiness = false
+    }
+
+    if shouldStop {
+      renderer.stopRequestingMediaData()
+    }
+
+    waiter?.resume()
+  }
+
+  public nonisolated func flush() {
     renderer?.flush()
   }
 
-  public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
+  public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
+    Task {
+      await _enqueue(buffer, pts: pts, volume: volume)
+    }
+  }
+
+  private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
     let clampedVolume = max(0.0, min(volume, 1.0))
     if clampedVolume != 1.0 {
       if let channels = buffer.floatChannelData {
@@ -217,7 +235,7 @@ public final class SystemAudioRenderer: AudioRendering, @unchecked Sendable {
     return desc
   }
 
-  public func setPlaybackState(isPlaying: Bool, rate: Double) {
+  public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
     // System audio renderer follows the synchronizer timebase.
     // State is managed externally by PlaybackClock.
   }

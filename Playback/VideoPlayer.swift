@@ -62,7 +62,7 @@ public class VideoPlayer {
     didSet {
       let clamped = max(0.1, min(playbackRate, 32.0))
       if state == .playing {
-        playbackClock.setRate(clamped)
+        Task { await playbackClock.setRate(clamped) }
         audioOutput.setPlaybackState(isPlaying: true, rate: clamped)
       }
     }
@@ -183,9 +183,9 @@ public class VideoPlayer {
   @MainActor
   private func configureRenderers(for target: VideoRendererTarget?) {
     if let layerRenderer = target as? LayerRenderer {
-      playbackClock.attachVideoRenderer(layerRenderer.displayLayer)
+      Task { await playbackClock.attachVideoRenderer(layerRenderer.displayLayer) }
     } else {
-      playbackClock.attachVideoRenderer(nil)
+      Task { await playbackClock.attachVideoRenderer(nil) }
     }
   }
 
@@ -254,9 +254,9 @@ public class VideoPlayer {
             renderer?.enqueue(videoFrame)
             currentTime = videoFrame.presentationTime
             if state == .playing {
-              playbackClock.setTime(videoFrame.presentationTime)
+              await playbackClock.setTime(videoFrame.presentationTime)
             } else {
-              playbackClock.seek(to: videoFrame.presentationTime)
+              await playbackClock.seek(to: videoFrame.presentationTime)
             }
             await refreshDebugStats(videoPTS: videoFrame.presentationTime)
             break
@@ -295,7 +295,7 @@ public class VideoPlayer {
     if state == .paused {
       // Debug logging removed: noisy in Quick Look extensions.
       state = .playing
-      playbackClock.play(rate: playbackRate)
+      Task { await playbackClock.play(rate: playbackRate) }
       audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
 
       Task {
@@ -308,7 +308,7 @@ public class VideoPlayer {
 
     // Debug logging removed: noisy in Quick Look extensions.
     state = .playing
-    playbackClock.play(rate: playbackRate)
+    Task { await playbackClock.play(rate: playbackRate) }
     audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
 
     startTasks()
@@ -319,7 +319,7 @@ public class VideoPlayer {
     guard state == .playing else { return }
 
     state = .paused
-    playbackClock.pause()
+    Task { await playbackClock.pause() }
     audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
 
     Task {
@@ -358,7 +358,7 @@ public class VideoPlayer {
 
       // Enter seeking state to prevent race conditions
       state = .seeking
-      playbackClock.pause()
+      await playbackClock.pause()
       audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
       await packetQueue.suspend()
 
@@ -366,7 +366,7 @@ public class VideoPlayer {
         // Restore previous state if cancelled
         state = previousState
         if wasPlaying {
-          playbackClock.play(rate: playbackRate)
+          await playbackClock.play(rate: playbackRate)
           await packetQueue.resume()
         }
         return
@@ -384,7 +384,7 @@ public class VideoPlayer {
         if let seekFrame = try await decoder.seek(to: clampedSeconds, accurate: accurate) {
           guard !Task.isCancelled else { return }
           currentFrame = seekFrame
-          playbackClock.seek(to: seekFrame.presentationTime)
+          await playbackClock.seek(to: seekFrame.presentationTime)
           renderer?.enqueue(seekFrame)
 
           // Update timing to match the actual frame found
@@ -406,7 +406,7 @@ public class VideoPlayer {
 
         if wasPlaying {
           state = .playing
-          playbackClock.play(rate: playbackRate)
+          await playbackClock.play(rate: playbackRate)
           audioOutput.setPlaybackState(isPlaying: true, rate: playbackRate)
           await packetQueue.resume()
         } else {
@@ -435,7 +435,7 @@ public class VideoPlayer {
     audioOutput.flush()
 
     await stopTasks()
-    playbackClock.pause()
+    await playbackClock.pause()
     if let sbRenderer = renderer as? SampleBufferRenderer {
       sbRenderer.flush()
     }
@@ -562,7 +562,7 @@ public class VideoPlayer {
 
         if state == .playing {
           state = .finished
-          playbackClock.pause()
+          await playbackClock.pause()
           audioOutput.flush()
         }
         break
@@ -628,7 +628,7 @@ public class VideoPlayer {
         decoder = nil
         currentFrame = nil
 
-        playbackClock.pause()
+        Task { await playbackClock.pause() }
         if let sbRenderer = renderer as? SampleBufferRenderer {
           sbRenderer.flush()
         }
@@ -656,7 +656,7 @@ public class VideoPlayer {
           decoder = nil
           currentFrame = nil
 
-          playbackClock.pause()
+          Task { await playbackClock.pause() }
           if let sbRenderer = renderer as? SampleBufferRenderer {
             sbRenderer.flush()
           }
@@ -789,7 +789,7 @@ public class VideoPlayer {
     let videoReady = (renderer as? SampleBufferRenderer)?.isReadyForMoreMediaData ?? false
     let audioReady = audioOutput.isReadyForMoreMediaData
     let audioBackend: String = (audioOutput is SystemAudioRenderer) ? "System" : "AudioEngine"
-    let syncRate = playbackClock.rate
+    let syncRate = await playbackClock.rate
     let decoderName = decoder?.videoInfo.decoderName ?? "Unknown"
     let isHardwareDecoded = decoder?.videoInfo.isHardwareAccelerated ?? false
 
