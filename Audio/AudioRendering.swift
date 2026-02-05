@@ -14,7 +14,7 @@ public protocol AudioRendering: AnyObject, Sendable {
   func waitUntilReady() async
 
   func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float)
-  func flush()
+  func flush() async
 
   /// Synchronize the renderer's playback state with an external clock.
   /// - Parameters:

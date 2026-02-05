@@ -122,7 +122,7 @@ public actor SystemAudioRenderer: AudioRendering {
     waiter?.resume()
   }
 
-  public nonisolated func flush() {
+  public nonisolated func flush() async {
     renderer?.flush()
   }
 

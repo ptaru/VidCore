@@ -395,7 +395,7 @@ public class VideoPlayer {
           currentTime = clampedSeconds
         }
 
-        audioOutput.flush()
+        await audioOutput.flush()
 
         guard !Task.isCancelled else {
           return
@@ -432,14 +432,14 @@ public class VideoPlayer {
       pause()
     }
 
-    audioOutput.flush()
+    await audioOutput.flush()
 
     await stopTasks()
     await playbackClock.pause()
     if let sbRenderer = renderer as? SampleBufferRenderer {
       sbRenderer.flush()
     }
-    audioOutput.flush()
+    await audioOutput.flush()
 
     currentSeekTask?.cancel()
     currentSeekTask = nil
@@ -563,7 +563,7 @@ public class VideoPlayer {
         if state == .playing {
           state = .finished
           await playbackClock.pause()
-          audioOutput.flush()
+          await audioOutput.flush()
         }
         break
       }
@@ -623,7 +623,7 @@ public class VideoPlayer {
           pause()
         }
 
-        audioOutput.flush()
+        Task { await audioOutput.flush() }
         decoder?.close()
         decoder = nil
         currentFrame = nil
@@ -651,7 +651,7 @@ public class VideoPlayer {
             pause()
           }
 
-          audioOutput.flush()
+          Task { await audioOutput.flush() }
           decoder?.close()
           decoder = nil
           currentFrame = nil
