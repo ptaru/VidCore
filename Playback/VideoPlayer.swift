@@ -143,8 +143,10 @@ public class VideoPlayer {
       enabled: SystemAudioRenderer.isSupportedInCurrentProcess && !forceFallback
     )
     if audioRenderer.isEnabled {
+      print("[VideoPlayer] Using SystemAudioRenderer")
       self.audioOutput = audioRenderer
     } else {
+      print("[VideoPlayer] Using AudioEngineRenderer (Fallback)")
       self.audioOutput = AudioEngineRenderer()
     }
     self.playbackClock = PlaybackClock(audioRenderer: audioRenderer.renderer)

@@ -410,13 +410,13 @@ public final class VideoDecoder: @unchecked Sendable {
             }
           }
         }
-        // Handle audio packets - typically 1:1 packet-to-frame
+        // Handle audio packets - typically 1:1 packet-to-frame, but TrueHD can have multiple
         else if packet.isAudio {
-          if let decodedFrame = decoder.decodePacket(packet),
-            let audioFrameObj = decodedFrame as? FFmpegAudioFrame
-          {
-            results.append(
-              .audio(audioFrameObj.pcmBuffer, audioFrameObj.presentationTime))
+          if let audioFrames = decoder.decodeAudioPacket(withAllFrames: packet) {
+            for audioFrameObj in audioFrames {
+              results.append(
+                .audio(audioFrameObj.pcmBuffer, audioFrameObj.presentationTime))
+            }
           }
         }
         // Handle subtitle packets

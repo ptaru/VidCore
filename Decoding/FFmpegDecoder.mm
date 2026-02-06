@@ -13,6 +13,7 @@
 #import "FFmpegDecoder.h"
 #import "PixelFormatConverter.h"
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <CoreVideo/CoreVideo.h>
 
 // Forward declaration for the hw_format callback
@@ -91,16 +92,73 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) int32_t audioTimeBaseDen;
 @property(nonatomic, assign) int32_t subtitleTimeBaseNum;
 @property(nonatomic, assign) int32_t subtitleTimeBaseDen;
+@property(nonatomic, assign) double audioNextPTS;
+@property(nonatomic, assign) int32_t swrSrcSampleRate;
+@property(nonatomic, assign) int32_t swrSrcChannels;
+@property(nonatomic, assign) enum AVSampleFormat swrSrcFormat;
 @end
 #pragma mark - Internal Helper Functions
 
-// Constants for audio conversion
-static const int kAudioSampleRate = 48000;
 static const enum AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
-static const int kAudioChannels = 2; // Stereo
+static const int kAudioSampleRateFallback = 48000;
+static const int kAudioChannelsFallback = 2; // Stereo
 
 // Static variable to store the expected hw pixel format for the callback
 static enum AVPixelFormat s_hwPixelFormat = AV_PIX_FMT_NONE;
+
+static UInt32 CoreAudioChannelBitmapFromFFmpegLayout(const AVChannelLayout *layout) {
+  if (!layout) {
+    return 0;
+  }
+
+  uint64_t mask = layout->u.mask;
+
+  UInt32 bitmap = 0;
+  if (mask & AV_CH_FRONT_LEFT) bitmap |= kAudioChannelBit_Left;
+  if (mask & AV_CH_FRONT_RIGHT) bitmap |= kAudioChannelBit_Right;
+  if (mask & AV_CH_FRONT_CENTER) bitmap |= kAudioChannelBit_Center;
+  if (mask & AV_CH_LOW_FREQUENCY) bitmap |= kAudioChannelBit_LFEScreen;
+  if (mask & AV_CH_BACK_LEFT) bitmap |= kAudioChannelBit_LeftSurround;
+  if (mask & AV_CH_BACK_RIGHT) bitmap |= kAudioChannelBit_RightSurround;
+  if (mask & AV_CH_FRONT_LEFT_OF_CENTER) bitmap |= kAudioChannelBit_LeftCenter;
+  if (mask & AV_CH_FRONT_RIGHT_OF_CENTER) bitmap |= kAudioChannelBit_RightCenter;
+  if (mask & AV_CH_BACK_CENTER) bitmap |= kAudioChannelBit_CenterSurround;
+  if (mask & AV_CH_SIDE_LEFT) bitmap |= kAudioChannelBit_LeftSurroundDirect;
+  if (mask & AV_CH_SIDE_RIGHT) bitmap |= kAudioChannelBit_RightSurroundDirect;
+  if (mask & AV_CH_TOP_CENTER) bitmap |= kAudioChannelBit_TopCenterSurround;
+  if (mask & AV_CH_TOP_FRONT_LEFT) bitmap |= kAudioChannelBit_VerticalHeightLeft;
+  if (mask & AV_CH_TOP_FRONT_CENTER) bitmap |= kAudioChannelBit_VerticalHeightCenter;
+  if (mask & AV_CH_TOP_FRONT_RIGHT) bitmap |= kAudioChannelBit_VerticalHeightRight;
+  if (mask & AV_CH_TOP_BACK_LEFT) bitmap |= kAudioChannelBit_TopBackLeft;
+  if (mask & AV_CH_TOP_BACK_CENTER) bitmap |= kAudioChannelBit_TopBackCenter;
+  if (mask & AV_CH_TOP_BACK_RIGHT) bitmap |= kAudioChannelBit_TopBackRight;
+
+  return bitmap;
+}
+
+static AVAudioChannelLayout *CreateChannelLayoutFromFFmpeg(const AVChannelLayout *layout,
+                                                           int channels) {
+  if (!layout || channels <= 2) {
+    return nil;
+  }
+
+  UInt32 bitmap = CoreAudioChannelBitmapFromFFmpegLayout(layout);
+  if (bitmap == 0) {
+    return nil;
+  }
+
+  if (__builtin_popcount(bitmap) != channels) {
+    return nil;
+  }
+
+  AudioChannelLayout acl = {0};
+  acl.mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelBitmap;
+  acl.mChannelBitmap = bitmap;
+  acl.mNumberChannelDescriptions = 0;
+
+  return [[AVAudioChannelLayout alloc] initWithLayout:&acl];
+}
+
 
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                         const enum AVPixelFormat *pix_fmts) {
@@ -145,9 +203,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _usingHardwareDecoder = NO;
     _hwPixelFormat = AV_PIX_FMT_VIDEOTOOLBOX;
     _pixelFormatConverter = [[PixelFormatConverter alloc] init];
+    _audioNextPTS = -1.0;
 
     _subtitleStreamIndex = -1;
     _subtitleCodecContext = NULL;
+    _swrSrcSampleRate = 0;
+    _swrSrcChannels = 0;
+    _swrSrcFormat = AV_SAMPLE_FMT_NONE;
 
     // Extract config values
     int videoCodecId = [config[@"videoCodecId"] intValue];
@@ -487,8 +549,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
-  // Note: SampleBufferBuilder is now used by VideoDecoder.swift for H264/HEVC passthrough
-  // This method handles FFmpeg software and FFmpeg-VideoToolbox paths
+  // Note: SampleBufferBuilder is now used by VideoDecoder.swift for H264/HEVC
+  // passthrough This method handles FFmpeg software and FFmpeg-VideoToolbox
+  // paths
 
   if (avcodec_send_packet(_codecContext, pkt) < 0) {
     return nil;
@@ -534,34 +597,83 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 - (nullable FFmpegAudioFrame *)decodeAudioPacket:(AVPacket *)pkt {
+  NSArray<FFmpegAudioFrame *> *frames =
+      [self decodeAudioPacketWithAllFramesAV:pkt];
+  return frames.firstObject;
+}
+
+- (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFrames:
+    (FFmpegPacketData *)packetData {
+  if (!packetData || !packetData.isAudio || !_audioCodecContext) {
+    return nil;
+  }
+
+  AVPacket *pkt = [self createAVPacketFromData:packetData];
+  if (!pkt)
+    return nil;
+
+  NSArray<FFmpegAudioFrame *> *frames =
+      [self decodeAudioPacketWithAllFramesAV:pkt];
+  av_packet_free(&pkt);
+  return frames;
+}
+
+- (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFramesAV:
+    (AVPacket *)pkt {
   if (avcodec_send_packet(_audioCodecContext, pkt) < 0) {
     return nil;
   }
 
-  int ret = avcodec_receive_frame(_audioCodecContext, _audioFrame);
-  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0) {
-    return nil;
-  }
+  NSMutableArray<FFmpegAudioFrame *> *frames = [NSMutableArray array];
 
-  AVAudioPCMBuffer *pcmBuffer = [self convertAudioFrame:_audioFrame];
-  if (!pcmBuffer) {
-    return nil;
-  }
-
-  double pts = 0.0;
-  if (_audioFrame->pts != AV_NOPTS_VALUE) {
-    if (_audioTimeBaseDen > 0) {
-      pts = (double)_audioFrame->pts * (double)_audioTimeBaseNum /
-            (double)_audioTimeBaseDen;
+  while (true) {
+    int ret = avcodec_receive_frame(_audioCodecContext, _audioFrame);
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+      break;
     }
+    if (ret < 0) {
+      break;
+    }
+
+    AVAudioPCMBuffer *pcmBuffer = [self convertAudioFrame:_audioFrame];
+    if (!pcmBuffer) {
+      continue;
+    }
+
+    double pts = 0.0;
+    bool hasPTS = false;
+    int64_t ts = _audioFrame->pts;
+    if (ts == AV_NOPTS_VALUE) {
+      ts = _audioFrame->best_effort_timestamp;
+    }
+    if (ts != AV_NOPTS_VALUE && _audioTimeBaseDen > 0) {
+      pts = (double)ts * (double)_audioTimeBaseNum /
+            (double)_audioTimeBaseDen;
+      hasPTS = true;
+    } else if (_audioNextPTS >= 0.0) {
+      pts = _audioNextPTS;
+    }
+
+    double duration = 0.0;
+    if (pcmBuffer.frameLength > 0) {
+      duration = (double)pcmBuffer.frameLength / (double)pcmBuffer.format.sampleRate;
+    }
+
+    if (_audioNextPTS >= 0.0 && hasPTS && pts < _audioNextPTS - 0.000001) {
+      // Enforce monotonic audio PTS for system renderer stability.
+      pts = _audioNextPTS;
+    }
+    _audioNextPTS = pts + duration;
+
+    FFmpegAudioFrame *audioFrame = [[FFmpegAudioFrame alloc] init];
+    audioFrame.type = FFmpegFrameTypeAudio;
+    audioFrame.pcmBuffer = pcmBuffer;
+    audioFrame.presentationTime = pts;
+
+    [frames addObject:audioFrame];
   }
 
-  FFmpegAudioFrame *audioFrame = [[FFmpegAudioFrame alloc] init];
-  audioFrame.type = FFmpegFrameTypeAudio;
-  audioFrame.pcmBuffer = pcmBuffer;
-  audioFrame.presentationTime = pts;
-
-  return audioFrame;
+  return frames.count > 0 ? frames : nil;
 }
 
 - (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:(AVPacket *)pkt {
@@ -791,6 +903,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (_subtitleCodecContext) {
     avcodec_flush_buffers(_subtitleCodecContext);
   }
+  _audioNextPTS = -1.0;
 }
 
 - (BOOL)switchSubtitleStream:(NSDictionary<NSString *, id> *)config {
@@ -843,6 +956,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     avcodec_free_context(&_audioCodecContext);
     _audioCodecContext = NULL;
   }
+  _audioNextPTS = -1.0;
 
   if (_swrContext) {
     swr_free(&_swrContext);
@@ -916,25 +1030,46 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 - (AVAudioPCMBuffer *)convertAudioFrame:(AVFrame *)frame {
   // Initialize SwrContext if needed
+  const int outSampleRate = frame->sample_rate > 0 ? frame->sample_rate : kAudioSampleRateFallback;
+  const int outChannels = frame->ch_layout.nb_channels > 0 ? frame->ch_layout.nb_channels
+                                                           : kAudioChannelsFallback;
+
   // Ensure output frame properties are set (av_frame_unref clears them)
-  av_channel_layout_default(&_swrOutputFrame->ch_layout, kAudioChannels);
-  _swrOutputFrame->sample_rate = kAudioSampleRate;
+  av_channel_layout_uninit(&_swrOutputFrame->ch_layout);
+  if (frame->ch_layout.nb_channels > 0) {
+    av_channel_layout_copy(&_swrOutputFrame->ch_layout, &frame->ch_layout);
+  } else {
+    av_channel_layout_default(&_swrOutputFrame->ch_layout, outChannels);
+  }
+  _swrOutputFrame->sample_rate = outSampleRate;
   _swrOutputFrame->format = kAudioSampleFormat;
 
   // Initialize SwrContext if needed
-  if (!_swrContext) {
+  const int srcSampleRate = frame->sample_rate > 0 ? frame->sample_rate : outSampleRate;
+  const int srcChannels = frame->ch_layout.nb_channels > 0 ? frame->ch_layout.nb_channels
+                                                           : outChannels;
+  const enum AVSampleFormat srcFormat = (enum AVSampleFormat)frame->format;
+
+  if (!_swrContext || _swrSrcSampleRate != srcSampleRate || _swrSrcChannels != srcChannels
+      || _swrSrcFormat != srcFormat) {
+    if (_swrContext) {
+      swr_free(&_swrContext);
+    }
     int ret = swr_alloc_set_opts2(
         &_swrContext, &_swrOutputFrame->ch_layout,
         (enum AVSampleFormat)_swrOutputFrame->format,
         _swrOutputFrame->sample_rate, &frame->ch_layout,
-        (enum AVSampleFormat)frame->format, frame->sample_rate, 0, NULL);
+        srcFormat, srcSampleRate, 0, NULL);
 
     if (ret < 0 || swr_init(_swrContext) < 0) {
-
       if (_swrContext)
         swr_free(&_swrContext);
       return nil;
     }
+
+    _swrSrcSampleRate = srcSampleRate;
+    _swrSrcChannels = srcChannels;
+    _swrSrcFormat = srcFormat;
   }
 
   // Convert
@@ -947,9 +1082,20 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   // Create AVAudioPCMBuffer
-  AVAudioFormat *format =
-      [[AVAudioFormat alloc] initStandardFormatWithSampleRate:kAudioSampleRate
-                                                     channels:kAudioChannels];
+  AVAudioChannelLayout *channelLayout = CreateChannelLayoutFromFFmpeg(&_swrOutputFrame->ch_layout,
+                                                                      outChannels);
+  AVAudioFormat *format = nil;
+  if (channelLayout) {
+    format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                              sampleRate:outSampleRate
+                                             interleaved:NO
+                                           channelLayout:channelLayout];
+  } else {
+    format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                              sampleRate:outSampleRate
+                                                channels:outChannels
+                                             interleaved:NO];
+  }
   if (!format)
     return nil;
 
@@ -966,7 +1112,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   // Thus, we use AV_SAMPLE_FMT_FLTP for the resampling output.
 
   // Copying data:
-  for (int ch = 0; ch < kAudioChannels; ch++) {
+  for (int ch = 0; ch < outChannels; ch++) {
     float *dest = buffer.floatChannelData[ch];
     float *src = (float *)_swrOutputFrame->data[ch];
     memcpy(dest, src, _swrOutputFrame->nb_samples * sizeof(float));

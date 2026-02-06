@@ -167,6 +167,13 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacketWithAllFrames:
     (FFmpegPacketData *)packetData;
 
+/// Decode an audio packet and return ALL available frames.
+///
+/// With codecs like TrueHD, a single packet may produce multiple frames.
+/// @param packetData The audio packet to decode.
+- (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFrames:
+    (FFmpegPacketData *)packetData;
+
 /// Flush the decoder to signal end of stream.
 ///
 /// Must be called before draining remaining frames.
