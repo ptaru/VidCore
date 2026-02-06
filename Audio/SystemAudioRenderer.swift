@@ -31,7 +31,7 @@ public actor SystemAudioRenderer: AudioRendering {
   private var isRequestingReadiness: Bool = false
   private let readinessTimeoutNanos: UInt64 = 250_000_000
   private let isDebugLoggingEnabled: Bool = false
-  private let minCoalesceFrames: AVAudioFrameCount = 64
+  private let minCoalesceFrames: AVAudioFrameCount = 1024
   private let maxCoalesceFrames: AVAudioFrameCount = 4096
   private var pendingBuffer: AVAudioPCMBuffer?
   private var pendingPTS: Double?
@@ -173,7 +173,8 @@ public actor SystemAudioRenderer: AudioRendering {
 
       if let pendingBuffer = pendingBuffer {
         if let pendingPTS = pendingPTS {
-          let expectedNextPTS = pendingPTS
+          let expectedNextPTS =
+            pendingPTS
             + Double(pendingBuffer.frameLength) / buffer.format.sampleRate
           let ptsTolerance = max(2.0 / buffer.format.sampleRate, 0.001)
           if abs(pts - expectedNextPTS) > ptsTolerance {
