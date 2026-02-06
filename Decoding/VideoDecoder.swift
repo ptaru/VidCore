@@ -2,7 +2,7 @@
 //  VideoDecoder.swift
 //  VidCore
 //
-//  High-performance video decoder orchestrating FFmpeg and VideoToolbox with async pipelines
+//  High-performance video decoder orchestrating FFmpeg and hardware passthrough
 //
 
 import AVFoundation
@@ -12,10 +12,10 @@ import Foundation
 
 extension FFmpegPacketData: @unchecked Sendable {}
 
-// MARK: - VTDecoder Config Bridging
+// MARK: - SampleBufferBuilder Config Bridging
 
-/// Convert FFmpegDecoder's config dictionary to Swift VTDecoderConfig
-private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
+/// Convert FFmpegDemuxer's config dictionary to SampleBufferBuilderConfig.
+private func createSampleBufferBuilder(from config: [String: Any]) throws -> SampleBufferBuilder {
   guard let codecNum = config["codec"] as? NSNumber,
     let width = config["width"] as? NSNumber,
     let height = config["height"] as? NSNumber,
@@ -23,12 +23,12 @@ private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
     let timeBaseNum = config["timeBaseNum"] as? NSNumber,
     let timeBaseDen = config["timeBaseDen"] as? NSNumber
   else {
-    throw VTDecoderError.noExtradata
+    throw SampleBufferBuilderError.noExtradata
   }
 
-  let codec: VTDecoderCodec = codecNum.intValue == 0 ? .hevc : .h264
+  let codec: SampleBufferBuilderCodec = codecNum.intValue == 0 ? .hevc : .h264
 
-  let vtConfig = VTDecoderConfig(
+  let sbConfig = SampleBufferBuilderConfig(
     codec: codec,
     width: width.int32Value,
     height: height.int32Value,
@@ -41,17 +41,18 @@ private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
     dolbyVisionConfig: config["dolbyVisionConfig"] as? Data
   )
 
-  return try VTDecoder(config: vtConfig)
+  return try SampleBufferBuilder(config: sbConfig)
 }
 
-/// High-performance video decoder using FFmpeg with VideoToolbox hardware acceleration.
+/// High-performance video decoder using FFmpeg with passthrough hardware rendering when available.
 ///
-/// `VideoDecoder` wraps FFmpeg to provide async/await video decoding for macOS. It automatically
-/// uses VideoToolbox hardware acceleration when available, falling back to optimized software decoding.
+/// `VideoDecoder` wraps FFmpeg to provide async/await video decoding for macOS. It can build
+/// passthrough sample buffers for AVSampleBufferDisplayLayer on supported codecs, falling back to
+/// optimized software decoding when passthrough isn't available.
 ///
 /// ## Features
 /// - Supports MKV, WebM, AVI, MP4, and other container formats
-/// - Hardware-accelerated decoding via VideoToolbox (H.264, H.265/HEVC)
+/// - Hardware-accelerated rendering (H.264, H.265/HEVC)
 /// - Software decoding for VP8, VP9, AV1, and other codecs
 /// - Accurate frame-level seeking
 /// - Parallel demux/decode pipeline for optimal performance
@@ -63,7 +64,7 @@ private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
 /// while let frame = try await decoder.decodeNextFrame() {
 ///     switch frame {
 ///     case .video(let videoFrame):
-///         // Render via Metal
+///         // Render video frame
 ///     case .audio(let buffer, let pts):
 ///         // Play audio
 ///     }
@@ -72,10 +73,22 @@ private func createVTDecoder(from config: [String: Any]) throws -> VTDecoder {
 /// decoder.close()
 /// ```
 public final class VideoDecoder: @unchecked Sendable {
+
+  /// Modes for hardware acceleration
+  public enum HardwareDecodeMode {
+    /// Fully decode frames to CVPixelBuffers (standard behavior)
+    case decode
+    /// Wrap compressed samples in CMSampleBuffer for direct rendering by AVSBDL
+    case passThrough
+  }
+
   private var demuxer: FFmpegDemuxer?
   private var decoder: FFmpegDecoder?
-  private var vtDecoder: VTDecoder?
+  private var sampleBufferBuilder: SampleBufferBuilder?
   private let url: URL
+
+  /// Current hardware decode mode
+  public let hardwareDecodeMode: HardwareDecodeMode
 
   // Separate queues for demuxing and decoding to enable parallelism
   private let demuxQueue = DispatchQueue(label: "com.vidpreview.demux", qos: .userInitiated)
@@ -85,17 +98,22 @@ public final class VideoDecoder: @unchecked Sendable {
   private let lock = NSLock()
   private var isClosed = false
 
+  // Queue for packets needed to restore decoder context after a seek (Keyframe...Target)
+  // These are re-emitted via demuxNextPacket to ensure the renderer gets the full GOP
+  private var pendingContextRestorationPackets: [FFmpegDemuxerPacket] = []
+
   /// Metadata about the video stream.
   public let videoInfo: VideoInfo
+
+  // Logging removed for production performance
 
   // MARK: - Static Helpers
 
   /// Pre-detects whether hardware acceleration will be used for the given URL.
   ///
-  /// This method performs a lightweight check to determine if VideoToolbox hardware
-  /// acceleration is available for the video codec, without fully initializing
-  /// the decoder. It's useful for pre-configuring buffer sizes before creating
-  /// a VideoPlayer.
+  /// This method performs a lightweight check to determine if passthrough is available
+  /// for the video codec, without fully initializing the decoder. It's useful for
+  /// pre-configuring buffer sizes before creating a VideoPlayer.
   ///
   /// - Parameter url: The URL of the video file to check
   /// - Returns: `true` if hardware acceleration will be used, `false` for software decoding
@@ -103,12 +121,9 @@ public final class VideoDecoder: @unchecked Sendable {
     do {
       let demuxer = try FFmpegDemuxer(url: url)
       defer { demuxer.close() }
-      let config = demuxer.getVTDecoderConfig()
-      let isHardware = config != nil
-      print("[VideoDecoder] Hardware detection for \(url.lastPathComponent): \(isHardware)")
-      return isHardware
+      let config = demuxer.getSampleBufferBuilderConfig()
+      return config != nil
     } catch {
-      print("[VideoDecoder] Hardware detection failed for \(url.lastPathComponent): \(error)")
       return false
     }
   }
@@ -120,10 +135,11 @@ public final class VideoDecoder: @unchecked Sendable {
   /// when available.
   ///
   /// - Parameter url: The file URL of the video to decode.
+  /// - Parameter hardwareDecodeMode: Mode to set if we should decode or pass through. Defaults to .decode.
   /// - Throws: An error if the file cannot be opened or contains no valid video stream.
-  public init(url: URL) throws {
+  public init(url: URL, hardwareDecodeMode: HardwareDecodeMode = .decode) throws {
     self.url = url
-
+    self.hardwareDecodeMode = hardwareDecodeMode
     // Phase 1: Create FFmpegDemuxer for container I/O
     do {
       self.demuxer = try FFmpegDemuxer(url: url)
@@ -137,29 +153,30 @@ public final class VideoDecoder: @unchecked Sendable {
         userInfo: [NSLocalizedDescriptionKey: "Failed to get video info"])
     }
 
-    // Phase 2: Try to initialize Swift VTDecoder for supported codecs (HEVC/H264)
+    // Phase 2: Try to initialize SampleBufferBuilder for supported codecs (HEVC/H264)
     var finalDecoderName = info.codecName
     var finalDecoderDescription = "Unknown"
     var finalIsHardwareAccelerated = false
 
-    if let vtConfig = demuxer.getVTDecoderConfig() {
+    if hardwareDecodeMode == .passThrough,
+      let sbConfig = demuxer.getSampleBufferBuilderConfig()
+    {
       do {
-        self.vtDecoder = try createVTDecoder(from: vtConfig)
-        if let vt = self.vtDecoder {
+        self.sampleBufferBuilder = try createSampleBufferBuilder(from: sbConfig)
+        if let builder = self.sampleBufferBuilder {
           print(
-            "[VideoDecoder] Using Swift VTDecoder (DoVi: \(vt.isDolbyVision), profile: \(vt.dolbyVisionProfile))"
+            "[VideoDecoder] Using SampleBufferBuilder (DoVi: \(builder.isDolbyVision), profile: \(builder.dolbyVisionProfile))"
           )
-          if vt.isDolbyVision {
-            finalDecoderName = "VTDecoder (DoVi P\(vt.dolbyVisionProfile))"
+          if builder.isDolbyVision {
+            finalDecoderName = "SampleBufferBuilder (DoVi P\(builder.dolbyVisionProfile))"
           } else {
-            finalDecoderName = "VTDecoder (\(info.codecName))"
+            finalDecoderName = "SampleBufferBuilder (\(info.codecName))"
           }
-          finalDecoderDescription = "Hardware Acceleration (Swift VTDecoder)"
+          finalDecoderDescription = "Hardware Passthrough (SampleBufferBuilder)"
           finalIsHardwareAccelerated = true
         }
       } catch {
-        print("[VideoDecoder] Failed to init VTDecoder: \(error)")
-        self.vtDecoder = nil
+        self.sampleBufferBuilder = nil
       }
     }
 
@@ -167,18 +184,17 @@ public final class VideoDecoder: @unchecked Sendable {
     if let decoderConfig = demuxer.getDecoderConfig() {
       do {
         self.decoder = try FFmpegDecoder(demuxerConfig: decoderConfig)
-        if self.vtDecoder == nil, let decoder = self.decoder,
+        if self.sampleBufferBuilder == nil, let decoder = self.decoder,
           let decoderInfo = decoder.getVideoInfo()
         {
-          // No VTDecoder, use FFmpegDecoder info
+          // No SampleBufferBuilder, use FFmpegDecoder info
           finalDecoderName = decoderInfo.decoderName
           finalDecoderDescription = decoderInfo.decoderDescription
           finalIsHardwareAccelerated = decoderInfo.isHardwareAccelerated
         }
       } catch {
-        print("[VideoDecoder] Failed to init FFmpegDecoder: \(error)")
-        // If we have VTDecoder, we can still proceed for video-only
-        if self.vtDecoder == nil {
+        // If we have SampleBufferBuilder, we can still proceed for video-only
+        if self.sampleBufferBuilder == nil {
           throw error
         }
       }
@@ -247,7 +263,6 @@ public final class VideoDecoder: @unchecked Sendable {
   }
 
   deinit {
-    print("[VideoDecoder] DEINIT - deallocating")
     close()
   }
 
@@ -259,9 +274,7 @@ public final class VideoDecoder: @unchecked Sendable {
     guard !isClosed else { return }
     isClosed = true
 
-    // Flush VTDecoder if used
-    vtDecoder?.flush()
-    vtDecoder = nil
+    sampleBufferBuilder = nil
 
     // Close FFmpegDecoder
     decoder?.close()
@@ -284,13 +297,32 @@ public final class VideoDecoder: @unchecked Sendable {
           return
         }
 
+        // Priority: Serve pending restoration packets first (from seek)
         self.lock.lock()
-        defer { self.lock.unlock() }
+        // Check if we have pending packets
+        if !self.pendingContextRestorationPackets.isEmpty {
+          let packet = self.pendingContextRestorationPackets.removeFirst()
+          self.lock.unlock()
+          let data = self.convertPacket(packet)
+          continuation.resume(returning: data)
+          return
+        }
 
         guard !self.isClosed, let demuxer = self.demuxer else {
+          self.lock.unlock()
           continuation.resume(returning: nil)
           return
         }
+
+        // Serve queued audio packets from seek operations first
+        if let queuedAudioPacket = demuxer.popQueuedAudioPacket() {
+          self.lock.unlock()
+          let packet = self.convertPacket(queuedAudioPacket)
+          continuation.resume(returning: packet)
+          return
+        }
+
+        self.lock.unlock()
 
         // Demux using FFmpegDemuxer and convert to FFmpegPacketData
         if let demuxerPacket = demuxer.demuxNextPacket() {
@@ -341,30 +373,29 @@ public final class VideoDecoder: @unchecked Sendable {
         var results: [DecodedFrame] = []
 
         if packet.isVideo {
-          // Use Swift VTDecoder if available
-          if let vtDecoder = self.vtDecoder {
+          // Use SampleBufferBuilder for passthrough if available
+          if let builder = self.sampleBufferBuilder,
+            self.hardwareDecodeMode == .passThrough
+          {
             do {
-              try vtDecoder.sendPacket(
-                data: packet.data,
+              let sampleBuffer = try builder.createSampleBuffer(
+                from: packet.data,
                 pts: packet.pts,
                 dts: packet.dts,
                 duration: packet.duration,
-                ambientMetadata: packet.ambientLightMetadata
+                forPassthrough: true
               )
 
-              // Pop all available frames
-              while let decodedFrame = vtDecoder.popFrame() {
-                let pts = CMTimeGetSeconds(decodedFrame.presentationTime)
-                let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
-                let frame = self.makeVideoFrame(
-                  pixelBuffer: decodedFrame.pixelBuffer,
-                  presentationTime: pts,
-                  doviProfile: doviProfile
-                )
-                results.append(.video(frame))
-              }
+              let frame = VideoFrame(
+                sampleBuffer: sampleBuffer,
+                presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
+                isHDR: self.videoInfo.isHDR,
+                colorTransfer: Int(self.videoInfo.colorTransfer),
+                doviProfile: self.videoInfo.isDolbyVision
+                  ? Int(self.videoInfo.doviProfile ?? 0) : 0
+              )
+              results.append(.video(frame))
             } catch {
-              print("[VideoDecoder] VTDecoder error: \(error)")
             }
           } else if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
             // Fallback to FFmpeg decode path
@@ -432,6 +463,61 @@ public final class VideoDecoder: @unchecked Sendable {
         }
 
         continuation.resume(returning: results)
+      }
+    }
+  }
+
+  // MARK: - Passthrough Context
+
+  public func consumePendingPassthroughFrames() async -> [VideoFrame] {
+    await withCheckedContinuation { continuation in
+      decodeQueue.async { [weak self] in
+        guard let self = self else {
+          continuation.resume(returning: [])
+          return
+        }
+
+        self.lock.lock()
+        defer { self.lock.unlock() }
+
+        guard !self.isClosed,
+          self.hardwareDecodeMode == .passThrough,
+          let builder = self.sampleBufferBuilder,
+          !self.pendingContextRestorationPackets.isEmpty
+        else {
+          continuation.resume(returning: [])
+          return
+        }
+
+        let packets = self.pendingContextRestorationPackets
+        self.pendingContextRestorationPackets.removeAll()
+
+        var frames: [VideoFrame] = []
+        frames.reserveCapacity(packets.count)
+
+        for packet in packets {
+          do {
+            let sampleBuffer = try builder.createSampleBuffer(
+              from: packet.data,
+              pts: packet.pts,
+              dts: packet.dts,
+              duration: packet.duration,
+              forPassthrough: true
+            )
+
+            let frame = VideoFrame(
+              sampleBuffer: sampleBuffer,
+              presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
+              isHDR: self.videoInfo.isHDR,
+              colorTransfer: Int(self.videoInfo.colorTransfer),
+              doviProfile: self.videoInfo.isDolbyVision ? Int(self.videoInfo.doviProfile ?? 0) : 0
+            )
+            frames.append(frame)
+          } catch {
+          }
+        }
+
+        continuation.resume(returning: frames)
       }
     }
   }
@@ -530,14 +616,10 @@ public final class VideoDecoder: @unchecked Sendable {
           return
         }
 
-        // CRITICAL: Flush VTDecoder before seeking to clear any pending frames
-        // This prevents audio/video desync after seek
-        self.vtDecoder?.flush()
-
         // Dispatch based on available decoder
-        if self.vtDecoder != nil {
+        if self.hardwareDecodeMode == .passThrough, self.sampleBufferBuilder != nil {
           do {
-            let frame = try self.seekVTDecoder(to: seconds)
+            let frame = try self.seekPassthrough(to: seconds)
             continuation.resume(returning: frame)
           } catch {
             continuation.resume(throwing: error)
@@ -637,11 +719,13 @@ public final class VideoDecoder: @unchecked Sendable {
     )
   }
 
-  private func seekVTDecoder(to seconds: Double) throws -> VideoFrame? {
-    guard let demuxer = self.demuxer, let vtDecoder = self.vtDecoder else { return nil }
+  private func seekPassthrough(to seconds: Double) throws -> VideoFrame? {
+    guard let demuxer = self.demuxer, let builder = self.sampleBufferBuilder else { return nil }
 
-    // VTDecoder path: use demuxer for seeking and getting packets
-    // Then decode through VTDecoder for correct Dolby Vision colors
+    // Clear pending packets
+    self.pendingContextRestorationPackets.removeAll()
+
+    // Passthrough path: use demuxer for seeking and getting packets
     guard demuxer.seek(toKeyframe: seconds) else {
       throw NSError(
         domain: "VideoDecoder", code: -3,
@@ -656,66 +740,75 @@ public final class VideoDecoder: @unchecked Sendable {
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packets"])
     }
 
-    // Decode packets through VTDecoder
-    var lastFrame: VTDecodedFrame?
+    if self.hardwareDecodeMode == .passThrough {
+      // Passthrough seek: return a compressed sample buffer without decompression.
+      // We still queue the GOP for AVSampleBufferDisplayLayer to rebuild context.
+      var targetPacket: FFmpegDemuxerPacket?
+      var firstKeyframe: FFmpegDemuxerPacket?
+      var firstAfterTarget: FFmpegDemuxerPacket?
+      var lastPacket: FFmpegDemuxerPacket?
 
-    // Always use async pipeline for accurate seek
-    for packet in packets {
-      do {
-        try vtDecoder.sendPacket(
-          data: packet.data,
-          pts: packet.pts,
-          dts: packet.dts,
-          duration: packet.duration,
-          ambientMetadata: packet.ambientLightMetadata
-        )
-      } catch {
-        print("[VideoDecoder] VTDecoder seek error: \(error)")
-      }
-
-      // Pop available frames as we go
-      while let frame = vtDecoder.popFrame() {
-        let framePTS = CMTimeGetSeconds(frame.presentationTime)
-        if framePTS >= seconds - 0.01 {
-          lastFrame = frame
-        } else {
-          lastFrame = frame
+      for packet in packets {
+        lastPacket = packet
+        if packet.isKeyframe, firstKeyframe == nil {
+          firstKeyframe = packet
+        }
+        if firstAfterTarget == nil, packet.pts != Int64.min {
+          let packetSeconds =
+            Double(packet.pts) * Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
+          if packetSeconds >= seconds - 0.01 {
+            firstAfterTarget = packet
+          }
         }
       }
-    }
 
-    // CRITICAL: Wait for any pending async frames to complete
-    vtDecoder.finish()
-
-    // Final drain of the queue
-    while let frame = vtDecoder.popFrame() {
-      let framePTS = CMTimeGetSeconds(frame.presentationTime)
-      if framePTS >= seconds - 0.01 {
-        lastFrame = frame
+      if let candidate = firstAfterTarget, candidate.isKeyframe {
+        targetPacket = candidate
+      } else if let keyframe = firstKeyframe {
+        targetPacket = keyframe
       } else {
-        lastFrame = frame
+        targetPacket = firstAfterTarget ?? lastPacket
       }
+
+      if let targetPacket, targetPacket.isKeyframe {
+        self.pendingContextRestorationPackets = packets.filter { $0 !== targetPacket }
+      } else {
+        self.pendingContextRestorationPackets = packets
+      }
+
+      guard let packet = targetPacket else {
+        throw NSError(
+          domain: "VideoDecoder", code: -3,
+          userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packet found"])
+      }
+
+      let sampleBuffer = try builder.createSampleBuffer(
+        from: packet.data,
+        pts: packet.pts,
+        dts: packet.dts,
+        duration: packet.duration,
+        forPassthrough: true
+      )
+
+      let frame = VideoFrame(
+        sampleBuffer: sampleBuffer,
+        presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
+        isHDR: self.videoInfo.isHDR,
+        colorTransfer: Int(self.videoInfo.colorTransfer),
+        doviProfile: self.videoInfo.isDolbyVision ? Int(self.videoInfo.doviProfile ?? 0) : 0
+      )
+      return frame
     }
 
-    // Return the result frame
-    if let resultFrame = lastFrame {
-      let doviProfile = vtDecoder.isDolbyVision ? Int(vtDecoder.dolbyVisionProfile) : 0
-      return self.makeVideoFrame(
-        pixelBuffer: resultFrame.pixelBuffer,
-        presentationTime: CMTimeGetSeconds(resultFrame.presentationTime),
-        doviProfile: doviProfile
-      )
-    } else {
-      throw NSError(
-        domain: "VideoDecoder", code: -3,
-        userInfo: [NSLocalizedDescriptionKey: "Seek failed - no frame decoded"])
-    }
+    throw NSError(
+      domain: "VideoDecoder", code: -3,
+      userInfo: [NSLocalizedDescriptionKey: "Seek failed - passthrough only path"])
   }
 
   private func seekFFmpeg(to seconds: Double) throws -> VideoFrame? {
     guard let demuxer = self.demuxer, let decoder = self.decoder else { return nil }
 
-    // Non-VTDecoder path: use demuxer to seek, decoder to decode
+    // Non-passthrough path: use demuxer to seek, decoder to decode
 
     // Flush decoder buffers to clear state (fix for replay issues)
     decoder.flushCodecBuffers()

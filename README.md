@@ -4,12 +4,12 @@ A video decoding and rendering framework for macOS built on FFmpeg.
 
 ## Overview
 
-VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated decoding via VideoToolbox, and system-integrated rendering via `AVSampleBufferDisplayLayer`.
+VidCore provides high-performance video playback capabilities for macOS applications. It handles container formats (MKV, WebM, AVI, MP4), hardware-accelerated passthrough via sample buffers, and system-integrated rendering via `AVSampleBufferDisplayLayer`.
 
 ## Features
 
 - **FFmpeg Decoding**: Support for diverse codecs (H.264, H.265/HEVC, VP8, VP9, AV1 via dav1d, etc.)
-- **Hardware Acceleration**: Automatic VideoToolbox acceleration when available
+- **Hardware Acceleration**: Automatic passthrough sample buffers when available
 - **System-Integrated Rendering**: Uses `AVSampleBufferDisplayLayer` for power-efficient, color-perfect rendering of SDR, and HDR content
 - **HDR Support**: DoVi, HDR10, and HLG support with BT.2020 color primaries and proper EDR signaling
 - **Tone Mapping**: Automatic system-level tone mapping using dynamic metadata where available
@@ -365,7 +365,7 @@ VidCore leverages macOS's native EDR (Extended Dynamic Range) capabilities by in
 
 #### System-Integrated Rendering
 
-Unlike traditional players that use custom Metal shaders for all rendering, VidCore hands frame data directly to the OS compositor when possible:
+VidCore hands frame data directly to the OS compositor when possible:
 
 - **HDR10 (PQ)**: Passed as 10-bit buffers with BT.2020 primaries and SMPTE ST 2084 transfer function. macOS handles tone mapping to the display's capabilities.
 - **HLG**: Passed as 10-bit HLG buffers. macOS handles the OETF/OOTF processing.
@@ -424,7 +424,7 @@ The `Buffers` enum configures packet queue sizes:
 public enum Buffers {
     case auto           // Automatically choose based on hardware acceleration
     case software       // Optimized for software decoding
-    case hardware       // Optimized for hardware (VideoToolbox) decoding
+    case hardware       // Optimized for hardware passthrough rendering
     case custom(frameBuffer: Int, packetQueue: Int)  // Manual sizes
 }
 ```
@@ -537,7 +537,7 @@ Video stream metadata with color information and HDR detection.
 | `frameRate` | `Double` | Frame rate (fps) |
 | `duration` | `Double` | Duration in seconds |
 | `codecName` | `String` | Codec identifier (e.g., "h264") |
-| `isHardwareAccelerated` | `Bool` | Using VideoToolbox |
+| `isHardwareAccelerated` | `Bool` | Using passthrough sample buffers |
 | `isHDR` | `Bool` | Whether content is HDR (PQ or HLG) |
 | `isDolbyVision` | `Bool` | Whether content is Dolby Vision |
 | `colorPrimaries` | `Int` | Color primaries (1=BT.709, 9=BT.2020) |
@@ -545,7 +545,7 @@ Video stream metadata with color information and HDR detection.
 | `colorSpace` | `Int` | YUV color matrix (1=BT.709, 9=BT.2020nc) |
 | `colorRange` | `Int` | Video range (1=limited/16-235, 2=full/0-255) |
 | `bitsPerComponent` | `Int` | Bit depth (8, 10, or 12 bits) |
-| `decoderName` | `String?` | Specific decoder used (e.g., "VideoToolbox") |
+| `decoderName` | `String?` | Specific decoder used (e.g., "SampleBufferBuilder") |
 | `decoderDescription` | `String?` | Description of the decoder implementation |
 | `maxContentLightLevel` | `UInt?` | MaxCLL in nits, nil if not present |
 | `maxFrameAverageLightLevel` | `UInt?` | MaxFALL in nits, nil if not present |
@@ -665,7 +665,7 @@ graph TD
         subgraph Decoding [Decoding Layer]
             VD[VideoDecoder]
             FD[FFmpegDecoder<br/>Obj-C++]
-            VTD[VTDecoder]
+            SBB[SampleBufferBuilder]
         end
 
         subgraph Rendering [Rendering Layer]
@@ -698,9 +698,9 @@ graph TD
     VP -.-> PQ
     
     VD --> FD
-    VD --> VTD
+    VD --> SBB
     FD --> FF
-    VTD --> VT
+    SBB --> VT
 
     SAR --> ASBAR
     AER --> AVAE

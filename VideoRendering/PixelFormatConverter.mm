@@ -45,8 +45,7 @@
 }
 
 - (nullable CVPixelBufferRef)convertFrame:(AVFrame *)frame {
-  // Output YUV420P directly - Metal shader handles YUV→RGB conversion on GPU
-  // This eliminates CPU sws_scale overhead entirely
+  // Output YUV420P directly - eliminates CPU sws_scale overhead entirely
 
   CVPixelBufferRef pixelBuffer = NULL;
 

@@ -10,7 +10,7 @@ import SwiftUI
 /// A SwiftUI view that displays video content from a VidCore player.
 ///
 /// `VidPlayer` provides an AVPlayer-like API for VidCore, encapsulating all
-/// Metal rendering complexity and state management. It's designed to be a
+/// rendering complexity and state management. It's designed to be a
 /// near drop-in replacement for SwiftUI's `VideoPlayer` from AVKit.
 ///
 /// ## Basic Usage

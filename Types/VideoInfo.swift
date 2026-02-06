@@ -31,12 +31,12 @@ public struct VideoInfo {
   public let containerName: String
   /// Codec identifier (e.g., "h264", "vp9", "hevc").
   public let codecName: String
-  /// Whether VideoToolbox hardware acceleration is active.
+  /// Whether passthrough sample buffers are active (hardware rendering path).
   public let isHardwareAccelerated: Bool
   /// Whether the video is HDR content (PQ or HLG transfer function).
   public let isHDR: Bool
 
-  /// Specific decoder used (e.g. "VideoToolbox", "h264").
+  /// Specific decoder used (e.g. "SampleBufferBuilder", "h264").
   public let decoderName: String?
   /// Description of the decoder implementation.
   public let decoderDescription: String?

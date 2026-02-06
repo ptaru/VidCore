@@ -105,9 +105,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Get video stream information.
 - (nullable FFmpegDemuxerVideoInfo *)getVideoInfo;
 
-/// Get VTDecoder configuration for Swift VTDecoder initialization.
+/// Get SampleBufferBuilder configuration for passthrough sample buffer creation.
 /// Returns codec parameters as Swift-compatible dictionary.
-- (nullable NSDictionary<NSString *, id> *)getVTDecoderConfig;
+- (nullable NSDictionary<NSString *, id> *)getSampleBufferBuilderConfig;
 
 /// Get full decoder configuration for FFmpegDecoder decode-only mode.
 /// Contains all parameters needed to initialize FFmpegDecoder without a URL.
@@ -134,7 +134,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary<NSString *, id> *)getSubtitleDecoderConfigForStream:
     (int)streamIndex;
 
-/// Whether the video stream uses supported hardware codec (HEVC/H264).
+/// Whether the video stream uses a supported passthrough codec (HEVC/H264).
 @property(nonatomic, readonly) BOOL supportsHardwareDecode;
 
 /// Codec ID for the video stream.

@@ -377,10 +377,14 @@ struct VidPlayerDebugOverlay: View {
     }
   }
 
-  /// Returns pixel format name and bit depth from CVPixelBuffer
-  private func pixelFormatInfo(from pixelBuffer: CVPixelBuffer) -> (
+  /// Returns pixel format name and bit depth from CVPixelBuffer (or Compressed status)
+  private func pixelFormatInfo(from pixelBuffer: CVPixelBuffer?) -> (
     format: String, bitDepth: String
   ) {
+    guard let pixelBuffer = pixelBuffer else {
+      return ("Compressed (A/V Layer)", "See Codec")
+    }
+
     let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
 
     switch format {
@@ -412,8 +416,9 @@ struct VidPlayerDebugOverlay: View {
   }
 
   /// Extracts attachments from CVPixelBuffer as key-value pairs
-  private func getAttachments(from pixelBuffer: CVPixelBuffer) -> [(String, String)] {
-    guard let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate) as? [String: Any]
+  private func getAttachments(from pixelBuffer: CVPixelBuffer?) -> [(String, String)] {
+    guard let pixelBuffer = pixelBuffer,
+      let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate) as? [String: Any]
     else {
       return []
     }

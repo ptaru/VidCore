@@ -3,7 +3,7 @@
 //  VidCore
 //
 //  System-based video renderer using AVSampleBufferDisplayLayer
-//  Provides reference HDR10/HLG rendering for comparison with custom Metal pipeline
+//
 //
 
 import AVFoundation
@@ -33,12 +33,12 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
   }
 
   private func _enqueue(_ frame: VideoFrame) {
-    guard let sampleBuffer = createSampleBuffer(from: frame) else { return }
     if displayLayer.sampleBufferRenderer.status == .failed {
       displayLayer.sampleBufferRenderer.flush()
     }
 
-    displayLayer.sampleBufferRenderer.enqueue(sampleBuffer)
+    // Ensure the sample buffer is ready for display (attachments, etc are handled in VideoFrame)
+    displayLayer.sampleBufferRenderer.enqueue(frame.sampleBuffer)
   }
 
   public nonisolated var isReadyForMoreMediaData: Bool {
@@ -75,14 +75,15 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
 
         if shouldStart {
           self.displayLayer.sampleBufferRenderer.requestMediaDataWhenReady(
-            on: DispatchQueue.global()
+            on: DispatchQueue.global(qos: .userInteractive)
           ) { [weak self] in
             guard let self else { return }
             guard self.displayLayer.sampleBufferRenderer.isReadyForMoreMediaData else { return }
 
             self.displayLayer.sampleBufferRenderer.stopRequestingMediaData()
 
-            Task {
+            // Use detached task with high priority to jump back to actor context immediately
+            Task.detached(priority: .userInteractive) {
               await self.resumeAllWaiters()
             }
           }
@@ -133,46 +134,6 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
   public nonisolated func flush() {
     displayLayer.sampleBufferRenderer.flush()
   }
-
-  private func createSampleBuffer(from frame: VideoFrame) -> CMSampleBuffer? {
-    var sampleBuffer: CMSampleBuffer?
-
-    var timingInfo = CMSampleTimingInfo(
-      duration: CMTime.invalid,
-      presentationTimeStamp: CMTime(seconds: frame.presentationTime, preferredTimescale: 60000),
-      decodeTimeStamp: CMTime.invalid
-    )
-
-    // Create format description
-    // Use frame metadata to apply color attachments if they are missing (common for software decoders)
-    let pixelBuffer = frame.pixelBuffer
-
-    if frame.isHDR {
-      frame.applyHDRAttachments()
-    }
-
-    var formatDescription: CMFormatDescription?
-    CMVideoFormatDescriptionCreateForImageBuffer(
-      allocator: kCFAllocatorDefault,
-      imageBuffer: pixelBuffer,
-      formatDescriptionOut: &formatDescription
-    )
-
-    guard let formatDesc = formatDescription else { return nil }
-
-    // Create the sample buffer
-    let result = CMSampleBufferCreateReadyWithImageBuffer(
-      allocator: kCFAllocatorDefault,
-      imageBuffer: frame.pixelBuffer,
-      formatDescription: formatDesc,
-      sampleTiming: &timingInfo,
-      sampleBufferOut: &sampleBuffer
-    )
-
-    guard result == noErr, let buffer = sampleBuffer else { return nil }
-
-    return buffer
-  }
 }
 
 /// SwiftUI view that renders video frames using macOS system APIs (AVSampleBufferDisplayLayer).
@@ -198,7 +159,7 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
 
   /// Creates a CGImage from a VideoFrame using VideoToolbox, handling HDR and Dolby Vision.
   public static func createCGImage(from frame: VideoFrame) -> CGImage? {
-    let pixelBuffer = frame.pixelBuffer
+    guard let pixelBuffer = frame.pixelBuffer else { return nil }
 
     if frame.isHDR {
       frame.applyHDRAttachments()

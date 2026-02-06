@@ -13,6 +13,7 @@
 
 #import "FFmpegDemuxer.h"
 #import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 
 #pragma mark - Data Structure Implementations
@@ -377,72 +378,68 @@ static const NSUInteger kMaxQueuedAudioPackets =
   }
 
   if (foundAll) {
-    NSLog(
-        @"[FFmpegDemuxer] Reconstruction success! Building valid hvcC atom...");
+    NSLog(@"[FFmpegDemuxer] Reconstruction success! Creating format "
+          @"description via CoreMedia...");
 
-    // Reconstruct hvcC box
-    // Use existing header (first 22 bytes? or 23? header is usually 23 bytes
-    // including numArrays=0 byte) Header structure: configVersion(1) + ... +
-    // numArrays(1)
+    // Prepare parameter sets for CoreMedia
+    const uint8_t *parameterSetPointers[3] = {(const uint8_t *)vpsData.bytes,
+                                              (const uint8_t *)spsData.bytes,
+                                              (const uint8_t *)ppsData.bytes};
 
-    // Let's take the first 22 bytes from existing extradata (excluding
-    // numArrays)
-    NSMutableData *newExtradata = [NSMutableData data];
-    if (codecPar->extradata && codecPar->extradata_size >= 22) {
-      [newExtradata appendBytes:codecPar->extradata
-                         length:22]; // Copy header config
+    size_t parameterSetSizes[3] = {vpsData.length, spsData.length,
+                                   ppsData.length};
+
+    CMFormatDescriptionRef formatDescription = NULL;
+    OSStatus status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        kCFAllocatorDefault,
+        3, // parameterSetCount
+        parameterSetPointers, parameterSetSizes,
+        4,    // NALUnitHeaderLength (standard for MP4/AVC/HEVC)
+        NULL, // extensions
+        &formatDescription);
+
+    if (status == noErr && formatDescription) {
+      // Retrieve the 'hvcC' atom from the format description
+      CFDictionaryRef atoms = (CFDictionaryRef)CMFormatDescriptionGetExtension(
+          formatDescription,
+          kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+
+      NSData *hvcCData = nil;
+      if (atoms) {
+        hvcCData = (NSData *)CFDictionaryGetValue(atoms, CFSTR("hvcC"));
+      }
+
+      if (hvcCData && hvcCData.length > 0) {
+        NSLog(@"[FFmpegDemuxer] Successfully retrieved hvcC atom (%lu bytes) "
+              @"from CoreMedia",
+              (unsigned long)hvcCData.length);
+
+        // Update codecPar
+        if (codecPar->extradata) {
+          av_free(codecPar->extradata);
+        }
+
+        codecPar->extradata_size = (int)hvcCData.length;
+        codecPar->extradata = (uint8_t *)av_malloc(
+            codecPar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+
+        memcpy(codecPar->extradata, hvcCData.bytes, hvcCData.length);
+        memset(codecPar->extradata + codecPar->extradata_size, 0,
+               AV_INPUT_BUFFER_PADDING_SIZE);
+
+        // Mark as synthesized
+        _didSynthesizeExtradata = YES;
+      } else {
+        NSLog(@"[FFmpegDemuxer] Failed to retrieve hvcC atom from format "
+              @"description");
+      }
+
+      CFRelease(formatDescription);
     } else {
-      // Fallback header construction if original is totally empty
-      uint8_t header[] = {
-          1,                                  // version
-          1,                                  // profile space/tier/profile
-          0x60, 0x00, 0x00, 0x00,             // profile/compat bytes
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // constraint bytes
-          0,                                  // level
-          0xF0, 0x00, 0xFC, 0xFD, 0xF8, 0xF8  // flags
-      };
-      // This is risky, better to use what was there if >0
-      [newExtradata appendBytes:header length:sizeof(header)];
+      NSLog(@"[FFmpegDemuxer] "
+            @"CMVideoFormatDescriptionCreateFromHEVCParameterSets failed: %d",
+            (int)status);
     }
-
-    // NumArrays = 3
-    uint8_t numArrays = 3;
-    [newExtradata appendBytes:&numArrays length:1];
-
-    // Append Arrays
-    auto appendArray = ^(NSData *nal, uint8_t type) {
-      // Array Header: Type(1) + Count(2) + Length(2) + Data
-      uint8_t t = type | 0x80; // Set complete flag
-      [newExtradata appendBytes:&t length:1];
-
-      uint16_t count = htons(1);
-      [newExtradata appendBytes:&count length:2];
-
-      uint16_t len = htons((uint16_t)nal.length);
-      [newExtradata appendBytes:&len length:2];
-
-      [newExtradata appendData:nal];
-    };
-
-    appendArray(vpsData, 32);
-    appendArray(spsData, 33);
-    appendArray(ppsData, 34);
-
-    // Update codecPar
-    if (codecPar->extradata)
-      av_free(codecPar->extradata);
-    codecPar->extradata_size = (int)newExtradata.length;
-    codecPar->extradata = (uint8_t *)av_malloc(codecPar->extradata_size +
-                                               AV_INPUT_BUFFER_PADDING_SIZE);
-    memcpy(codecPar->extradata, newExtradata.bytes, newExtradata.length);
-    memset(codecPar->extradata + codecPar->extradata_size, 0,
-           AV_INPUT_BUFFER_PADDING_SIZE);
-
-    // Mark as synthesized
-    _didSynthesizeExtradata = YES;
-
-    NSLog(@"[FFmpegDemuxer] New extradata size: %d bytes",
-          codecPar->extradata_size);
   } else {
     NSLog(@"[FFmpegDemuxer] Failed to find all parameter sets (VPS:%@ SPS:%@ "
           @"PPS:%@)",
@@ -593,7 +590,7 @@ static const NSUInteger kMaxQueuedAudioPackets =
   return _formatContext->streams[_videoStreamIndex]->time_base.den;
 }
 
-- (nullable NSDictionary<NSString *, id> *)getVTDecoderConfig {
+- (nullable NSDictionary<NSString *, id> *)getSampleBufferBuilderConfig {
   if (!_formatContext || _videoStreamIndex < 0) {
     return nil;
   }
@@ -620,7 +617,7 @@ static const NSUInteger kMaxQueuedAudioPackets =
   if (codecPars->codec_id == AV_CODEC_ID_HEVC &&
       codecPars->extradata_size <= 23) {
     NSLog(@"[FFmpegDemuxer] Extradata corrupted/incomplete (%d bytes), "
-          @"disabling VTDecoder",
+          @"disabling SampleBufferBuilder",
           codecPars->extradata_size);
     return nil;
   }

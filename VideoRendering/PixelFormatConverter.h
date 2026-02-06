@@ -2,7 +2,7 @@
 //  PixelFormatConverter.h
 //  VidCore
 //
-//  Converts FFmpeg AVFrame pixel formats to CVPixelBuffer for Metal rendering
+//  Converts FFmpeg AVFrame pixel formats to CVPixelBuffer
 //
 
 #import <Foundation/Foundation.h>
@@ -23,7 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Convert an FFmpeg frame to a CVPixelBuffer.
 /// @param frame The decoded AVFrame in YUV format
-/// @return A retained CVPixelBuffer ready for Metal rendering, or NULL on failure
+/// @return A retained CVPixelBuffer ready for rendering, or NULL on failure
 - (nullable CVPixelBufferRef)convertFrame:(struct AVFrame *)frame;
 
 /// Release all resources (pools, sws context).
