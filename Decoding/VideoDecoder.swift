@@ -726,6 +726,9 @@ public final class VideoDecoder: @unchecked Sendable {
     self.pendingContextRestorationPackets.removeAll()
 
     // Passthrough path: use demuxer for seeking and getting packets
+    // Flush decoder to reset internal state (critical for audio PTS monotonicity reset)
+    self.decoder?.flushCodecBuffers()
+
     guard demuxer.seek(toKeyframe: seconds) else {
       throw NSError(
         domain: "VideoDecoder", code: -3,

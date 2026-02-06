@@ -133,10 +133,13 @@ public actor SystemAudioRenderer: AudioRendering {
   }
 
   public func flush() async {
+    print("[SystemAudioRenderer] Flushing renderer and clearing pipeline")
     renderer?.flush()
     pendingBuffer = nil
     pendingPTS = nil
     pendingFormatKey = nil
+    lastLogTime = 0
+    resumeAllWaiters()
   }
 
   public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
