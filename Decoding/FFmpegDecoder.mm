@@ -725,12 +725,20 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     // We handle all rects. Text is merged, bitmaps are collected.
     NSMutableString *fullText = [NSMutableString string];
     NSMutableArray *bitmaps = [NSMutableArray array];
+    BOOL hasASS = NO;
 
     for (unsigned int i = 0; i < subtitle.num_rects; i++) {
       AVSubtitleRect *rect = subtitle.rects[i];
+#if DEBUG
+      NSLog(@"[FFmpegDecoder][Subtitle] rect %u type=%d text=%s ass=%s",
+            i,
+            rect->type,
+            rect->text ? rect->text : "(null)",
+            rect->ass ? rect->ass : "(null)");
+#endif
 
       if (rect->type == SUBTITLE_TEXT) {
-        if (rect->text) {
+        if (!hasASS && rect->text) {
           NSString *textStr = [NSString stringWithUTF8String:rect->text];
           if (textStr) {
             [fullText appendString:textStr];
@@ -740,9 +748,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
         if (rect->ass) {
           NSString *assStr = [NSString stringWithUTF8String:rect->ass];
           if (assStr) {
+            if (!hasASS) {
+              [fullText setString:@""];
+            }
             [fullText appendString:assStr];
           }
           frame.isASS = YES;
+          hasASS = YES;
         }
       } else if (rect->type == SUBTITLE_BITMAP) {
         // Bitmap support
@@ -891,6 +903,65 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   }
 
   return [self createVideoFrameFromDecodedFrame:pts];
+}
+
+- (void)flushAudioDecoder {
+  if (!_audioCodecContext) {
+    return;
+  }
+  // Send NULL packet to signal end of stream for audio decoder
+  avcodec_send_packet(_audioCodecContext, NULL);
+}
+
+- (nullable FFmpegAudioFrame *)drainAudioFrame {
+  if (!_audioCodecContext) {
+    return nil;
+  }
+
+  int ret = avcodec_receive_frame(_audioCodecContext, _audioFrame);
+
+  if (ret == AVERROR_EOF) {
+    return nil;
+  }
+
+  if (ret == AVERROR(EAGAIN) || ret < 0) {
+    return nil;
+  }
+
+  AVAudioPCMBuffer *pcmBuffer = [self convertAudioFrame:_audioFrame];
+  if (!pcmBuffer) {
+    return nil;
+  }
+
+  double pts = 0.0;
+  bool hasPTS = false;
+  int64_t ts = _audioFrame->pts;
+  if (ts == AV_NOPTS_VALUE) {
+    ts = _audioFrame->best_effort_timestamp;
+  }
+  if (ts != AV_NOPTS_VALUE && _audioTimeBaseDen > 0) {
+    pts = (double)ts * (double)_audioTimeBaseNum / (double)_audioTimeBaseDen;
+    hasPTS = true;
+  } else if (_audioNextPTS >= 0.0) {
+    pts = _audioNextPTS;
+  }
+
+  double duration = 0.0;
+  if (pcmBuffer.frameLength > 0) {
+    duration = (double)pcmBuffer.frameLength / (double)pcmBuffer.format.sampleRate;
+  }
+
+  if (_audioNextPTS >= 0.0 && hasPTS && pts < _audioNextPTS - 0.000001) {
+    // Enforce monotonic audio PTS for system renderer stability.
+    pts = _audioNextPTS;
+  }
+  _audioNextPTS = pts + duration;
+
+  FFmpegAudioFrame *audioFrame = [[FFmpegAudioFrame alloc] init];
+  audioFrame.type = FFmpegFrameTypeAudio;
+  audioFrame.pcmBuffer = pcmBuffer;
+  audioFrame.presentationTime = pts;
+  return audioFrame;
 }
 
 - (void)flushCodecBuffers {

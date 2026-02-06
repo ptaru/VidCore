@@ -39,6 +39,8 @@ public struct SubtitleBitmap: Sendable, Equatable {
 public struct SubtitleFrame: Sendable, Equatable {
   /// The actual content of the subtitle.
   public let content: SubtitleContent
+  /// Whether the text content is ASS/SSA formatted (if applicable).
+  public let isASS: Bool
   /// Start time of the subtitle in seconds.
   public let startTime: Double
   /// End time of the subtitle in seconds, or nil if unknown (e.g. valid until next event).
@@ -51,8 +53,9 @@ public struct SubtitleFrame: Sendable, Equatable {
     return nil
   }
 
-  public init(content: SubtitleContent, startTime: Double, endTime: Double? = nil) {
+  public init(content: SubtitleContent, isASS: Bool = false, startTime: Double, endTime: Double? = nil) {
     self.content = content
+    self.isASS = isASS
     self.startTime = startTime
     self.endTime = endTime
   }

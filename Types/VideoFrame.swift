@@ -66,7 +66,7 @@ public struct VideoFrame: @unchecked Sendable {
   }
 
   /// Creates a video frame from a pixel buffer (legacy/convenience).
-  public init(
+  public init?(
     pixelBuffer: CVPixelBuffer,
     presentationTime: Double,
     isHDR: Bool = false,
@@ -99,11 +99,10 @@ public struct VideoFrame: @unchecked Sendable {
       )
     }
 
-    // Fallback: If we can't create a sample buffer (rare), we crash or handle gracefully.
-    // For safety here, we force unwrap or assume valid since we originate these.
-    // Ideally we should throw, but init is non-throwing.
-    // Given this is an internal convenience, we assume success.
-    self.sampleBuffer = sampleBuffer!
+    guard let sbuf = sampleBuffer else {
+      return nil
+    }
+    self.sampleBuffer = sbuf
 
     self.presentationTime = presentationTime
     self.isHDR = isHDR

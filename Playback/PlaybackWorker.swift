@@ -137,6 +137,7 @@ actor PlaybackWorker {
         }
 
         await decoder.flushVideoDecoder()
+        await decoder.flushAudioDecoder()
 
         while !Task.isCancelled {
           guard let frame = await decoder.drainVideoFrame() else {
@@ -149,6 +150,22 @@ actor PlaybackWorker {
           await renderer?.enqueue(frame)
           await delegate?.workerDidRenderVideoFrame(frame)
           await delegate?.workerRefreshDebugStats(videoPTS: frame.presentationTime)
+        }
+
+        while !Task.isCancelled {
+          guard let (buffer, pts) = await decoder.drainAudioFrame() else {
+            break
+          }
+          guard audioOutput.isEnabled else { break }
+          await audioOutput.waitUntilReady()
+          if !Task.isCancelled {
+            audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
+            if !hasSignaledAudio {
+              hasSignaledAudio = true
+              await delegate?.workerDidDetectAudio()
+            }
+            await delegate?.workerRefreshDebugStats(videoPTS: nil)
+          }
         }
 
         await delegate?.workerDidFinishStream()

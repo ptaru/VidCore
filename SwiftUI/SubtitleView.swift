@@ -23,12 +23,13 @@ public struct SubtitleView: View {
           if text.isEmpty {
             EmptyView()
           } else {
+            let shouldParseASS = subtitle.isASS || text.contains("{\\")
+            let parsed = SubtitleParser.parse(text, isASS: shouldParseASS)
             VStack {
               Spacer()
               // Use SubtitleParser to render styled text
-              Text(SubtitleParser.parse(text, isASS: false))  // isASS info lost in Frame, defaults to false/markdown check
+              textView(parsed)
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .foregroundColor(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(
@@ -38,6 +39,16 @@ public struct SubtitleView: View {
                 .multilineTextAlignment(.center)
                 .shadow(color: .black.opacity(0.8), radius: 2, x: 0, y: 1)
                 .padding(.bottom, 20)
+            }
+            .task(id: text) {
+              if text.contains("font") || text.contains("&lt;") {
+                let colorRunCount = parsed.runs.reduce(into: 0) { count, run in
+                  if run.foregroundColor != nil { count += 1 }
+                }
+                print("[SubtitleView] isASS=\(subtitle.isASS)")
+                print("[SubtitleView] raw=\(text)")
+                print("[SubtitleView] colorRuns=\(colorRunCount)")
+              }
             }
           }
 
@@ -77,6 +88,21 @@ public struct SubtitleView: View {
       .transition(.opacity)
       .animation(.easeInOut(duration: 0.1), value: subtitle.startTime)
     }
+  }
+
+  private func textView(_ parsed: AttributedString) -> Text {
+    var combined: Text?
+    for run in parsed.runs {
+      let slice = parsed[run.range]
+      var segment = Text(AttributedString(slice))
+      segment = segment.foregroundColor(run.foregroundColor ?? .white)
+      if let combinedText = combined {
+        combined = combinedText + segment
+      } else {
+        combined = segment
+      }
+    }
+    return combined ?? Text("")
   }
 
   private func createCGImage(from data: Data, width: Int, height: Int) -> CGImage? {

@@ -1118,7 +1118,11 @@ static const NSUInteger kMaxQueuedAudioPackets =
     return NO;
 
   _subtitleStreamIndex = streamIndex;
-  NSLog(@"[FFmpegDemuxer] Selected subtitle stream %d", streamIndex);
+  AVCodecParameters *codecPars = _formatContext->streams[streamIndex]->codecpar;
+  const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
+  NSString *codecName =
+      codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
+  NSLog(@"[FFmpegDemuxer] Selected subtitle stream %d (%@)", streamIndex, codecName);
   return YES;
 }
 

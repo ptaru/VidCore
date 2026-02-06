@@ -59,13 +59,22 @@ public enum SubtitleParser {
     let underlineEnd = Regex { "</u>" }
     let fontEnd = Regex { "</font>" }
 
-    // <font color="#RRGGBB">
+    // <font color="#RRGGBB"> (optional #, optional quotes)
     let fontColorStart = Regex {
       "<font color=\""
+      Optionally { "#" }
       Capture {
         OneOrMore(.hexDigit)
       }
       "\">"
+    }
+    let fontColorStartUnquoted = Regex {
+      "<font color="
+      Optionally { "#" }
+      Capture {
+        OneOrMore(.hexDigit)
+      }
+      ">"
     }
 
     var currentIndex = text.startIndex
@@ -109,6 +118,16 @@ public enum SubtitleParser {
           newState.color = Color(hex: hexString)
           styleStack.append(newState)
           currentIndex = match.range.upperBound
+        } else if let match = try? fontColorStartUnquoted.prefixMatch(in: remaining) {
+          let hexString = String(match.1)
+          var newState = currentStyle()
+          newState.color = Color(hex: hexString)
+          styleStack.append(newState)
+          currentIndex = match.range.upperBound
+        } else if let malformedEnd = malformedFontColorPrefixEnd(in: remaining) {
+          // Malformed <font color=...> (e.g. missing quotes/hex or missing '>').
+          // Drop the tag prefix but keep the value text (e.g. "::-").
+          currentIndex = malformedEnd
         } else if let match = try? fontEnd.prefixMatch(in: remaining) {
           if styleStack.count > 1 { styleStack.removeLast() }
           currentIndex = match.range.upperBound
@@ -167,14 +186,19 @@ public enum SubtitleParser {
       "&"
     }
 
-    var currentIndex = text.startIndex
+    // Some ASS streams include stray HTML-like tags (e.g. "<font color=") before overrides.
+    // Strip them to avoid leaking into rendered text.
+    var cleaned = text.replacingOccurrences(of: "<font color=", with: "")
+    cleaned = cleaned.replacingOccurrences(of: "</font>", with: "")
 
-    while currentIndex < text.endIndex {
+    var currentIndex = cleaned.startIndex
+
+    while currentIndex < cleaned.endIndex {
       // Find next override block
-      if let match = try? overrideBlock.firstMatch(in: text[currentIndex...]) {
+      if let match = try? overrideBlock.firstMatch(in: cleaned[currentIndex...]) {
         // Append text before block
         if match.range.lowerBound > currentIndex {
-          let segment = text[currentIndex..<match.range.lowerBound]
+          let segment = cleaned[currentIndex..<match.range.lowerBound]
           attributed.append(applyASSStyle(segment, state: currentState))
         }
 
@@ -202,7 +226,7 @@ public enum SubtitleParser {
         currentIndex = match.range.upperBound
       } else {
         // No more blocks
-        let segment = text[currentIndex...]
+        let segment = cleaned[currentIndex...]
         attributed.append(applyASSStyle(segment, state: currentState))
         break
       }
@@ -229,6 +253,48 @@ public enum SubtitleParser {
     if state.isUnderline { attr.underlineStyle = .single }
     if let c = state.color { attr.foregroundColor = c }
     return attr
+  }
+
+  // MARK: - Tag Helpers
+
+  private static func malformedFontColorPrefixEnd(in remaining: Substring) -> String.Index? {
+    // Accepts variants like:
+    // <font color=...
+    // <FONT COLOR = ...
+    // <font   color=...
+    var idx = remaining.startIndex
+    guard idx < remaining.endIndex, remaining[idx] == "<" else { return nil }
+    idx = remaining.index(after: idx)
+
+    // Skip leading whitespace
+    while idx < remaining.endIndex, remaining[idx].isWhitespace { idx = remaining.index(after: idx) }
+
+    // Parse tag name
+    let nameStart = idx
+    while idx < remaining.endIndex, remaining[idx].isLetter { idx = remaining.index(after: idx) }
+    let tagName = remaining[nameStart..<idx].lowercased()
+    guard tagName == "font" else { return nil }
+
+    // Skip whitespace
+    while idx < remaining.endIndex, remaining[idx].isWhitespace { idx = remaining.index(after: idx) }
+
+    // Parse attribute name
+    let attrStart = idx
+    while idx < remaining.endIndex, remaining[idx].isLetter { idx = remaining.index(after: idx) }
+    let attrName = remaining[attrStart..<idx].lowercased()
+    guard attrName == "color" else { return nil }
+
+    // Skip whitespace
+    while idx < remaining.endIndex, remaining[idx].isWhitespace { idx = remaining.index(after: idx) }
+
+    // Expect '='
+    guard idx < remaining.endIndex, remaining[idx] == "=" else { return nil }
+    idx = remaining.index(after: idx)
+
+    // Skip whitespace after '='
+    while idx < remaining.endIndex, remaining[idx].isWhitespace { idx = remaining.index(after: idx) }
+
+    return idx
   }
 }
 

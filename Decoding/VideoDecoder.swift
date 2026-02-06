@@ -401,12 +401,13 @@ public final class VideoDecoder: @unchecked Sendable {
             // Fallback to FFmpeg decode path
             for ffmpegFrame in ffmpegFrames {
 
-              let frame = self.makeVideoFrame(
+              if let frame = self.makeVideoFrame(
                 pixelBuffer: ffmpegFrame.pixelBuffer,
                 presentationTime: ffmpegFrame.presentationTime,
                 doviProfile: Int(ffmpegFrame.doviProfile)
-              )
-              results.append(.video(frame))
+              ) {
+                results.append(.video(frame))
+              }
             }
           }
         }
@@ -432,7 +433,6 @@ public final class VideoDecoder: @unchecked Sendable {
                 cleanText = self.cleanSubtitleText(text)
               }
               subtitleContent = .text(cleanText)
-              subtitleContent = .text(cleanText)
             } else if let bitmaps = subtitleFrameObj.bitmaps, !bitmaps.isEmpty {
               var swiftBitmaps: [SubtitleBitmap] = []
               for bitmapObj in bitmaps {
@@ -455,6 +455,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
             let frame = SubtitleFrame(
               content: subtitleContent,
+              isASS: subtitleFrameObj.isASS,
               startTime: subtitleFrameObj.startTime,
               endTime: subtitleFrameObj.endTime
             )
@@ -548,6 +549,30 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
+  /// Flush the audio decoder to signal end of stream
+  /// Must be called before draining remaining frames
+  public func flushAudioDecoder() async {
+    await withCheckedContinuation { continuation in
+      decodeQueue.async { [weak self] in
+        guard let self = self else {
+          continuation.resume()
+          return
+        }
+
+        self.lock.lock()
+        defer { self.lock.unlock() }
+
+        guard !self.isClosed, let decoder = self.decoder else {
+          continuation.resume()
+          return
+        }
+
+        decoder.flushAudioDecoder()
+        continuation.resume()
+      }
+    }
+  }
+
   /// Drain remaining buffered frames from the decoder after flush
   /// Returns nil when all frames have been drained
   public func drainVideoFrame() async -> VideoFrame? {
@@ -577,6 +602,36 @@ public final class VideoDecoder: @unchecked Sendable {
           doviProfile: Int(videoFrameObj.doviProfile)
         )
         continuation.resume(returning: frame)
+      }
+    }
+  }
+
+  /// Drain remaining buffered audio frames from the decoder after flush
+  /// Returns nil when all frames have been drained
+  public func drainAudioFrame() async -> (AVAudioPCMBuffer, Double)? {
+    return await withCheckedContinuation { continuation in
+      decodeQueue.async { [weak self] in
+        guard let self = self else {
+          continuation.resume(returning: nil)
+          return
+        }
+
+        self.lock.lock()
+        defer { self.lock.unlock() }
+
+        guard !self.isClosed, let decoder = self.decoder else {
+          continuation.resume(returning: nil)
+          return
+        }
+
+        guard let audioFrameObj = decoder.drainAudioFrame() else {
+          continuation.resume(returning: nil)
+          return
+        }
+
+        continuation.resume(
+          returning: (audioFrameObj.pcmBuffer, audioFrameObj.presentationTime)
+        )
       }
     }
   }
@@ -696,12 +751,6 @@ public final class VideoDecoder: @unchecked Sendable {
     cleaned = cleaned.replacingOccurrences(of: "\\N", with: "\n")
     cleaned = cleaned.replacingOccurrences(of: "\\n", with: "\n")
 
-    // 3. Remove ASS tags { ... }
-    // Loop to remove all occurrences of {...}
-    while let range = cleaned.range(of: "\\{.*?\\}", options: .regularExpression) {
-      cleaned.removeSubrange(range)
-    }
-
     return cleaned
   }
 
@@ -709,7 +758,7 @@ public final class VideoDecoder: @unchecked Sendable {
     pixelBuffer: CVPixelBuffer,
     presentationTime: Double,
     doviProfile: Int
-  ) -> VideoFrame {
+  ) -> VideoFrame? {
     return VideoFrame(
       pixelBuffer: pixelBuffer,
       presentationTime: presentationTime,
@@ -845,13 +894,14 @@ public final class VideoDecoder: @unchecked Sendable {
 
               // Always wait for target (accurate seek)
               if framePTS >= seconds - 0.05 {
-                let frame = self.makeVideoFrame(
+                if let frame = self.makeVideoFrame(
                   pixelBuffer: ffmpegFrame.pixelBuffer,
                   presentationTime: framePTS,
                   doviProfile: Int(ffmpegFrame.doviProfile)
-                )
-                foundFrame = frame
-                return true
+                ) {
+                  foundFrame = frame
+                  return true
+                }
               }
             }
           }

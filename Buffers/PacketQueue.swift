@@ -12,8 +12,8 @@ import Foundation
 public actor PacketQueue {
     private var packets: [FFmpegPacketData] = []
     public nonisolated let maxSize: Int
-    private var waitingConsumers: [CheckedContinuation<FFmpegPacketData?, Never>] = []
-    private var waitingProducers: [CheckedContinuation<Void, Never>] = []
+    private var waitingConsumers: [(UUID, CheckedContinuation<FFmpegPacketData?, Never>)] = []
+    private var waitingProducers: [(UUID, CheckedContinuation<Void, Never>)] = []
     private var isClosed = false
     private var isSuspended = false
     
@@ -27,15 +27,21 @@ public actor PacketQueue {
         guard !isClosed && !isSuspended else { return }
         
         while packets.count >= maxSize && !isClosed && !isSuspended {
-            await withCheckedContinuation { continuation in
-                waitingProducers.append(continuation)
+            let waiterID = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    waitingProducers.append((waiterID, continuation))
+                }
+            } onCancel: {
+                Task { await self.cancelProducer(waiterID) }
             }
         }
         
         guard !isClosed && !isSuspended else { return }
         
-        if let consumer = waitingConsumers.first {
+        if let (id, consumer) = waitingConsumers.first {
             waitingConsumers.removeFirst()
+            _ = id
             consumer.resume(returning: packet)
         } else {
             packets.append(packet)
@@ -47,7 +53,7 @@ public actor PacketQueue {
     public func pop() async -> FFmpegPacketData? {
         if !packets.isEmpty {
             let packet = packets.removeFirst()
-            if let producer = waitingProducers.first {
+            if let (_, producer) = waitingProducers.first {
                 waitingProducers.removeFirst()
                 producer.resume()
             }
@@ -58,8 +64,13 @@ public actor PacketQueue {
             return nil
         }
         
-        return await withCheckedContinuation { continuation in
-            waitingConsumers.append(continuation)
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waitingConsumers.append((waiterID, continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelConsumer(waiterID) }
         }
     }
     
@@ -67,7 +78,7 @@ public actor PacketQueue {
     public func tryPop() -> FFmpegPacketData? {
         guard !packets.isEmpty else { return nil }
         let packet = packets.removeFirst()
-        if let producer = waitingProducers.first {
+        if let (_, producer) = waitingProducers.first {
             waitingProducers.removeFirst()
             producer.resume()
         }
@@ -78,12 +89,12 @@ public actor PacketQueue {
     public func close() {
         isClosed = true
         
-        for consumer in waitingConsumers {
+        for (_, consumer) in waitingConsumers {
             consumer.resume(returning: nil)
         }
         waitingConsumers.removeAll()
         
-        for producer in waitingProducers {
+        for (_, producer) in waitingProducers {
             producer.resume()
         }
         waitingProducers.removeAll()
@@ -96,12 +107,12 @@ public actor PacketQueue {
         isClosed = false
         isSuspended = false
         
-        for consumer in waitingConsumers {
+        for (_, consumer) in waitingConsumers {
             consumer.resume(returning: nil)
         }
         waitingConsumers.removeAll()
         
-        for producer in waitingProducers {
+        for (_, producer) in waitingProducers {
             producer.resume()
         }
         waitingProducers.removeAll()
@@ -111,11 +122,11 @@ public actor PacketQueue {
     /// Packets are preserved in the queue
     public func suspend() {
         isSuspended = true
-        for consumer in waitingConsumers {
+        for (_, consumer) in waitingConsumers {
             consumer.resume(returning: nil)
         }
         waitingConsumers.removeAll()
-        for producer in waitingProducers {
+        for (_, producer) in waitingProducers {
             producer.resume()
         }
         waitingProducers.removeAll()
@@ -141,5 +152,19 @@ public actor PacketQueue {
     
     public var isFull: Bool {
         packets.count >= maxSize
+    }
+
+    private func cancelProducer(_ id: UUID) {
+        if let index = waitingProducers.firstIndex(where: { $0.0 == id }) {
+            let (_, producer) = waitingProducers.remove(at: index)
+            producer.resume()
+        }
+    }
+
+    private func cancelConsumer(_ id: UUID) {
+        if let index = waitingConsumers.firstIndex(where: { $0.0 == id }) {
+            let (_, consumer) = waitingConsumers.remove(at: index)
+            consumer.resume(returning: nil)
+        }
     }
 }

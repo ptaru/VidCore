@@ -20,121 +20,21 @@ public enum SubtitleParser {
     if isASS {
       return parseASS(text)
     } else {
-      return parseSRT(text)
+      // For non-ASS subtitles (rare, as FFmpeg usually converts),
+      // we just treat as plain text. FFmpeg's subtitle decoder usually handles
+      // styling via ASS, so if we get here with !isASS, it's likely basic text
+      // (like mov_text from MP4) that doesn't use complex HTML-like tags.
+      return AttributedString(text)
     }
   }
 
   // MARK: - State Structs
-
-  private struct SRTStyleState {
-    var isBold: Bool = false
-    var isItalic: Bool = false
-    var isUnderline: Bool = false
-    var color: Color? = nil
-  }
 
   private struct ASSStyleState {
     var isBold: Bool = false
     var isItalic: Bool = false
     var isUnderline: Bool = false
     var color: Color? = nil
-  }
-
-  // MARK: - SRT Parsing
-
-  private static func parseSRT(_ text: String) -> AttributedString {
-    var attributed = AttributedString()
-
-    var styleStack: [SRTStyleState] = [SRTStyleState()]
-
-    func currentStyle() -> SRTStyleState {
-      styleStack.last ?? SRTStyleState()
-    }
-
-    // Regex definitions
-    let boldStart = Regex { "<b>" }
-    let boldEnd = Regex { "</b>" }
-    let italicStart = Regex { "<i>" }
-    let italicEnd = Regex { "</i>" }
-    let underlineStart = Regex { "<u>" }
-    let underlineEnd = Regex { "</u>" }
-    let fontEnd = Regex { "</font>" }
-
-    // <font color="#RRGGBB">
-    let fontColorStart = Regex {
-      "<font color=\""
-      Capture {
-        OneOrMore(.hexDigit)
-      }
-      "\">"
-    }
-
-    // Tokenizer logic: finding matches
-
-    var currentIndex = text.startIndex
-
-    while currentIndex < text.endIndex {
-      // Find the nearest tag opening/closing
-      // We search for the *first* occurrence of any tag from the current index.
-
-      // We look for '<' as a quick potential start to avoid running heavy regexes everywhere
-      if let tagStart = text[currentIndex...].firstIndex(of: "<") {
-        // Append text before the tag
-        if tagStart > currentIndex {
-          let segment = text[currentIndex..<tagStart]
-          attributed.append(applySRTStyle(segment, state: currentStyle()))
-        }
-
-        // Now try to match a known tag at tagStart
-        let remaining = text[tagStart...]
-
-        if let match = try? boldStart.prefixMatch(in: remaining) {
-          var newState = currentStyle()
-          newState.isBold = true
-          styleStack.append(newState)
-          currentIndex = match.range.upperBound
-        } else if let match = try? boldEnd.prefixMatch(in: remaining) {
-          if styleStack.count > 1 { styleStack.removeLast() }
-          currentIndex = match.range.upperBound
-        } else if let match = try? italicStart.prefixMatch(in: remaining) {
-          var newState = currentStyle()
-          newState.isItalic = true
-          styleStack.append(newState)
-          currentIndex = match.range.upperBound
-        } else if let match = try? italicEnd.prefixMatch(in: remaining) {
-          if styleStack.count > 1 { styleStack.removeLast() }
-          currentIndex = match.range.upperBound
-        } else if let match = try? underlineStart.prefixMatch(in: remaining) {
-          var newState = currentStyle()
-          newState.isUnderline = true
-          styleStack.append(newState)
-          currentIndex = match.range.upperBound
-        } else if let match = try? underlineEnd.prefixMatch(in: remaining) {
-          if styleStack.count > 1 { styleStack.removeLast() }
-          currentIndex = match.range.upperBound
-        } else if let match = try? fontColorStart.prefixMatch(in: remaining) {
-          let hexString = String(match.1)
-          var newState = currentStyle()
-          newState.color = Color(hex: hexString)
-          styleStack.append(newState)
-          currentIndex = match.range.upperBound
-        } else if let match = try? fontEnd.prefixMatch(in: remaining) {
-          if styleStack.count > 1 { styleStack.removeLast() }
-          currentIndex = match.range.upperBound
-        } else {
-          // Just a '<' character not part of a known tag
-          attributed.append(applySRTStyle("<", state: currentStyle()))
-          currentIndex = text.index(after: tagStart)
-        }
-      } else {
-        // No more tags
-        let segment = text[currentIndex...]
-        attributed.append(applySRTStyle(segment, state: currentStyle()))
-        break
-      }
-    }
-
-    return attributed
   }
 
   // MARK: - ASS Parsing
@@ -183,14 +83,19 @@ public enum SubtitleParser {
       "&"
     }
 
-    var currentIndex = text.startIndex
+    // Some ASS streams include stray HTML-like tags (e.g. "<font color=") before overrides.
+    // Strip them to avoid leaking into rendered text.
+    var cleaned = text.replacingOccurrences(of: "<font color=", with: "")
+    cleaned = cleaned.replacingOccurrences(of: "</font>", with: "")
+
+    var currentIndex = cleaned.startIndex
 
     while currentIndex < text.endIndex {
       // Find next override block
-      if let match = try? overrideBlock.firstMatch(in: text[currentIndex...]) {
+      if let match = try? overrideBlock.firstMatch(in: cleaned[currentIndex...]) {
         // Append text before block
         if match.range.lowerBound > currentIndex {
-          let segment = text[currentIndex..<match.range.lowerBound]
+          let segment = cleaned[currentIndex..<match.range.lowerBound]
           attributed.append(applyASSStyle(segment, state: currentState))
         }
 
@@ -218,7 +123,7 @@ public enum SubtitleParser {
         currentIndex = match.range.upperBound
       } else {
         // No more blocks
-        let segment = text[currentIndex...]
+        let segment = cleaned[currentIndex...]
         attributed.append(applyASSStyle(segment, state: currentState))
         break
       }
@@ -228,15 +133,6 @@ public enum SubtitleParser {
   }
 
   // MARK: - Helpers
-
-  private static func applySRTStyle(_ text: Substring, state: SRTStyleState) -> AttributedString {
-    var attr = AttributedString(String(text))
-    if state.isBold { attr.font = .body.bold() }
-    if state.isItalic { attr.font = (attr.font ?? .body).italic() }
-    if state.isUnderline { attr.underlineStyle = .single }
-    if let c = state.color { attr.foregroundColor = c }
-    return attr
-  }
 
   private static func applyASSStyle(_ text: Substring, state: ASSStyleState) -> AttributedString {
     var attr = AttributedString(String(text))
@@ -251,25 +147,6 @@ public enum SubtitleParser {
 // MARK: - Color Extension
 
 extension Color {
-  init?(hex: String) {
-    // Standard HTML #RRGGBB
-    let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-    var int: UInt64 = 0
-    Scanner(string: hex).scanHexInt64(&int)
-    let r: UInt64
-    let g: UInt64
-    let b: UInt64
-    switch hex.count {
-    case 3:  // RGB (12-bit)
-      (r, g, b) = ((int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-    case 6:  // RGB (24-bit)
-      (r, g, b) = (int >> 16, int >> 8 & 0xFF, int & 0xFF)
-    default:
-      return nil
-    }
-    self.init(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
-  }
-
   init?(assHex: String) {
     // ASS format: BBGGRR
     let hex = assHex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)

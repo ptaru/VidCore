@@ -184,6 +184,16 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Call this repeatedly after flushing until it returns nil.
 - (nullable FFmpegVideoFrame *)drainVideoFrame;
 
+/// Flush the audio decoder to signal end of stream.
+///
+/// Must be called before draining remaining audio frames.
+- (void)flushAudioDecoder;
+
+/// Drain remaining buffered audio frames from the decoder.
+///
+/// Call this repeatedly after flushing until it returns nil.
+- (nullable FFmpegAudioFrame *)drainAudioFrame;
+
 /// Flush the codec internal buffers (video and audio).
 ///
 /// Use this when seeking to reset the decoder state.

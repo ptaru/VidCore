@@ -458,6 +458,7 @@ public class VideoPlayer {
 
   fileprivate func performSeek(to seconds: Double, resumePlayback: Bool?) async {
     guard let decoder = decoder else { return }
+    if Task.isCancelled { return }
 
     let clampedSeconds = max(0, min(seconds, duration))
     let wasPlaying = state == .playing
@@ -465,15 +466,21 @@ public class VideoPlayer {
 
     state = .seeking
     await stopTasks()
+    if Task.isCancelled { return }
     await playbackClock.pause()
+    if Task.isCancelled { return }
     audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
     await packetQueue.suspend()
+    if Task.isCancelled { return }
 
     await resetPlaybackStateForSeek()
+    if Task.isCancelled { return }
 
     do {
       if let seekFrame = try await decoder.seek(to: clampedSeconds) {
+        if Task.isCancelled { return }
         await renderFrame(seekFrame, flushRenderer: true)
+        if Task.isCancelled { return }
         await playbackClock.seek(to: seekFrame.presentationTime)
       } else {
         currentTime = clampedSeconds
@@ -481,8 +488,10 @@ public class VideoPlayer {
       }
 
       await audioOutput.flush()
+      if Task.isCancelled { return }
 
       startTasks()
+      if Task.isCancelled { return }
 
       if shouldResume {
         let clampedRate = max(0.1, min(playbackRate, 32.0))
