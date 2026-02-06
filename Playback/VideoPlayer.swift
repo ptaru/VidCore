@@ -60,7 +60,9 @@ public class VideoPlayer {
       let clamped = max(0.0, min(volume, 1.0))
       if volume != clamped {
         volume = clamped
+        return
       }
+      Task { await worker.updateVolume(volume) }
     }
   }
 
@@ -115,10 +117,13 @@ public class VideoPlayer {
 
   // Task management
   @ObservationIgnored
-  nonisolated(unsafe) private var demuxTask: Task<Void, Never>?
-  @ObservationIgnored
-  nonisolated(unsafe) private var decodeTask: Task<Void, Never>?
-  @ObservationIgnored
+  private lazy var worker = PlaybackWorker(
+    decoder: nil,
+    packetQueue: packetQueue,
+    renderer: nil,
+    audioOutput: audioOutput,
+    delegate: self
+  )
   @ObservationIgnored
   private lazy var seekCoordinator = SeekCoordinator(player: self)
   @ObservationIgnored
@@ -195,6 +200,7 @@ public class VideoPlayer {
       self.renderer = target
       self.configureRenderers(for: target)
     }
+    await worker.updateRenderer(target)
   }
 
   @MainActor
@@ -230,6 +236,7 @@ public class VideoPlayer {
         await packetQueue.reset()
 
         packetQueue = PacketQueue(maxSize: targetPacketSize)
+        await worker.updatePacketQueue(packetQueue)
       }
     }
 
@@ -241,6 +248,9 @@ public class VideoPlayer {
 
       decoder = try VideoDecoder(url: url, hardwareDecodeMode: decodeMode)
       if let decoder = decoder {
+        await worker.updateDecoder(decoder)
+        await worker.updateRenderer(renderer)
+        await worker.updateVolume(volume)
 
         duration = decoder.videoInfo.duration
         videoInfo = decoder.videoInfo
@@ -266,24 +276,9 @@ public class VideoPlayer {
 
         await refreshDebugStats()
 
-        while !Task.isCancelled {
-          guard let packet = await decoder.demuxNextPacket() else { break }
-          let frames = await decoder.decodePacket(packet)
-          if let videoFrame = frames.compactMap({ frame -> VideoFrame? in
-            if case .video(let vf) = frame { return vf }
-            return nil
-          }).first {
-            currentFrame = videoFrame
-            await renderer?.enqueue(videoFrame)
-            if state == .playing {
-              currentTime = await playbackClock.getCurrentTime()
-            } else {
-              currentTime = videoFrame.presentationTime
-              await playbackClock.seek(to: videoFrame.presentationTime)
-            }
-            await refreshDebugStats(videoPTS: videoFrame.presentationTime)
-            break
-          }
+        if let firstFrame = await worker.primeFirstVideoFrame() {
+          await renderFrame(firstFrame, flushRenderer: false)
+          await playbackClock.seek(to: firstFrame.presentationTime)
         }
       }
       state = .ready
@@ -392,6 +387,7 @@ public class VideoPlayer {
 
     decoder?.close()
     decoder = nil
+    await worker.updateDecoder(nil)
 
     currentFrame = nil
     currentSubtitle = nil
@@ -614,35 +610,11 @@ public class VideoPlayer {
 
   private func startTasks() {
     // Only start if not already running
-    if demuxTask == nil {
-      demuxTask = Task { [weak self] in
-        await self?.runDemuxLoop()
-      }
-    }
-
-    if decodeTask == nil {
-      decodeTask = Task { [weak self] in
-        await self?.runDecodeLoop()
-      }
-    }
+    Task { await worker.start() }
   }
 
   private func stopTasks() async {
-    demuxTask?.cancel()
-    decodeTask?.cancel()
-
-    // Deadlock Fix: Packets might be stuck pushing to a full queue.
-    // We must suspend the queue to wake up any blocked producers/consumers
-    // so they can check cancellation and exit.
-    await packetQueue.suspend()
-
-    // Display loop is controlled separately
-
-    await demuxTask?.value
-    await decodeTask?.value
-
-    demuxTask = nil
-    decodeTask = nil
+    await worker.stop()
 
     stopTimeUpdates()
   }
@@ -672,107 +644,6 @@ public class VideoPlayer {
     self.updateSubtitles(for: time)
   }
 
-  // MARK: - Demux Loop
-
-  private func runDemuxLoop() async {
-    guard let decoder = decoder else { return }
-
-    while !Task.isCancelled {
-      if await packetQueue.suspended {
-        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-        continue
-      }
-
-      guard let packet = await decoder.demuxNextPacket() else {
-        await packetQueue.close()
-        break
-      }
-
-      await packetQueue.push(packet)
-    }
-  }
-
-  // MARK: - Decode Loop
-
-  private func runDecodeLoop() async {
-    guard let decoder = decoder else { return }
-
-    while !Task.isCancelled {
-      if await packetQueue.suspended {
-        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-        continue
-      }
-
-      guard let packet = await packetQueue.pop() else {
-        if await packetQueue.suspended {
-          continue
-        }
-
-        await decoder.flushVideoDecoder()
-
-        var drainedCount = 0
-        while !Task.isCancelled {
-          guard let frame = await decoder.drainVideoFrame() else {
-            break
-          }
-          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
-            await readinessAwaiter.waitUntilReady()
-          }
-          guard !Task.isCancelled else { break }
-          await renderer?.enqueue(frame)
-          currentFrame = frame
-          // Time updates handled by periodic timer to avoid SwiftUI churn
-          // currentTime = await playbackClock.getCurrentTime()
-          // updateSubtitles(for: currentTime)
-          await refreshDebugStats(videoPTS: frame.presentationTime)
-          drainedCount += 1
-        }
-
-        if state == .playing {
-          state = .finished
-          await playbackClock.pause()
-          await audioOutput.flush()
-        }
-        break
-      }
-
-      guard !Task.isCancelled else { break }
-
-      let decodedFrames = await decoder.decodePacket(packet)
-      for frame in decodedFrames {
-        switch frame {
-        case .video(let videoFrame):
-          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
-            await readinessAwaiter.waitUntilReady()
-          }
-          guard !Task.isCancelled else { break }
-          await renderer?.enqueue(videoFrame)
-          currentFrame = videoFrame
-          // Time updates handled by periodic timer to avoid SwiftUI churn
-          // currentTime = await playbackClock.getCurrentTime()
-          // updateSubtitles(for: currentTime)
-          await refreshDebugStats(videoPTS: videoFrame.presentationTime)
-        case .audio(let buffer, let pts):
-          guard audioOutput.isEnabled else { break }
-          await audioOutput.waitUntilReady()
-          if !Task.isCancelled {
-            audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
-            hasAudio = true
-            await refreshDebugStats()
-          }
-        case .subtitle(let subtitleFrame):
-          await MainActor.run {
-            self.subtitles.append(subtitleFrame)
-            // Keep only recent subtitles (e.g. last 100)
-            if self.subtitles.count > 100 {
-              self.subtitles.removeFirst()
-            }
-          }
-        }
-      }
-    }
-  }
-
   // MARK: - Cleanup
 
   /// Synchronously cancel all background tasks.
@@ -784,9 +655,10 @@ public class VideoPlayer {
   }
 
   private nonisolated func cancelLocalTasks() {
-    demuxTask?.cancel()
-    decodeTask?.cancel()
     timeUpdateTask?.cancel()
+    Task { @MainActor [weak self] in
+      await self?.worker.stop()
+    }
   }
 
   /// Synchronous close for use from deinit or when async cannot be awaited.
@@ -807,15 +679,13 @@ public class VideoPlayer {
         Task { await audioOutput.flush() }
         decoder?.close()
         self.decoder = nil
+        Task { await worker.updateDecoder(nil) }
         currentFrame = nil
 
         Task { await playbackClock.pause() }
         if let sbRenderer = renderer as? SampleBufferRenderer {
           sbRenderer.flush()
         }
-
-        demuxTask = nil
-        decodeTask = nil
 
         state = .idle
 
@@ -839,15 +709,13 @@ public class VideoPlayer {
           Task { await audioOutput.flush() }
           decoder?.close()
           self.decoder = nil
+          Task { await worker.updateDecoder(nil) }
           currentFrame = nil
 
           Task { await playbackClock.pause() }
           if let sbRenderer = renderer as? SampleBufferRenderer {
             sbRenderer.flush()
           }
-
-          demuxTask = nil
-          decodeTask = nil
 
           state = .idle
 
@@ -986,6 +854,37 @@ public class VideoPlayer {
     debugStats.syncRate = syncRate
     debugStats.decoderName = decoderName
     debugStats.isHardwareDecoded = isHardwareDecoded
+  }
+}
+
+// MARK: - Playback Worker Delegate
+
+extension VideoPlayer: PlaybackWorkerDelegate {
+  func workerDidRenderVideoFrame(_ frame: VideoFrame) {
+    currentFrame = frame
+  }
+
+  func workerDidDecodeSubtitle(_ subtitle: SubtitleFrame) {
+    subtitles.append(subtitle)
+    // Keep only recent subtitles (e.g. last 100)
+    if subtitles.count > 100 {
+      subtitles.removeFirst()
+    }
+  }
+
+  func workerDidDetectAudio() {
+    hasAudio = true
+  }
+
+  func workerDidFinishStream() {
+    guard state == .playing else { return }
+    state = .finished
+    Task { await playbackClock.pause() }
+    Task { await audioOutput.flush() }
+  }
+
+  func workerRefreshDebugStats(videoPTS: Double?) async {
+    await refreshDebugStats(videoPTS: videoPTS)
   }
 }
 
