@@ -375,7 +375,8 @@ public final class VideoDecoder: @unchecked Sendable {
                 pts: packet.pts,
                 dts: packet.dts,
                 duration: packet.duration,
-                forPassthrough: true
+                forPassthrough: true,
+                ambientLightMetadata: packet.ambientLightMetadata
               )
 
               let frame = VideoFrame(
@@ -384,7 +385,8 @@ public final class VideoDecoder: @unchecked Sendable {
                 isHDR: self.videoInfo.isHDR,
                 colorTransfer: Int(self.videoInfo.colorTransfer),
                 doviProfile: self.videoInfo.isDolbyVision
-                  ? Int(self.videoInfo.doviProfile ?? 0) : 0
+                  ? Int(self.videoInfo.doviProfile ?? 0) : 0,
+                ambientLightMetadata: packet.ambientLightMetadata
               )
               results.append(.video(frame))
             } catch {
@@ -396,7 +398,8 @@ public final class VideoDecoder: @unchecked Sendable {
               if let frame = self.makeVideoFrame(
                 pixelBuffer: ffmpegFrame.pixelBuffer,
                 presentationTime: ffmpegFrame.presentationTime,
-                doviProfile: Int(ffmpegFrame.doviProfile)
+                doviProfile: Int(ffmpegFrame.doviProfile),
+                ambientLightMetadata: ffmpegFrame.ambientLightMetadata
               ) {
                 results.append(.video(frame))
               }
@@ -521,7 +524,8 @@ public final class VideoDecoder: @unchecked Sendable {
   /// Drains any remaining video frames from the decoder after flushing.
   /// - Returns: The next drained video frame, or `nil` if no more frames are available.
   public func drainVideoFrame() async -> VideoFrame? {
-    return await withCheckedContinuation { continuation in
+    return await withCheckedContinuation {
+      (continuation: CheckedContinuation<VideoFrame?, Never>) in
       decodeQueue.async { [weak self] in
         guard let self = self else {
           continuation.resume(returning: nil)
@@ -544,7 +548,8 @@ public final class VideoDecoder: @unchecked Sendable {
         let frame = self.makeVideoFrame(
           pixelBuffer: videoFrameObj.pixelBuffer,
           presentationTime: videoFrameObj.presentationTime,
-          doviProfile: Int(videoFrameObj.doviProfile)
+          doviProfile: Int(videoFrameObj.doviProfile),
+          ambientLightMetadata: videoFrameObj.ambientLightMetadata
         )
         continuation.resume(returning: frame)
       }

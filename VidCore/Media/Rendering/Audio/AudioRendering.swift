@@ -22,4 +22,7 @@ public protocol AudioRendering: AnyObject, Sendable {
   ///   - isPlaying: Whether playback should be active
   ///   - rate: Playback rate (e.g., 1.0 = normal speed, 2.0 = double speed)
   func setPlaybackState(isPlaying: Bool, rate: Double)
+
+  /// Returns the PTS currently being played, if available.
+  func currentPlaybackPTS() async -> Double?
 }

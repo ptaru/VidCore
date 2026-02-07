@@ -287,7 +287,8 @@ public final class SampleBufferBuilder: @unchecked Sendable {
     pts: Int64,
     dts: Int64,
     duration: Int64,
-    forPassthrough: Bool = false
+    forPassthrough: Bool = false,
+    ambientLightMetadata: Data? = nil
   ) throws -> CMSampleBuffer {
     guard !data.isEmpty else {
       throw SampleBufferBuilderError.blockBufferCreationFailed(-1)
@@ -398,6 +399,16 @@ public final class SampleBufferBuilder: @unchecked Sendable {
 
     guard status == noErr, let sample = sampleBuffer else {
       throw SampleBufferBuilderError.sampleBufferCreationFailed(status)
+    }
+
+    if let ambientData = ambientLightMetadata {
+      let key = "AmbientViewingEnvironment" as CFString
+      CMSetAttachment(
+        sample,
+        key: key,
+        value: ambientData as CFData,
+        attachmentMode: kCMAttachmentMode_ShouldPropagate
+      )
     }
 
     return sample

@@ -19,6 +19,11 @@ public actor AudioEngineRenderer: AudioRendering {
   private var isPlaying: Bool = false
   private var pendingPlay: Bool = false
 
+  // PTS tracking for synchronization
+  private var startPTS: Double?
+  private var firstEnqueuedPTS: Double?
+  private var lastEnqueuedPTS: Double?
+
   // Buffer queue management for pre-roll and smooth playback
   private var enqueuedBufferCount: Int = 0
   private let minimumBufferCount: Int = 3
@@ -61,10 +66,26 @@ public actor AudioEngineRenderer: AudioRendering {
     }
   }
 
+  private func _setVolume(_ volume: Float) {
+    playerNode.volume = max(0.0, min(volume, 1.0))
+  }
+
+  private func decrementBufferCount() {
+    enqueuedBufferCount -= 1
+    if enqueuedBufferCount == 0 {
+      // Potentially reset start timing if we ran dry, but for now just let it drift
+      // or wait for the next flush/seek to reset.
+    }
+  }
+
   private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
     configureIfNeeded(for: buffer.format)
     startEngineIfNeeded()
     playerNode.volume = max(0.0, min(volume, 1.0))
+    lastEnqueuedPTS = pts
+    if firstEnqueuedPTS == nil {
+      firstEnqueuedPTS = pts
+    }
 
     // Schedule immediately - AVAudioEngine handles timing
     playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
@@ -81,15 +102,11 @@ public actor AudioEngineRenderer: AudioRendering {
     if pendingPlay && !isPlaying && count >= minimumBufferCount {
       playerNode.play()
       isPlaying = true
+
+      // Record start timing for synchronization
+      // Use the PTS of the VERY FIRST buffer we enqueued as the base.
+      self.startPTS = firstEnqueuedPTS
     }
-  }
-
-  private func _setVolume(_ volume: Float) {
-    playerNode.volume = max(0.0, min(volume, 1.0))
-  }
-
-  private func decrementBufferCount() {
-    enqueuedBufferCount -= 1
   }
 
   /// Flushes the audio renderer.
@@ -102,6 +119,9 @@ public actor AudioEngineRenderer: AudioRendering {
     isPlaying = false
     pendingPlay = false
     enqueuedBufferCount = 0
+    startPTS = nil
+    firstEnqueuedPTS = nil
+    lastEnqueuedPTS = nil
   }
 
   /// Updates the playback state.
@@ -121,8 +141,11 @@ public actor AudioEngineRenderer: AudioRendering {
     self.startEngineIfNeeded()
 
     if isPlaying && self.configuredFormat != nil && !self.isPlaying {
-      self.playerNode.play()
-      self.isPlaying = true
+      // Only start node if we have enough buffers, or if we were already in a stream (resuming)
+      if enqueuedBufferCount >= minimumBufferCount || startPTS != nil {
+        self.playerNode.play()
+        self.isPlaying = true
+      }
     } else if !isPlaying && self.isPlaying {
       self.playerNode.pause()
       self.isPlaying = false
@@ -166,7 +189,21 @@ public actor AudioEngineRenderer: AudioRendering {
 
   /// Returns the PTS currently being played, if available.
   /// - Returns: The current playback PTS in seconds, or `nil` if unavailable.
-  public func currentPlaybackPTS() -> Double? {
-    return nil
+  public func currentPlaybackPTS() async -> Double? {
+    guard isPlaying, let startPTS = startPTS else {
+      return nil
+    }
+
+    // playerTime(forNodeTime:) provides the most accurate "samples played" since play()
+    guard let lastRenderTime = playerNode.lastRenderTime,
+      let playerTime = playerNode.playerTime(forNodeTime: lastRenderTime)
+    else {
+      return startPTS
+    }
+
+    let elapsedSeconds = Double(playerTime.sampleTime) / playerTime.sampleRate
+    let currentPTS = startPTS + elapsedSeconds
+
+    return currentPTS
   }
 }

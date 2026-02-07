@@ -26,14 +26,16 @@ extension VideoDecoder {
   func makeVideoFrame(
     pixelBuffer: CVPixelBuffer,
     presentationTime: Double,
-    doviProfile: Int
+    doviProfile: Int,
+    ambientLightMetadata: Data?
   ) -> VideoFrame? {
     return VideoFrame(
       pixelBuffer: pixelBuffer,
       presentationTime: presentationTime,
       isHDR: self.videoInfo.isHDR,
       colorTransfer: self.videoInfo.colorTransfer,
-      doviProfile: doviProfile
+      doviProfile: doviProfile,
+      ambientLightMetadata: ambientLightMetadata
     )
   }
 }

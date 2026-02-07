@@ -466,7 +466,18 @@ public class VideoPlayer {
   }
 
   private func updateTimeFromClock() async {
-    let time = await playbackClock.getCurrentTime()
+    let clockTime = await playbackClock.getCurrentTime()
+    var time = clockTime
+
+    // Steer clock if audio renderer provides a more accurate PTS (e.g. AudioEngineRenderer fallback)
+    if let audioPTS = await audioOutput.currentPlaybackPTS() {
+      let drift = abs(audioPTS - clockTime)
+      if drift > 0.020 {  // 20ms threshold
+        await playbackClock.setTime(audioPTS)
+        time = audioPTS
+      }
+    }
+
     self.currentTime = time
     self.updateSubtitles(for: time)
   }

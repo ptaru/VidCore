@@ -86,6 +86,8 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 @property(nonatomic, assign) CVPixelBufferRef pixelBuffer;
 /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
 @property(nonatomic, assign) int doviProfile;
+/// Per-frame Ambient Viewing Environment metadata.
+@property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
 @end
 
 /// A decoded audio frame.

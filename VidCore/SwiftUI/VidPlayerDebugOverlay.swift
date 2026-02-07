@@ -21,7 +21,6 @@ struct VidPlayerDebugOverlay: View {
   let onPlaybackRateChanged: ((Double) -> Void)?
   let currentTime: Double
 
-  @State private var isAttachmentsExpanded = false
   @State private var isAudioTracksExpanded = true
   @State private var isSubtitleTracksExpanded = true
 
@@ -166,6 +165,10 @@ struct VidPlayerDebugOverlay: View {
             debugRow("MaxFALL", "\(maxFALL) nits")
           }
           debugRow("Content Peak", String(format: "%.0f nits", info.contentPeakNits))
+
+          if frame.ambientLightMetadata != nil {
+            debugRow("Ambient Light", "Present", color: .green)
+          }
         } else {
           debugRow("SDR", "Active")
         }
@@ -228,31 +231,6 @@ struct VidPlayerDebugOverlay: View {
         Divider().background(Color.white.opacity(0.3))
       }
 
-      let attachments = getAttachments(from: frame.pixelBuffer)
-      if attachments.isEmpty {
-        debugRow("Attachments", "None", color: .gray)
-      } else {
-        trackSectionHeader(
-          title: "Attachments",
-          isExpanded: isAttachmentsExpanded,
-          onToggle: { isAttachmentsExpanded.toggle() }
-        )
-        if isAttachmentsExpanded {
-          ForEach(attachments, id: \.0) { key, value in
-            VStack(alignment: .leading, spacing: 2) {
-              Text(key)
-                .foregroundColor(.gray)
-                .lineLimit(1)
-                .truncationMode(.middle)
-              Text(value)
-                .foregroundColor(.white)
-                .lineLimit(2)
-            }
-            .padding(.leading, 8)
-            .padding(.bottom, 4)
-          }
-        }
-      }
     }
   }
 
@@ -425,16 +403,4 @@ struct VidPlayerDebugOverlay: View {
     }
   }
 
-  /// Extracts attachments from CVPixelBuffer as key-value pairs
-  private func getAttachments(from pixelBuffer: CVPixelBuffer?) -> [(String, String)] {
-    guard let pixelBuffer = pixelBuffer,
-      let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate) as? [String: Any]
-    else {
-      return []
-    }
-
-    return attachments.sorted(by: { $0.key < $1.key }).map { key, value in
-      return (key, String(describing: value))
-    }
-  }
 }

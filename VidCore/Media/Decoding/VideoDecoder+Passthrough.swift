@@ -40,7 +40,8 @@ extension VideoDecoder {
               pts: packet.pts,
               dts: packet.dts,
               duration: packet.duration,
-              forPassthrough: true
+              forPassthrough: true,
+              ambientLightMetadata: packet.ambientLightMetadata
             )
 
             let frame = VideoFrame(
@@ -48,7 +49,8 @@ extension VideoDecoder {
               presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
               isHDR: self.videoInfo.isHDR,
               colorTransfer: Int(self.videoInfo.colorTransfer),
-              doviProfile: self.videoInfo.isDolbyVision ? Int(self.videoInfo.doviProfile ?? 0) : 0
+              doviProfile: self.videoInfo.isDolbyVision ? Int(self.videoInfo.doviProfile ?? 0) : 0,
+              ambientLightMetadata: packet.ambientLightMetadata
             )
             frames.append(frame)
           } catch {

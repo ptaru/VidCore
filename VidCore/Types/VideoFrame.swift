@@ -46,6 +46,9 @@ public struct VideoFrame: @unchecked Sendable {
   /// Dolby Vision Profile ID (e.g., 5, 8), 0 if not present.
   public let doviProfile: Int
 
+  /// Per-frame Ambient Viewing Environment metadata (AVAmbientViewingEnvironment).
+  public let ambientLightMetadata: Data?
+
   /// Whether the frame is compressed (contains no pixel buffer).
   public var isCompressed: Bool {
     pixelBuffer == nil
@@ -63,13 +66,15 @@ public struct VideoFrame: @unchecked Sendable {
     presentationTime: Double,
     isHDR: Bool = false,
     colorTransfer: Int? = nil,
-    doviProfile: Int = 0
+    doviProfile: Int = 0,
+    ambientLightMetadata: Data? = nil
   ) {
     self.sampleBuffer = sampleBuffer
     self.presentationTime = presentationTime
     self.isHDR = isHDR
     self.colorTransfer = colorTransfer ?? (isHDR ? 16 : 1)
     self.doviProfile = doviProfile
+    self.ambientLightMetadata = ambientLightMetadata
   }
 
   /// Creates a video frame from a pixel buffer.
@@ -84,7 +89,8 @@ public struct VideoFrame: @unchecked Sendable {
     presentationTime: Double,
     isHDR: Bool = false,
     colorTransfer: Int? = nil,
-    doviProfile: Int = 0
+    doviProfile: Int = 0,
+    ambientLightMetadata: Data? = nil
   ) {
     // Create a basic CMSampleBuffer wrapping the pixel buffer
     // Note: In a real app we might want to cache the format description
@@ -121,6 +127,7 @@ public struct VideoFrame: @unchecked Sendable {
     self.isHDR = isHDR
     self.colorTransfer = colorTransfer ?? (isHDR ? 16 : 1)
     self.doviProfile = doviProfile
+    self.ambientLightMetadata = ambientLightMetadata
   }
 
   /// Applies HDR attachments (Color Primaries, Transfer Function, YCbCr Matrix) to the pixel buffer if missing.

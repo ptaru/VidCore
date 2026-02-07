@@ -444,7 +444,11 @@ public actor SystemAudioRenderer: AudioRendering {
 
   /// Updates the playback state (no-op for system renderer as it follows the synchronizer).
   public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
-    // System audio renderer follows the synchronizer timebase.
     // State is managed externally by PlaybackClock.
+  }
+
+  /// Returns the PTS currently being played (always nil for system renderer).
+  public func currentPlaybackPTS() async -> Double? {
+    return nil
   }
 }
