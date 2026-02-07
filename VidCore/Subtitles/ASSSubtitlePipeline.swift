@@ -78,7 +78,9 @@ final class ASSSubtitlePipeline {
     // We use a fixed virtual resolution for PlayResY (720) to ensure
     // consistent font sizing regardless of the video's actual resolution.
     let playResY = 720
-    let playResX = Int(Double(playResY) * videoInfo.displayAspectRatio)
+    let aspectRatio =
+      videoInfo.displayAspectRatio.isFinite ? videoInfo.displayAspectRatio : (16.0 / 9.0)
+    let playResX = Int(Double(playResY) * aspectRatio)
 
     return """
       [Script Info]

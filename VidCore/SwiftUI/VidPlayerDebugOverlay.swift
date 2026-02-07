@@ -106,8 +106,9 @@ struct VidPlayerDebugOverlay: View {
         let drift = currentTime - frame.presentationTime
         debugRow("Clock Drift", String(format: "%+.3fs", drift))
         if let info = videoInfo {
-          let frameNumber = Int(frame.presentationTime * info.frameRate)
-          debugRow("Frame #", "\(frameNumber)")
+          let frameVal = frame.presentationTime * info.frameRate
+          let frameNumberStr = frameVal.isFinite ? "\(Int(frameVal))" : "Unknown"
+          debugRow("Frame #", frameNumberStr)
         }
         HStack {
           Text("Speed:")
