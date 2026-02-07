@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import QuartzCore
 
 #if os(macOS)
   import AppKit
@@ -39,6 +40,7 @@ public final class DisplayLink {
   private let onUpdate: () -> Void
   private weak var source: DisplayLinkSource?
   private var isRunning = false
+  private var preferredFrameRate: Double?
 
   /// Creates a new display link instance.
   /// - Parameter onUpdate: A block to execute on each display VSync.
@@ -60,6 +62,13 @@ public final class DisplayLink {
     }
   }
 
+  /// Sets a preferred frame rate for the display link when supported.
+  /// Pass nil to let the system choose.
+  public func setPreferredFrameRate(_ fps: Double?) {
+    preferredFrameRate = fps
+    applyPreferredFrameRate()
+  }
+
   /// Start the display link.
   public func start() {
     guard displayLink == nil else { return }
@@ -79,6 +88,7 @@ public final class DisplayLink {
       self.displayLink = CADisplayLink(target: self, selector: #selector(handleUpdate))
     #endif
 
+    applyPreferredFrameRate()
     displayLink?.add(to: .main, forMode: .common)
   }
 
@@ -91,6 +101,28 @@ public final class DisplayLink {
 
   @objc private func handleUpdate() {
     onUpdate()
+  }
+
+  private func applyPreferredFrameRate() {
+    guard let displayLink = displayLink else { return }
+    let fps = preferredFrameRate ?? 0
+
+    if #available(macOS 14.0, *) {
+      let fpsFloat = Float(fps)
+      if fpsFloat > 0 {
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+          minimum: fpsFloat,
+          maximum: fpsFloat,
+          preferred: fpsFloat
+        )
+      } else {
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+          minimum: 0,
+          maximum: 0,
+          preferred: 0
+        )
+      }
+    }
   }
 
   deinit {

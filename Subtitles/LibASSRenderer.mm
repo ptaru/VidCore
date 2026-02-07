@@ -29,6 +29,7 @@ extern "C" {
   CGImageRef _cachedImage;
   uint8_t *_pixelBuffer;
   size_t _pixelBufferSize;
+  int _lastRenderChanged;
 }
 
 - (instancetype)init {
@@ -262,6 +263,7 @@ extern "C" {
     int changed = 0;
     ASS_Image *img =
         ass_render_frame(self->_assRenderer, self->_assTrack, now_ms, &changed);
+    self->_lastRenderChanged = changed;
 
     // Performance optimization: If nothing changed and we have a cached image,
     // return it. changed == 0: no change changed == 1: positions changed (e.g.

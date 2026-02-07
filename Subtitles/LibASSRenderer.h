@@ -12,6 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Wrapper around libass for rendering ASS/SSA subtitles.
 @interface LibASSRenderer : NSObject
+/// Last change flag from libass render: 0 = no change, 1 = position change, 2 = content change.
+@property(nonatomic, assign, readonly) int lastRenderChanged;
 
 /// Configure the renderer with the ASS track header (usually from codec
 /// extradata).

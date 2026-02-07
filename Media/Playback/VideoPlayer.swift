@@ -142,6 +142,10 @@ public class VideoPlayer {
   private var subtitles: [SubtitleFrame] = []
   private var lastSubtitleUpdateTime: Double = 0
   private var lastScrubFrameTime: Double?
+  private var subtitleRenderTask: Task<Void, Never>?
+  private var pendingASSRenderTime: Double?
+  private var lastASSRenderTime: Double = 0
+  private var assAnimatingUntilTime: Double = 0
 
   // MARK: - Initialization
 
@@ -275,6 +279,7 @@ public class VideoPlayer {
 
         duration = decoder.videoInfo.duration
         videoInfo = decoder.videoInfo
+        updateDisplayLinkFrameRate(isAnimating: false, isASSActive: false)
 
         // Sync selected audio track with demuxer's default selection
         if !decoder.videoInfo.audioTracks.isEmpty {
@@ -537,9 +542,16 @@ public class VideoPlayer {
     await audioOutput.flush()
 
     await packetQueue.reset()
+    if let decoder {
+      await decoder.resetSubtitleState()
+    }
     subtitles.removeAll()
     currentSubtitle = nil
     lastSubtitleUpdateTime = 0
+    lastASSRenderTime = 0
+    pendingASSRenderTime = nil
+    assAnimatingUntilTime = 0
+    assAnimatingUntilTime = 0
 
     if lastScrubFrameTime == nil, let decoder {
       do {
@@ -588,9 +600,14 @@ public class VideoPlayer {
 
   fileprivate func resetPlaybackStateForSeek() async {
     await packetQueue.reset()
+    if let decoder {
+      await decoder.resetSubtitleState()
+    }
     subtitles.removeAll()
     currentSubtitle = nil
     lastSubtitleUpdateTime = 0
+    lastASSRenderTime = 0
+    pendingASSRenderTime = nil
 
     if let sbRenderer = renderer as? SampleBufferRenderer {
       sbRenderer.flush()
@@ -632,60 +649,181 @@ public class VideoPlayer {
 
     // Check for ASS rendering override
     if let decoder = decoder, decoder.isCurrentSubtitleTrackASS {
-      // Only render if we have a valid size
-      if viewSize.width > 0 && viewSize.height > 0 {
-        let size = viewSize
-        let scale = contentScale
+      updateDisplayLinkFrameRate(
+        isAnimating: isASSAnimating(at: time),
+        isASSActive: isASSActive()
+      )
+      scheduleASSRender(for: time, decoder: decoder)
+      return  // Early exit, async update will handle it
+    }
 
-        // Configure aspect ratio before rendering if needed
-        if let info = videoInfo {
-          let storageSize = CGSize(width: Double(info.width), height: Double(info.height))
-          decoder.assRenderer?.setStorageSize(storageSize, aspect: info.displayAspectRatio)
-        }
-
-        // Offload rendering to background to avoid main thread hitches
-        Task.detached(priority: .userInitiated) { [weak self, decoder] in
-          if let image = decoder.getSubtitleImage(at: time, size: size, scale: scale) {
-            await MainActor.run {
-              guard let self = self else { return }
-
-              // Ensure this update is still relevant (e.g. didn't seek away)
-              // A simple check is if we're still playing or paused near this time.
-              // For now, update regardless to ensure we don't miss frames.
-              // The main actor serialization handles race on `currentSubtitle`.
-
-              let newSubtitle = SubtitleFrame(
-                content: .image(ImageBox(image)),
-                isASS: true,
-                startTime: time,
-                endTime: nil  // ASS manages its own duration via the renderer
-              )
-
-              // Only update if changed
-              if self.currentSubtitle != newSubtitle {
-                self.currentSubtitle = newSubtitle
-              }
-            }
-          } else {
-            await MainActor.run {
-              guard let self = self else { return }
-              // Clear subtitle if no image returned (gap)
-              // Only clear if the current subtitle IS an ASS subtitle (don't clear text subs here)
-              // Actually, if we are in ASS mode, we should control the subtitle.
-              if self.currentSubtitle?.isASS == true {
-                self.currentSubtitle = nil
-              }
-            }
-          }
-        }
-        return  // Early exit, async update will handle it
-      }
+    // If ASS is active, never show plain-text ASS frames (prevents flashes).
+    if decoder?.isCurrentSubtitleTrackASS == true,
+       let subtitle = newSubtitle,
+       subtitle.isASS,
+       case .text = subtitle.content
+    {
+      newSubtitle = nil
     }
 
     // Only update if changed to avoid excessive SwiftUI view updates and flickering
     if newSubtitle != currentSubtitle {
       currentSubtitle = newSubtitle
     }
+  }
+
+  private func subtitleRenderInterval(isAnimating: Bool, isASSActive: Bool) -> Double {
+    if isAnimating || isASSActive {
+      return 1.0 / 60.0
+    }
+    let fps = max(videoInfo?.frameRate ?? 30.0, 1.0)
+    let clamped = min(max(fps, 24.0), 60.0)
+    return 1.0 / clamped
+  }
+
+  private func isASSActive() -> Bool {
+    decoder?.isCurrentSubtitleTrackASS == true
+  }
+
+  private func isASSAnimating(at time: Double) -> Bool {
+    time <= assAnimatingUntilTime
+  }
+
+  private func shouldStartASSRender(for time: Double) -> Bool {
+    if state != .playing {
+      return true
+    }
+    let delta = abs(time - lastASSRenderTime)
+    if delta >= subtitleRenderInterval(
+      isAnimating: isASSAnimating(at: time),
+      isASSActive: isASSActive()
+    ) {
+      return true
+    }
+    return delta >= 0.5
+  }
+
+  private func scheduleASSRender(for time: Double, decoder: VideoDecoder) {
+    pendingASSRenderTime = time
+
+    guard subtitleRenderTask == nil else { return }
+    guard shouldStartASSRender(for: time) else { return }
+
+    subtitleRenderTask = Task.detached(priority: .userInitiated) { [weak self, decoder] in
+      await self?.runASSRenderLoop(decoder: decoder)
+    }
+  }
+
+  private func runASSRenderLoop(decoder: VideoDecoder) async {
+    while true {
+      if Task.isCancelled {
+        break
+      }
+
+      let renderTime: Double? = await MainActor.run {
+        if let time = pendingASSRenderTime {
+          pendingASSRenderTime = nil
+          return time
+        }
+        return nil
+      }
+
+      guard let time = renderTime else { break }
+      if Task.isCancelled {
+        break
+      }
+
+      let (size, scale, info, playbackTime, interval, animating, assActive):
+        (CGSize, CGFloat, VideoInfo?, Double, Double, Bool, Bool) =
+        await MainActor.run {
+          let animating = isASSAnimating(at: self.currentTime)
+          let assActive = isASSActive()
+          return (
+            viewSize,
+            contentScale,
+            videoInfo,
+            self.currentTime,
+            subtitleRenderInterval(isAnimating: animating, isASSActive: assActive),
+            animating,
+            assActive
+          )
+        }
+
+      var renderSize = size
+      if renderSize.width <= 0 || renderSize.height <= 0, let info {
+        renderSize = CGSize(width: info.width, height: info.height)
+      }
+      if renderSize.width <= 0 || renderSize.height <= 0 {
+        continue
+      }
+
+      if let info = info {
+        let storageSize = CGSize(width: Double(info.width), height: Double(info.height))
+        decoder.assRenderer?.setStorageSize(storageSize, aspect: info.displayAspectRatio)
+      }
+
+      let (image, changed) = decoder.getSubtitleImage(at: time, size: renderSize, scale: scale)
+
+      let maxSkew = max(0.25, interval * 2.0)
+      if abs(playbackTime - time) > maxSkew {
+        continue
+      }
+
+      await MainActor.run { [weak self] in
+        guard let self else { return }
+        self.lastASSRenderTime = time
+        if changed == 1 {
+          self.assAnimatingUntilTime = max(self.assAnimatingUntilTime, time + 0.5)
+        } else if !animating {
+          self.assAnimatingUntilTime = max(self.assAnimatingUntilTime, time)
+        }
+        self.updateDisplayLinkFrameRate(
+          isAnimating: self.isASSAnimating(at: playbackTime),
+          isASSActive: assActive
+        )
+
+        if let image {
+          let newSubtitle = SubtitleFrame(
+            content: .image(ImageBox(image)),
+            isASS: true,
+            startTime: time,
+            endTime: nil  // ASS manages its own duration via the renderer
+          )
+
+          if self.currentSubtitle != newSubtitle {
+            self.currentSubtitle = newSubtitle
+          }
+        } else if self.currentSubtitle?.isASS == true {
+          self.currentSubtitle = nil
+        }
+      }
+    }
+
+    await MainActor.run { [weak self] in
+      guard let self else { return }
+      self.subtitleRenderTask = nil
+      if let pendingTime = self.pendingASSRenderTime,
+         let decoder = self.decoder,
+         self.shouldStartASSRender(for: pendingTime)
+      {
+        self.subtitleRenderTask = Task.detached(priority: .userInitiated) { [weak self, decoder] in
+          await self?.runASSRenderLoop(decoder: decoder)
+        }
+      }
+    }
+  }
+
+  private func updateDisplayLinkFrameRate(isAnimating: Bool, isASSActive: Bool) {
+    if isAnimating {
+      displayLink.setPreferredFrameRate(nil)
+      return
+    }
+    if isASSActive {
+      displayLink.setPreferredFrameRate(60)
+      return
+    }
+    let fps = videoInfo?.frameRate ?? 0
+    displayLink.setPreferredFrameRate(fps > 0 ? fps : nil)
   }
 
   // MARK: - Task Management
@@ -707,6 +845,9 @@ public class VideoPlayer {
 
   private func stopTimeUpdates() {
     displayLink.stop()
+    subtitleRenderTask?.cancel()
+    subtitleRenderTask = nil
+    pendingASSRenderTime = nil
   }
 
   private func updateTimeFromClock() async {
@@ -727,7 +868,7 @@ public class VideoPlayer {
 
   private nonisolated func cancelLocalTasks() {
     Task { @MainActor [weak self] in
-      self?.displayLink.stop()
+      self?.stopTimeUpdates()
       await self?.worker.stop()
     }
   }
