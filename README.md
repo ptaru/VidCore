@@ -28,11 +28,7 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 
 ## Building
 
-### Embedding VidCore.framework
-
-Look at https://github.com/ptaru/VidPreview for an example of VidCore usage in an Xcode project. 
-
-### Building FFmpeg + dav1d (One-Time)
+### 1. Build FFmpeg
 
 If the bundled libraries are missing, build them:
 
@@ -41,14 +37,35 @@ If the bundled libraries are missing, build them:
 brew install nasm meson ninja pkg-config
 
 # Build FFmpeg + dav1d (~5-10 min)
-cd VidCore/Scripts
+cd Scripts
 chmod +x build-ffmpeg.sh
 ./build-ffmpeg.sh
 ```
 
-This creates universal static libraries (arm64 + x86_64) in `VidCore/Frameworks/FFmpeg/`:
-- `libavcodec.a`, `libavformat.a`, `libavutil.a`, `libswresample.a`, `libswscale.a`
-- `libdav1d.a` (fast AV1 decoder)
+This creates universal static libraries (arm64 + x86_64) in `Frameworks/FFmpeg/`.
+
+### 2. Xcode Project Configuration
+
+To build `VidCore.framework`, the project is configured with:
+
+- **System Headers**: FFmpeg headers are included via `-isystem` in **Other C Flags** and **Other C++ Flags** to suppress warnings within external code.
+- **Static Linking**: The target links against the `.a` files in `Frameworks/FFmpeg/lib`.
+
+### 3. Using VidCore in Another Project
+
+To add `VidCore` to your own macOS application:
+
+1.  **Embed the Framework**:
+    - Drag `VidCore.xcodeproj` into your project.
+    - In your app target's **General** tab, add `VidCore.framework` to **Frameworks, Libraries, and Embedded Content**.
+    - Set it to **Embed & Sign**.
+2.  **Configure Transitive Dependencies**:
+    Since `VidCore` links statically to FFmpeg, your app needs to know where those libraries are for the final link stage. In your app's **Build Settings**:
+    - Add the path to `VidCore/Frameworks/FFmpeg/lib` to **Library Search Paths**.
+3.  **Import**:
+    ```swift
+    import VidCore
+    ```
 
 ---
 
