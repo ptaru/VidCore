@@ -30,7 +30,6 @@ public actor SystemAudioRenderer: AudioRendering {
   private var readinessWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
   private var isRequestingReadiness: Bool = false
   private let readinessTimeoutNanos: UInt64 = 250_000_000
-  private let isDebugLoggingEnabled: Bool = false
   private let minCoalesceFrames: AVAudioFrameCount = 1024
   private let maxCoalesceFrames: AVAudioFrameCount = 4096
   private var pendingBuffer: AVAudioPCMBuffer?
@@ -133,12 +132,10 @@ public actor SystemAudioRenderer: AudioRendering {
   }
 
   public func flush() async {
-    print("[SystemAudioRenderer] Flushing renderer and clearing pipeline")
     renderer?.flush()
     pendingBuffer = nil
     pendingPTS = nil
     pendingFormatKey = nil
-    lastLogTime = 0
     resumeAllWaiters()
   }
 
@@ -216,16 +213,6 @@ public actor SystemAudioRenderer: AudioRendering {
     enqueueDirect(buffer, pts: pts)
   }
 
-  // Rate-limited logging helper
-  private var lastLogTime: TimeInterval = 0
-  private func debugLog(_ message: String, force: Bool = false) {
-    let now = Date().timeIntervalSince1970
-    if force || (now - lastLogTime > 1.0) {
-      print("[SystemAudioRenderer] \(message)")
-      lastLogTime = now
-    }
-  }
-
   private func enqueueDirect(_ buffer: AVAudioPCMBuffer, pts: Double) {
     let renderBuffer = makeSystemRenderBuffer(buffer)
     guard let formatDescription = makeFormatDescription(for: renderBuffer.format) else { return }
@@ -250,10 +237,7 @@ public actor SystemAudioRenderer: AudioRendering {
       sampleBufferOut: &sampleBuffer
     )
 
-    guard status == noErr, let sbuf = sampleBuffer else {
-      print("[SystemAudioRenderer] Failed to create sample buffer: \(status)")
-      return
-    }
+    guard status == noErr, let sbuf = sampleBuffer else { return }
 
     // Copy audio data into an owned CMBlockBuffer so the CMSampleBuffer is self-contained.
     let copyStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
@@ -263,26 +247,10 @@ public actor SystemAudioRenderer: AudioRendering {
       flags: 0,
       bufferList: renderBuffer.audioBufferList
     )
-    guard copyStatus == noErr else {
-      print("[SystemAudioRenderer] Failed to copy audio data: \(copyStatus)")
-      return
-    }
+    guard copyStatus == noErr else { return }
 
     let readyStatus = CMSampleBufferSetDataReady(sbuf)
-    guard readyStatus == noErr else {
-      print("[SystemAudioRenderer] Failed to set data ready: \(readyStatus)")
-      return
-    }
-
-    // Diagnostic logging for buffer details
-    if lastLogTime == 0 || renderer?.status == .failed {
-      self.debugLog(
-        "Enqueue: \(renderBuffer.frameLength) frames, pts: \(pts), status: \(String(describing: renderer?.status))",
-        force: true)
-      if let error = renderer?.error {
-        self.debugLog("Renderer Error: \(error)", force: true)
-      }
-    }
+    guard readyStatus == noErr else { return }
 
     renderer?.enqueue(sbuf)
   }
@@ -349,20 +317,7 @@ public actor SystemAudioRenderer: AudioRendering {
       )
     }
 
-    guard let interleavedFormat else {
-      print("[SystemAudioRenderer] Failed to create interleaved format for \(format)")
-      return buffer
-    }
-
-    // Log format details once (or on change)
-    if self.cachedFormatDescription == nil {
-      print("[SystemAudioRenderer] Input Format: \(format)")
-      print("[SystemAudioRenderer] Interleaved Format: \(interleavedFormat)")
-      if let layout = interleavedFormat.channelLayout {
-        print("[SystemAudioRenderer] Layout Tag: \(layout.layout.pointee.mChannelLayoutTag)")
-        print("[SystemAudioRenderer] Layout Bitmap: \(layout.layout.pointee.mChannelBitmap)")
-      }
-    }
+    guard let interleavedFormat else { return buffer }
 
     guard
       let interleavedBuffer = AVAudioPCMBuffer(
@@ -370,8 +325,6 @@ public actor SystemAudioRenderer: AudioRendering {
         frameCapacity: buffer.frameCapacity
       )
     else {
-      print(
-        "[SystemAudioRenderer] Failed to allocate interleaved buffer (cap=\(buffer.frameCapacity))")
       return buffer
     }
 
@@ -435,7 +388,6 @@ public actor SystemAudioRenderer: AudioRendering {
         formatDescriptionOut: &desc
       )
       guard status == noErr else {
-        print("[SystemAudioRenderer] Failed to create format description (w/ layout): \(status)")
         return nil
       }
     } else {
@@ -451,7 +403,6 @@ public actor SystemAudioRenderer: AudioRendering {
         formatDescriptionOut: &desc
       )
       guard status == noErr else {
-        print("[SystemAudioRenderer] Failed to create format description (no layout): \(status)")
         return nil
       }
     }

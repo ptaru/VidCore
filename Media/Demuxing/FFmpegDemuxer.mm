@@ -159,12 +159,8 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // Select default audio stream, or first if no default specified
   if (defaultAudioStream >= 0) {
     _audioStreamIndex = defaultAudioStream;
-    NSLog(@"[FFmpegDemuxer] Selected default audio stream %d",
-          defaultAudioStream);
   } else if (_audioStreamIndices.count > 0) {
     _audioStreamIndex = [_audioStreamIndices[0] intValue];
-    NSLog(@"[FFmpegDemuxer] No default audio stream, selecting first stream %d",
-          _audioStreamIndex);
   } else {
     _audioStreamIndex = -1;
   }
@@ -184,12 +180,9 @@ static const NSUInteger kMaxQueuedAudioPackets =
 
   if (defaultSubtitleStream >= 0) {
     _subtitleStreamIndex = defaultSubtitleStream;
-    NSLog(@"[FFmpegDemuxer] Selected default subtitle stream %d",
-          defaultSubtitleStream);
   } else if (_subtitleStreamIndices.count > 0) {
     // We generally don't auto-select subtitles unless forced/default
     _subtitleStreamIndex = -1;
-    NSLog(@"[FFmpegDemuxer] Subtitles available but none selected by default");
   } else {
     _subtitleStreamIndex = -1;
   }
@@ -230,14 +223,9 @@ static const NSUInteger kMaxQueuedAudioPackets =
   if (!needsExtradata)
     return;
 
-  NSLog(@"[FFmpegDemuxer] Extradata missing or incomplete (%d bytes), "
-        @"attempting manual reconstruction...",
-        codecPar->extradata_size);
-
   // Use hevc_mp4toannexb to ensure we have standard Annex B start codes
   const AVBitStreamFilter *filter = av_bsf_get_by_name("hevc_mp4toannexb");
   if (!filter) {
-    NSLog(@"[FFmpegDemuxer] 'hevc_mp4toannexb' filter not found.");
     return;
   }
 
@@ -258,7 +246,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   if (av_bsf_alloc(filter, &bsfCtx) < 0 ||
       avcodec_parameters_copy(bsfCtx->par_in, codecPar) < 0 ||
       av_bsf_init(bsfCtx) < 0) {
-    NSLog(@"[FFmpegDemuxer] Failed to init hevc_mp4toannexb");
     cleanup();
     return;
   }
@@ -281,7 +268,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // Seek to start
   if (av_seek_frame(_formatContext, _videoStreamIndex, 0,
                     AVSEEK_FLAG_BACKWARD) < 0) {
-    NSLog(@"[FFmpegDemuxer] Warning: Failed to seek to start");
     cleanup();
     return;
   }
@@ -378,9 +364,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   }
 
   if (foundAll) {
-    NSLog(@"[FFmpegDemuxer] Reconstruction success! Creating format "
-          @"description via CoreMedia...");
-
     // Prepare parameter sets for CoreMedia
     const uint8_t *parameterSetPointers[3] = {(const uint8_t *)vpsData.bytes,
                                               (const uint8_t *)spsData.bytes,
@@ -410,10 +393,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
       }
 
       if (hvcCData && hvcCData.length > 0) {
-        NSLog(@"[FFmpegDemuxer] Successfully retrieved hvcC atom (%lu bytes) "
-              @"from CoreMedia",
-              (unsigned long)hvcCData.length);
-
         // Update codecPar
         if (codecPar->extradata) {
           av_free(codecPar->extradata);
@@ -429,22 +408,10 @@ static const NSUInteger kMaxQueuedAudioPackets =
 
         // Mark as synthesized
         _didSynthesizeExtradata = YES;
-      } else {
-        NSLog(@"[FFmpegDemuxer] Failed to retrieve hvcC atom from format "
-              @"description");
       }
 
       CFRelease(formatDescription);
-    } else {
-      NSLog(@"[FFmpegDemuxer] "
-            @"CMVideoFormatDescriptionCreateFromHEVCParameterSets failed: %d",
-            (int)status);
     }
-  } else {
-    NSLog(@"[FFmpegDemuxer] Failed to find all parameter sets (VPS:%@ SPS:%@ "
-          @"PPS:%@)",
-          vpsData ? @"YES" : @"NO", spsData ? @"YES" : @"NO",
-          ppsData ? @"YES" : @"NO");
   }
 
   cleanup();
@@ -452,7 +419,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // Seek back
   if (av_seek_frame(_formatContext, _videoStreamIndex, 0,
                     AVSEEK_FLAG_BACKWARD) < 0) {
-    NSLog(@"[FFmpegDemuxer] Warning: Failed to seek back to start");
   }
 }
 
@@ -632,9 +598,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // HEVC extradata must be valid (header is 23 bytes, need > 23 for arrays)
   if (codecPars->codec_id == AV_CODEC_ID_HEVC &&
       codecPars->extradata_size <= 23) {
-    NSLog(@"[FFmpegDemuxer] Extradata corrupted/incomplete (%d bytes), "
-          @"disabling SampleBufferBuilder",
-          codecPars->extradata_size);
     return nil;
   }
 
@@ -1082,7 +1045,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   }
 
   _audioStreamIndex = streamIndex;
-  NSLog(@"[FFmpegDemuxer] Selected audio stream %d", streamIndex);
   return YES;
 }
 
@@ -1094,8 +1056,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   if (!_formatContext) {
     return;
   }
-
-  NSLog(@"[FFmpegDemuxer] Closing demuxer");
 
   if (_packet) {
     av_packet_free(&_packet);
@@ -1161,7 +1121,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
 - (BOOL)selectSubtitleStream:(int)streamIndex {
   if (streamIndex < 0) {
     _subtitleStreamIndex = -1;
-    NSLog(@"[FFmpegDemuxer] Subtitles disabled");
     return YES;
   }
 
@@ -1176,8 +1135,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
   NSString *codecName =
       codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
-  NSLog(@"[FFmpegDemuxer] Selected subtitle stream %d (%@)", streamIndex,
-        codecName);
   return YES;
 }
 

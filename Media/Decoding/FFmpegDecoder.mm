@@ -426,8 +426,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
       _videoInfo.audioChannels = [config[@"audioChannels"] intValue];
     }
 
-    NSLog(@"[FFmpegDecoder] Initialized  (HW: %@)",
-          _usingHardwareDecoder ? @"YES" : @"NO");
   }
   return self;
 }
@@ -729,13 +727,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
     for (unsigned int i = 0; i < subtitle.num_rects; i++) {
       AVSubtitleRect *rect = subtitle.rects[i];
-#if DEBUG
-      NSLog(@"[FFmpegDecoder][Subtitle] rect %u type=%d text=%s ass=%s",
-            i,
-            rect->type,
-            rect->text ? rect->text : "(null)",
-            rect->ass ? rect->ass : "(null)");
-#endif
 
       if (rect->type == SUBTITLE_TEXT) {
         if (!hasASS && rect->text) {
@@ -799,9 +790,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
               // paletted. For safety, if no palette, we just zero it out or
               // copy if format known. Assuming it *might* be raw RGB if
               // encoded that way? Let's log warning and fill transparent.
-              NSLog(@"[FFmpegDecoder] Warning: Bitmap subtitle without "
-                    @"palette (nb_colors=%d). Skipping.",
-                    rect->nb_colors);
               free(rgbaData);
               rgbaData = NULL;
             }
@@ -1043,14 +1031,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   const AVCodec *audioCodec =
       avcodec_find_decoder((enum AVCodecID)audioCodecId);
   if (!audioCodec) {
-    NSLog(@"[FFmpegDecoder] Failed to find audio codec for id %d",
-          audioCodecId);
     return NO;
   }
 
   _audioCodecContext = avcodec_alloc_context3(audioCodec);
   if (!_audioCodecContext) {
-    NSLog(@"[FFmpegDecoder] Failed to allocate audio codec context");
     return NO;
   }
 
@@ -1073,7 +1058,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
   // Open the codec
   if (avcodec_open2(_audioCodecContext, audioCodec, NULL) < 0) {
-    NSLog(@"[FFmpegDecoder] Failed to open audio codec");
     avcodec_free_context(&_audioCodecContext);
     _audioCodecContext = NULL;
     return NO;
@@ -1088,11 +1072,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _videoInfo.audioCodecName = [NSString stringWithUTF8String:audioCodec->name];
   _videoInfo.audioSampleRate = _audioCodecContext->sample_rate;
   _videoInfo.audioChannels = _audioCodecContext->ch_layout.nb_channels;
-
-  NSLog(@"[FFmpegDecoder] Switched to audio stream with codec: %s, sampleRate: "
-        @"%d, channels: %d",
-        audioCodec->name, _audioCodecContext->sample_rate,
-        _audioCodecContext->ch_layout.nb_channels);
 
   return YES;
 }
@@ -1245,8 +1224,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     return;
   }
 
-  NSLog(@"[FFmpegDecoder] Decoder closed and cleaned up");
-
   if (_swrContext) {
     swr_free(&_swrContext);
     _swrContext = NULL;
@@ -1302,6 +1279,5 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _pixelFormatConverter = nil;
 
   _usingHardwareDecoder = NO;
-  NSLog(@"[FFmpegDecoder] close() completed - all resources freed");
 }
 @end

@@ -40,14 +40,12 @@ extern "C" {
 
     _assLibrary = ass_library_init();
     if (!_assLibrary) {
-      NSLog(@"[LibASSRenderer] Failed to init ASS library");
       return nil;
     }
 
     // Initialize renderer
     _assRenderer = ass_renderer_init(_assLibrary);
     if (!_assRenderer) {
-      NSLog(@"[LibASSRenderer] Failed to init ASS renderer");
       ass_library_done(_assLibrary);
       return nil;
     }
@@ -86,8 +84,6 @@ extern "C" {
 
   // Cache the header
   self->_cachedHeader = header;
-  NSLog(@"[LibASSRenderer] Configuring with header (length: %lu): %@",
-        (unsigned long)header.length, header);
 
   dispatch_sync(_renderQueue, ^{
     const char *data = [header cStringUsingEncoding:NSUTF8StringEncoding];
@@ -122,8 +118,7 @@ extern "C" {
     return;
 
   // NSString *dataStr = [[NSString alloc] initWithData:data
-  // encoding:NSUTF8StringEncoding]; NSLog(@"[LibASSRenderer] Processing packet:
-  // '%@' PTS: %.3f Dur: %.3f", dataStr, pts, duration);
+  // encoding:NSUTF8StringEncoding];
 
   dispatch_async(_renderQueue, ^{
     char *entry = (char *)data.bytes;
@@ -170,8 +165,6 @@ extern "C" {
               [NSString stringWithFormat:@"Dialogue: %@,%@,%@,%@", layerStr,
                                          startStr, endStr, restStr];
 
-          // NSLog(@"[LibASSRenderer] Reconstructed: %@", eventLine);
-
           const char *processedData =
               [eventLine cStringUsingEncoding:NSUTF8StringEncoding];
           if (processedData) {
@@ -204,7 +197,6 @@ extern "C" {
 }
 
 - (void)flush {
-  NSLog(@"[LibASSRenderer] Flush called");
   dispatch_async(_renderQueue, ^{
     // Re-create track to clear events
     if (self->_assTrack) {
@@ -220,7 +212,6 @@ extern "C" {
 
     // Restore header if available
     if (self->_cachedHeader) {
-      NSLog(@"[LibASSRenderer] Restoring header after flush");
       const char *data =
           [self->_cachedHeader cStringUsingEncoding:NSUTF8StringEncoding];
       if (data) {

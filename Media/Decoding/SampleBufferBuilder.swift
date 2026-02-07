@@ -158,21 +158,12 @@ public final class SampleBufferBuilder: @unchecked Sendable {
 
       // For Profile 7, we strip DoVi metadata to let it act as HDR10
       if dvProfile == 7 {
-        print(
-          "[SampleBufferBuilder] Dolby Vision Profile 7 detected, STRIPPING DoVi metadata to act as HDR10")
         self.dolbyVisionProfile = 7
         return
       }
 
       self.isDolbyVision = true
       self.dolbyVisionProfile = dvProfile
-
-      print(
-        "[SampleBufferBuilder] Dolby Vision Profile \(dvProfile) Level \(dvLevel) detected (version \(dvVersionMajor).\(dvVersionMinor))"
-      )
-      print(
-        "[SampleBufferBuilder] Flags: rpu=\(rpuPresentFlag) el=\(elPresentFlag) bl=\(blPresentFlag) compat_id=\(dvBlSignalCompatibilityId)"
-      )
 
       // Reconstruct the BIT-PACKED dvcC atom format for VideoToolbox:
       // The dvcC record is 24 bytes total according to actual MP4 files.
@@ -186,9 +177,6 @@ public final class SampleBufferBuilder: @unchecked Sendable {
       dvcC[4] = (dvBlSignalCompatibilityId & 0x0F) << 4
 
       self.dvcCData = Data(dvcC)
-
-      let hexString = dvcC.map { String(format: "%02X", $0) }.joined()
-      print("[SampleBufferBuilder] Reconstructed dvcC (24 bytes): \(hexString)")
     }
   }
 
@@ -218,7 +206,6 @@ public final class SampleBufferBuilder: @unchecked Sendable {
     // Add dvcC atom for Dolby Vision content
     if isDolbyVision, let dvcC = dvcCData {
       atoms["dvcC"] = dvcC
-      print("[SampleBufferBuilder] Attaching dvcC atom (\(dvcC.count) bytes)")
     }
 
     // Build extensions dictionary
@@ -251,7 +238,6 @@ public final class SampleBufferBuilder: @unchecked Sendable {
       if isDolbyVision && dolbyVisionProfile == 5 {
         extensions[kCVImageBufferTransferFunctionKey as String] =
           kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-        print("[SampleBufferBuilder] Comparison: inferred PQ transfer for DoVi P5")
       }
     }
 

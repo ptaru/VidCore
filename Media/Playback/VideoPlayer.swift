@@ -168,10 +168,8 @@ public class VideoPlayer {
       enabled: SystemAudioRenderer.isSupportedInCurrentProcess && !forceFallback
     )
     if audioRenderer.isEnabled {
-      print("[VideoPlayer] Using SystemAudioRenderer")
       self.audioOutput = audioRenderer
     } else {
-      print("[VideoPlayer] Using AudioEngineRenderer (Fallback)")
       self.audioOutput = AudioEngineRenderer()
     }
     self.playbackClock = PlaybackClock(audioRenderer: audioRenderer.renderer)
@@ -194,9 +192,6 @@ public class VideoPlayer {
     case .auto:
       let isHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
       effectiveBuffers = isHardware ? .hardware : .software
-      print(
-        "[VideoPlayer] Auto-detected \(isHardware ? "hardware" : "software") decoding for \(url.lastPathComponent)"
-      )
     default:
       effectiveBuffers = buffers
     // Debug logging removed: noisy in Quick Look extensions.
@@ -478,7 +473,6 @@ public class VideoPlayer {
         updateSubtitles(for: clampedSeconds)
       }
     } catch {
-      print("[VideoPlayer] Scrub seek failed: \(error)")
     }
   }
 
@@ -560,7 +554,6 @@ public class VideoPlayer {
           await playbackClock.seek(to: frame.presentationTime)
         }
       } catch {
-        print("[VideoPlayer] final seek failed: \(error.localizedDescription)")
       }
     }
 

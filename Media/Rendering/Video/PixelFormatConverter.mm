@@ -20,9 +20,6 @@
 @property(nonatomic, assign) int poolWidth;
 @property(nonatomic, assign) int poolHeight;
 @property(nonatomic, assign) BOOL hasCreatedP010Pool;
-// Statistics for monitoring zero-copy effectiveness
-@property(nonatomic, assign) int zeroCopyCount;
-@property(nonatomic, assign) int fallbackCopyCount;
 @end
 
 @implementation PixelFormatConverter
@@ -75,24 +72,12 @@
   if (canUseZeroCopy) {
     CVPixelBufferRef pixelBuffer = [self convertYUV420PFrameZeroCopy:frame];
     if (pixelBuffer) {
-      _zeroCopyCount++;
-      if (_zeroCopyCount == 1) {
-        NSLog(@"[PixelFormatConverter] Zero-copy path activated for %dx%d",
-              frame->width, frame->height);
-      }
       return pixelBuffer;
     }
     // Zero-copy failed, fall through to legacy path
   }
 
   // Fallback to memcpy path for non-aligned frames
-  _fallbackCopyCount++;
-  if (_fallbackCopyCount == 1) {
-    NSLog(@"[PixelFormatConverter] Fallback to memcpy path for %dx%d (stride "
-          @"Y:%d U:%d V:%d)",
-          frame->width, frame->height, frame->linesize[0], frame->linesize[1],
-          frame->linesize[2]);
-  }
   return [self convertYUV420PFrameLegacy:frame];
 }
 
@@ -145,9 +130,6 @@
   if (status != kCVReturnSuccess) {
     // Release wrapper if CVPixelBuffer creation failed
     CFRelease((__bridge CFTypeRef)wrapper);
-    NSLog(
-        @"[PixelFormatConverter] CVPixelBufferCreateWithPlanarBytes failed: %d",
-        status);
     return NULL;
   }
 
@@ -183,14 +165,11 @@
         (__bridge CFDictionaryRef)pixelBufferAttributes, &_i420BufferPool);
 
     if (status != kCVReturnSuccess) {
-      NSLog(@"[PixelFormatConverter] Failed to create I420 pixel buffer pool");
       return NULL;
     }
 
     _poolWidth = frame->width;
     _poolHeight = frame->height;
-    NSLog(@"[PixelFormatConverter] Created I420 buffer pool: %dx%d", _poolWidth,
-          _poolHeight);
   }
 
   // Get buffer from pool
@@ -198,7 +177,6 @@
   CVReturn status =
       CVPixelBufferPoolCreatePixelBuffer(NULL, _i420BufferPool, &pixelBuffer);
   if (status != kCVReturnSuccess) {
-    NSLog(@"[PixelFormatConverter] Failed to get buffer from pool: %d", status);
     return NULL;
   }
 
@@ -272,15 +250,12 @@
         (__bridge CFDictionaryRef)pixelBufferAttributes, &_p010BufferPool);
 
     if (status != kCVReturnSuccess) {
-      NSLog(@"[PixelFormatConverter] Failed to create P010 pixel buffer pool");
       return NULL;
     }
 
     _poolWidth = frame->width;
     _poolHeight = frame->height;
     _hasCreatedP010Pool = YES;
-    NSLog(@"[PixelFormatConverter] Lazy-created P010 buffer pool: %dx%d",
-          _poolWidth, _poolHeight);
   }
 
   // Get buffer from pool
@@ -288,8 +263,6 @@
   CVReturn status =
       CVPixelBufferPoolCreatePixelBuffer(NULL, _p010BufferPool, &pixelBuffer);
   if (status != kCVReturnSuccess) {
-    NSLog(@"[PixelFormatConverter] Failed to get P010 buffer from pool: %d",
-          status);
     return NULL;
   }
 
@@ -356,7 +329,6 @@
                                  frame->width, frame->height, AV_PIX_FMT_NV12,
                                  SWS_BILINEAR, NULL, NULL, NULL);
     if (!_swsContext) {
-      NSLog(@"[PixelFormatConverter] Failed to create sws context");
       return NULL;
     }
   }
@@ -405,7 +377,6 @@
                            kCVPixelBufferPoolFlushExcessBuffers);
     CVPixelBufferPoolRelease(_i420BufferPool);
     _i420BufferPool = NULL;
-    NSLog(@"[PixelFormatConverter] I420 buffer pool flushed and released");
   }
 
   if (_p010BufferPool) {
@@ -414,7 +385,6 @@
     CVPixelBufferPoolRelease(_p010BufferPool);
     _p010BufferPool = NULL;
     _hasCreatedP010Pool = NO;
-    NSLog(@"[PixelFormatConverter] P010 buffer pool flushed and released");
   }
 
   _poolWidth = 0;

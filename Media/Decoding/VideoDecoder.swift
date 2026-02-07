@@ -140,9 +140,6 @@ public final class VideoDecoder: @unchecked Sendable {
       do {
         self.sampleBufferBuilder = try createSampleBufferBuilder(from: sbConfig)
         if let builder = self.sampleBufferBuilder {
-          print(
-            "[VideoDecoder] Using SampleBufferBuilder (DoVi: \(builder.isDolbyVision), profile: \(builder.dolbyVisionProfile))"
-          )
           if builder.isDolbyVision {
             finalDecoderName = "SampleBufferBuilder (DoVi P\(builder.dolbyVisionProfile))"
           } else {

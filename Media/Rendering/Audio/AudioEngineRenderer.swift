@@ -130,7 +130,6 @@ public actor AudioEngineRenderer: AudioRendering {
     do {
       try engine.start()
     } catch {
-      print("[AudioEngineRenderer] Failed to start audio engine: \(error)")
     }
   }
 
