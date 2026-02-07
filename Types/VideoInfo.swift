@@ -36,6 +36,11 @@ public struct VideoInfo {
   /// Whether the video is HDR content (PQ or HLG transfer function).
   public let isHDR: Bool
 
+  /// Sample Aspect Ratio numerator (SAR num).
+  public let sampleAspectRatioNum: Int
+  /// Sample Aspect Ratio denominator (SAR den).
+  public let sampleAspectRatioDen: Int
+
   /// Specific decoder used (e.g. "SampleBufferBuilder", "h264").
   public let decoderName: String?
   /// Description of the decoder implementation.
@@ -137,6 +142,14 @@ public struct VideoInfo {
     return 1000.0  // HDR10 default
   }
 
+  /// The intended display aspect ratio.
+  public var displayAspectRatio: Double {
+    let sar =
+      (sampleAspectRatioNum > 0 && sampleAspectRatioDen > 0)
+      ? Double(sampleAspectRatioNum) / Double(sampleAspectRatioDen) : 1.0
+    return (Double(width) / Double(height)) * sar
+  }
+
   public init(
     width: Int, height: Int, frameRate: Double, duration: Double, containerName: String,
     codecName: String,
@@ -149,7 +162,10 @@ public struct VideoInfo {
     audioCodecName: String? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
     audioTracks: [AudioTrackInfo] = [],
     subtitleTracks: [SubtitleTrackInfo] = [],
-    decoderName: String? = nil, decoderDescription: String? = nil,
+    sampleAspectRatioNum: Int = 1,
+    sampleAspectRatioDen: Int = 1,
+    decoderName: String? = nil,
+    decoderDescription: String? = nil,
     didSynthesizeExtradata: Bool = false
   ) {
     self.width = width
@@ -176,6 +192,8 @@ public struct VideoInfo {
     self.audioChannels = audioChannels
     self.audioTracks = audioTracks
     self.subtitleTracks = subtitleTracks
+    self.sampleAspectRatioNum = sampleAspectRatioNum
+    self.sampleAspectRatioDen = sampleAspectRatioDen
     self.decoderName = decoderName
     self.decoderDescription = decoderDescription
     self.didSynthesizeExtradata = didSynthesizeExtradata

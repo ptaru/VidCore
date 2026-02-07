@@ -14,6 +14,21 @@ public enum SubtitleContent: Sendable, Equatable {
   case text(String)
   /// Bitmap images for image-based subtitles (e.g. PGS, VobSub).
   case bitmaps([SubtitleBitmap])
+  /// Single full-frame image (e.g. rendered ASS).
+  case image(ImageBox)
+}
+
+/// A wrapper for CGImage to support Equatable and Sendable.
+public struct ImageBox: @unchecked Sendable, Equatable {
+  public let image: CGImage
+
+  public init(_ image: CGImage) {
+    self.image = image
+  }
+
+  public static func == (lhs: ImageBox, rhs: ImageBox) -> Bool {
+    return lhs.image === rhs.image
+  }
 }
 
 /// A single bitmap element in a subtitle frame.
@@ -53,7 +68,9 @@ public struct SubtitleFrame: Sendable, Equatable {
     return nil
   }
 
-  public init(content: SubtitleContent, isASS: Bool = false, startTime: Double, endTime: Double? = nil) {
+  public init(
+    content: SubtitleContent, isASS: Bool = false, startTime: Double, endTime: Double? = nil
+  ) {
     self.content = content
     self.isASS = isASS
     self.startTime = startTime

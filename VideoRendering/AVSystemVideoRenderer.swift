@@ -146,9 +146,10 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
 
   public func makeNSView(context: Context) -> AVSampleBufferDisplayLayerWrapperView {
     let view = AVSampleBufferDisplayLayerWrapperView()
-    // Connect the renderer to the player
-    Task {
+    // Connect the renderer and display source to the player
+    Task { @MainActor in
       await player.setRenderer(view.layerRenderer)
+      player.setDisplayLinkSource(view)
     }
     return view
   }

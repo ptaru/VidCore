@@ -52,6 +52,11 @@ public class VideoPlayer {
   /// Real-time debug statistics
   public private(set) var debugStats = PlayerDebugStats()
 
+  /// View size for subtitle rendering (updated by UI)
+  public var viewSize: CGSize = .zero
+  /// Display scale for subtitle rendering
+  public var contentScale: CGFloat = 2.0
+
   // MARK: - Volume Control
 
   /// Playback volume (0.0 to 1.0)
@@ -127,7 +132,12 @@ public class VideoPlayer {
   @ObservationIgnored
   private lazy var seekCoordinator = SeekCoordinator(player: self)
   @ObservationIgnored
-  nonisolated(unsafe) private var timeUpdateTask: Task<Void, Never>?
+  private lazy var displayLink = DisplayLink { [weak self] in
+    guard let self = self else { return }
+    Task { @MainActor in
+      await self.updateTimeFromClock()
+    }
+  }
 
   private var subtitles: [SubtitleFrame] = []
   private var lastSubtitleUpdateTime: Double = 0
@@ -201,6 +211,17 @@ public class VideoPlayer {
       self.configureRenderers(for: target)
     }
     await worker.updateRenderer(target)
+  }
+
+  /// Sets the source for display-synchronized updates (e.g., an `NSView` or `NSWindow`).
+  ///
+  /// This ensures that the progress bar, playback timing, and subtitles are updated exactly
+  /// when the display refreshes. For multi-monitor setups, providing the rendering view
+  /// as the source ensures synchronization with the specific display showing the video.
+  ///
+  /// - Parameter source: The `DisplayLinkSource` to use for timing updates.
+  public func setDisplayLinkSource(_ source: DisplayLinkSource?) {
+    displayLink.setSource(source)
   }
 
   @MainActor
@@ -605,8 +626,60 @@ public class VideoPlayer {
 
     // Find the subtitle that matches current time
     // Use last (most recent) to ensure newer subtitles replace older overlapping ones
-    let newSubtitle = subtitles.last { sub in
+    var newSubtitle = subtitles.last { sub in
       time >= sub.startTime && (sub.endTime == nil || time <= sub.endTime!)
+    }
+
+    // Check for ASS rendering override
+    if let decoder = decoder, decoder.isCurrentSubtitleTrackASS {
+      // Only render if we have a valid size
+      if viewSize.width > 0 && viewSize.height > 0 {
+        let size = viewSize
+        let scale = contentScale
+
+        // Configure aspect ratio before rendering if needed
+        if let info = videoInfo {
+          let storageSize = CGSize(width: Double(info.width), height: Double(info.height))
+          decoder.assRenderer?.setStorageSize(storageSize, aspect: info.displayAspectRatio)
+        }
+
+        // Offload rendering to background to avoid main thread hitches
+        Task.detached(priority: .userInitiated) { [weak self, decoder] in
+          if let image = decoder.getSubtitleImage(at: time, size: size, scale: scale) {
+            await MainActor.run {
+              guard let self = self else { return }
+
+              // Ensure this update is still relevant (e.g. didn't seek away)
+              // A simple check is if we're still playing or paused near this time.
+              // For now, update regardless to ensure we don't miss frames.
+              // The main actor serialization handles race on `currentSubtitle`.
+
+              let newSubtitle = SubtitleFrame(
+                content: .image(ImageBox(image)),
+                isASS: true,
+                startTime: time,
+                endTime: nil  // ASS manages its own duration via the renderer
+              )
+
+              // Only update if changed
+              if self.currentSubtitle != newSubtitle {
+                self.currentSubtitle = newSubtitle
+              }
+            }
+          } else {
+            await MainActor.run {
+              guard let self = self else { return }
+              // Clear subtitle if no image returned (gap)
+              // Only clear if the current subtitle IS an ASS subtitle (don't clear text subs here)
+              // Actually, if we are in ASS mode, we should control the subtitle.
+              if self.currentSubtitle?.isASS == true {
+                self.currentSubtitle = nil
+              }
+            }
+          }
+        }
+        return  // Early exit, async update will handle it
+      }
     }
 
     // Only update if changed to avoid excessive SwiftUI view updates and flickering
@@ -629,22 +702,11 @@ public class VideoPlayer {
   }
 
   private func startTimeUpdates() {
-    stopTimeUpdates()
-    timeUpdateTask = Task { [weak self] in
-      while !Task.isCancelled {
-        guard let self = self else { return }
-        // Update at 60Hz (approx 16ms)
-        try? await Task.sleep(nanoseconds: 16_666_666)
-        if await self.state == .playing {
-          await self.updateTimeFromClock()
-        }
-      }
-    }
+    displayLink.start()
   }
 
   private func stopTimeUpdates() {
-    timeUpdateTask?.cancel()
-    timeUpdateTask = nil
+    displayLink.stop()
   }
 
   private func updateTimeFromClock() async {
@@ -664,8 +726,8 @@ public class VideoPlayer {
   }
 
   private nonisolated func cancelLocalTasks() {
-    timeUpdateTask?.cancel()
     Task { @MainActor [weak self] in
+      self?.displayLink.stop()
       await self?.worker.stop()
     }
   }

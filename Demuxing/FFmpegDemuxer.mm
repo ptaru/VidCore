@@ -542,6 +542,22 @@ static const NSUInteger kMaxQueuedAudioPackets =
     _videoInfo.duration = (double)_formatContext->duration / AV_TIME_BASE;
   }
 
+  // Duration
+  if (videoStream->duration != AV_NOPTS_VALUE) {
+    _videoInfo.duration =
+        (double)videoStream->duration * av_q2d(videoStream->time_base);
+  } else if (_formatContext->duration != AV_NOPTS_VALUE) {
+    _videoInfo.duration = (double)_formatContext->duration / AV_TIME_BASE;
+  }
+
+  // Sample Aspect Ratio
+  AVRational sar = videoStream->sample_aspect_ratio;
+  if (sar.num == 0 || sar.den == 0) {
+    sar = codecPars->sample_aspect_ratio;
+  }
+  _videoInfo.sampleAspectRatioNum = sar.num;
+  _videoInfo.sampleAspectRatioDen = sar.den;
+
   // Audio info
   if (_audioStreamIndex >= 0) {
     AVStream *audioStream = _formatContext->streams[_audioStreamIndex];
@@ -645,6 +661,8 @@ static const NSUInteger kMaxQueuedAudioPackets =
   config[@"colorPrimaries"] = @(codecPars->color_primaries);
   config[@"colorTransfer"] = @(codecPars->color_trc);
   config[@"colorSpace"] = @(codecPars->color_space);
+  config[@"sampleAspectRatioNum"] = @(_videoInfo.sampleAspectRatioNum);
+  config[@"sampleAspectRatioDen"] = @(_videoInfo.sampleAspectRatioDen);
 
   if (dolbyVisionConfig) {
     config[@"dolbyVisionConfig"] = dolbyVisionConfig;
@@ -683,6 +701,8 @@ static const NSUInteger kMaxQueuedAudioPackets =
   config[@"colorTransfer"] = @(codecPars->color_trc);
   config[@"colorSpace"] = @(codecPars->color_space);
   config[@"colorRange"] = @(codecPars->color_range);
+  config[@"sampleAspectRatioNum"] = @(_videoInfo.sampleAspectRatioNum);
+  config[@"sampleAspectRatioDen"] = @(_videoInfo.sampleAspectRatioDen);
 
   // Dolby Vision config
   const AVPacketSideData *doviSideData = av_packet_side_data_get(
@@ -785,6 +805,40 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // Audio extradata
   if (codecPars->extradata && codecPars->extradata_size > 0) {
     config[@"audioExtradata"] =
+        [NSData dataWithBytes:codecPars->extradata
+                       length:codecPars->extradata_size];
+  }
+
+  return config;
+}
+
+- (nullable NSDictionary<NSString *, id> *)getSubtitleDecoderConfigForStream:
+    (int)streamIndex {
+  if (!_formatContext) {
+    return nil;
+  }
+
+  if (streamIndex < 0 ||
+      (unsigned int)streamIndex >= _formatContext->nb_streams) {
+    return nil;
+  }
+
+  AVStream *stream = _formatContext->streams[streamIndex];
+  AVCodecParameters *codecPars = stream->codecpar;
+
+  if (codecPars->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+    return nil;
+  }
+
+  NSMutableDictionary *config = [NSMutableDictionary dictionary];
+
+  config[@"subtitleCodecId"] = @(codecPars->codec_id);
+  config[@"subtitleStreamIndex"] = @(streamIndex);
+  config[@"subtitleTimeBaseNum"] = @(stream->time_base.num);
+  config[@"subtitleTimeBaseDen"] = @(stream->time_base.den);
+
+  if (codecPars->extradata && codecPars->extradata_size > 0) {
+    config[@"subtitleExtradata"] =
         [NSData dataWithBytes:codecPars->extradata
                        length:codecPars->extradata_size];
   }
@@ -1122,39 +1176,13 @@ static const NSUInteger kMaxQueuedAudioPackets =
   const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
   NSString *codecName =
       codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
-  NSLog(@"[FFmpegDemuxer] Selected subtitle stream %d (%@)", streamIndex, codecName);
+  NSLog(@"[FFmpegDemuxer] Selected subtitle stream %d (%@)", streamIndex,
+        codecName);
   return YES;
 }
 
 - (int)selectedSubtitleStreamIndex {
   return _subtitleStreamIndex;
-}
-
-- (nullable NSDictionary<NSString *, id> *)getSubtitleDecoderConfigForStream:
-    (int)streamIndex {
-  if (!_formatContext || streamIndex < 0 ||
-      (unsigned int)streamIndex >= _formatContext->nb_streams)
-    return nil;
-
-  AVStream *stream = _formatContext->streams[streamIndex];
-  AVCodecParameters *codecPars = stream->codecpar;
-
-  if (codecPars->codec_type != AVMEDIA_TYPE_SUBTITLE)
-    return nil;
-
-  NSMutableDictionary *config = [NSMutableDictionary dictionary];
-  config[@"subtitleCodecId"] = @(codecPars->codec_id);
-  config[@"subtitleStreamIndex"] = @(streamIndex);
-  config[@"subtitleTimeBaseNum"] = @(stream->time_base.num);
-  config[@"subtitleTimeBaseDen"] = @(stream->time_base.den);
-
-  if (codecPars->extradata && codecPars->extradata_size > 0) {
-    config[@"subtitleExtradata"] =
-        [NSData dataWithBytes:codecPars->extradata
-                       length:codecPars->extradata_size];
-  }
-
-  return config;
 }
 
 - (NSData *)parseAmbientViewingEnvironment:

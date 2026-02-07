@@ -65,6 +65,7 @@ public struct VidPlayer<Overlay: View>: View {
   @State private var internalPlayer: VideoPlayer?
   @State private var loadError: VideoPlayerError?
   @State private var showDebugInfo: Bool = false
+  @Environment(\.displayScale) private var displayScale
 
   // MARK: - Initializers
 
@@ -166,8 +167,19 @@ public struct VidPlayer<Overlay: View>: View {
 
       // Subtitles
       if let videoInfo = activePlayer.videoInfo {
-        SubtitleView(subtitle: activePlayer.currentSubtitle)
-          .aspectRatio(CGSize(width: videoInfo.width, height: videoInfo.height), contentMode: .fit)
+        GeometryReader { geo in
+          SubtitleView(subtitle: activePlayer.currentSubtitle)
+            .preference(key: SizePreferenceKey.self, value: geo.size)
+            .onPreferenceChange(SizePreferenceKey.self) { size in
+              Task {
+                await MainActor.run {
+                  activePlayer.viewSize = size
+                  activePlayer.contentScale = displayScale
+                }
+              }
+            }
+        }
+        .aspectRatio(CGSize(width: videoInfo.width, height: videoInfo.height), contentMode: .fit)
       } else {
         SubtitleView(subtitle: activePlayer.currentSubtitle)
       }
@@ -275,5 +287,12 @@ private struct VidPlayerErrorView: View {
     .padding()
     .background(Color.black.opacity(0.7))
     .cornerRadius(12)
+  }
+}
+
+private struct SizePreferenceKey: PreferenceKey {
+  static var defaultValue: CGSize = .zero
+  static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+    value = nextValue()
   }
 }

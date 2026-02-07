@@ -85,6 +85,10 @@ public final class VideoDecoder: @unchecked Sendable {
   private var demuxer: FFmpegDemuxer?
   private var decoder: FFmpegDecoder?
   private var sampleBufferBuilder: SampleBufferBuilder?
+
+  /// Renderer for ASS/SSA subtitles
+  public let assRenderer: LibASSRenderer?
+
   private let url: URL
 
   /// Current hardware decode mode
@@ -200,6 +204,25 @@ public final class VideoDecoder: @unchecked Sendable {
       }
     }
 
+    // Phase 4: Initialize LibASSRenderer if needed
+    // We always initialize it to be safe, but only use it if we have ASS tracks or if packets are ASS.
+    // Also, we need to pass extradata if available.
+    self.assRenderer = LibASSRenderer()
+
+    // Pass extradata from demuxer (if any) to ASS renderer
+    if let subs = demuxer.getSubtitleTracks() {
+      for sub in subs {
+        if sub.codecName == "ass" || sub.codecName == "ssa" {
+          if let config = demuxer.getSubtitleDecoderConfig(forStream: Int32(sub.streamIndex)),
+            let extradata = config["subtitleExtradata"] as? Data,
+            let header = String(data: extradata, encoding: .utf8)
+          {
+            self.assRenderer?.configure(withHeader: header)
+          }
+        }
+      }
+    }
+
     // Convert audio tracks from FFmpeg
     let audioTracks: [AudioTrackInfo] =
       demuxer.getAudioTracks()?.map { track in
@@ -256,6 +279,8 @@ public final class VideoDecoder: @unchecked Sendable {
       audioChannels: info.audioChannels > 0 ? Int(info.audioChannels) : nil,
       audioTracks: audioTracks,
       subtitleTracks: subtitleTracks,
+      sampleAspectRatioNum: Int(info.sampleAspectRatioNum),
+      sampleAspectRatioDen: Int(info.sampleAspectRatioDen),
       decoderName: finalDecoderName,
       decoderDescription: finalDecoderDescription,
       didSynthesizeExtradata: demuxer.didSynthesizeExtradata
@@ -430,6 +455,16 @@ public final class VideoDecoder: @unchecked Sendable {
             if let text = subtitleFrameObj.text {
               var cleanText = text
               if subtitleFrameObj.isASS {
+                // Forward valid ASS packet to renderer
+                // Use decoded timestamps (seconds) instead of raw packet PTS
+                let duration = subtitleFrameObj.endTime - subtitleFrameObj.startTime
+                self.assRenderer?.processPacket(
+                  packet.data, pts: subtitleFrameObj.startTime, duration: duration)
+
+                // For the UI, we still want to show something?
+                // If we rely on LibASSRenderer, we might suppress the text content here
+                // or keep it as backup/debug.
+                // But VideoPlayer needs to know to render from assRenderer.
                 cleanText = self.cleanSubtitleText(text)
               }
               subtitleContent = .text(cleanText)
@@ -694,6 +729,31 @@ public final class VideoDecoder: @unchecked Sendable {
         }
       }
     }
+  }
+
+  // MARK: - Subtitle Rendering
+
+  /// Whether the currently selected subtitle track is ASS/SSA.
+  public var isCurrentSubtitleTrackASS: Bool {
+    guard let demuxer = demuxer else { return false }
+    let index = demuxer.selectedSubtitleStreamIndex()
+    if index < 0 { return false }
+    // Find track info
+    if let tracks = demuxer.getSubtitleTracks(),
+      let track = tracks.first(where: { $0.streamIndex == index })
+    {
+      return track.codecName == "ass" || track.codecName == "ssa"
+    }
+    return false
+  }
+
+  /// Render current subtitle image for the given time.
+  public func getSubtitleImage(at time: Double, size: CGSize, scale: CGFloat = 2.0) -> CGImage? {
+    // Only render if we have an active ASS renderer and the current track requires it.
+    if isCurrentSubtitleTrackASS, let renderer = assRenderer {
+      return renderer.render(atTimestamp: time, size: size, scale: scale)
+    }
+    return nil
   }
 
   // MARK: - Private Helpers

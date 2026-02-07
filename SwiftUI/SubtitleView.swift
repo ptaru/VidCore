@@ -23,12 +23,9 @@ public struct SubtitleView: View {
           if text.isEmpty {
             EmptyView()
           } else {
-            let shouldParseASS = subtitle.isASS || text.contains("{\\")
-            let parsed = SubtitleParser.parse(text, isASS: shouldParseASS)
             VStack {
               Spacer()
-              // Use SubtitleParser to render styled text
-              textView(parsed)
+              Text(text)
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -40,16 +37,8 @@ public struct SubtitleView: View {
                 .shadow(color: .black.opacity(0.8), radius: 2, x: 0, y: 1)
                 .padding(.bottom, 20)
             }
-            .task(id: text) {
-              if text.contains("font") || text.contains("&lt;") {
-                let colorRunCount = parsed.runs.reduce(into: 0) { count, run in
-                  if run.foregroundColor != nil { count += 1 }
-                }
-                print("[SubtitleView] isASS=\(subtitle.isASS)")
-                print("[SubtitleView] raw=\(text)")
-                print("[SubtitleView] colorRuns=\(colorRunCount)")
-              }
-            }
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 60)
           }
 
         case .bitmaps(let bitmaps):
@@ -82,27 +71,16 @@ public struct SubtitleView: View {
               }
             }
           }
+
+        case .image(let imageBox):
+          Image(decorative: imageBox.image, scale: 1.0)
+            .resizable()
+            .interpolation(.medium)
+            .aspectRatio(contentMode: .fit)
         }
       }
-      .padding(.bottom, 40)
       .transition(.opacity)
-      .animation(.easeInOut(duration: 0.1), value: subtitle.startTime)
     }
-  }
-
-  private func textView(_ parsed: AttributedString) -> Text {
-    var combined: Text?
-    for run in parsed.runs {
-      let slice = parsed[run.range]
-      var segment = Text(AttributedString(slice))
-      segment = segment.foregroundColor(run.foregroundColor ?? .white)
-      if let combinedText = combined {
-        combined = combinedText + segment
-      } else {
-        combined = segment
-      }
-    }
-    return combined ?? Text("")
   }
 
   private func createCGImage(from data: Data, width: Int, height: Int) -> CGImage? {
@@ -125,4 +103,15 @@ public struct SubtitleView: View {
       intent: .defaultIntent
     )
   }
+}
+
+#Preview {
+  ZStack {
+    Color.blue.opacity(0.3)
+    SubtitleView(
+      subtitle: SubtitleFrame(
+        content: .text("This is a centered subtitle\nraised slightly higher"), startTime: 0,
+        endTime: 5))
+  }
+  .frame(width: 800, height: 450)
 }

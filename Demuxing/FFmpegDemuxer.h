@@ -40,6 +40,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, copy, nullable) NSString *audioCodecName;
 @property(nonatomic, assign) int audioSampleRate;
 @property(nonatomic, assign) int audioChannels;
+@property(nonatomic, assign) int32_t sampleAspectRatioNum;
+@property(nonatomic, assign) int32_t sampleAspectRatioDen;
 @end
 
 /// Audio track metadata for multi-track files.
@@ -105,8 +107,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Get video stream information.
 - (nullable FFmpegDemuxerVideoInfo *)getVideoInfo;
 
-/// Get SampleBufferBuilder configuration for passthrough sample buffer creation.
-/// Returns codec parameters as Swift-compatible dictionary.
+/// Get SampleBufferBuilder configuration for passthrough sample buffer
+/// creation. Returns codec parameters as Swift-compatible dictionary.
 - (nullable NSDictionary<NSString *, id> *)getSampleBufferBuilderConfig;
 
 /// Get full decoder configuration for FFmpegDecoder decode-only mode.
