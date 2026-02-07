@@ -5,6 +5,7 @@
 //  Wrapper for decoded video frames
 //
 
+import CoreMedia
 import CoreVideo
 import Foundation
 
