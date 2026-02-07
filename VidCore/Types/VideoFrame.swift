@@ -52,6 +52,12 @@ public struct VideoFrame: @unchecked Sendable {
   }
 
   /// Creates a video frame from a sample buffer.
+  /// - Parameters:
+  ///   - sampleBuffer: The underlying sample buffer.
+  ///   - presentationTime: The presentation timestamp in seconds.
+  ///   - isHDR: Whether the frame is HDR.
+  ///   - colorTransfer: The color transfer characteristic.
+  ///   - doviProfile: The Dolby Vision profile ID.
   public init(
     sampleBuffer: CMSampleBuffer,
     presentationTime: Double,
@@ -66,7 +72,13 @@ public struct VideoFrame: @unchecked Sendable {
     self.doviProfile = doviProfile
   }
 
-  /// Creates a video frame from a pixel buffer (legacy/convenience).
+  /// Creates a video frame from a pixel buffer.
+  /// - Parameters:
+  ///   - pixelBuffer: The underlying pixel buffer.
+  ///   - presentationTime: The presentation timestamp in seconds.
+  ///   - isHDR: Whether the frame is HDR.
+  ///   - colorTransfer: The color transfer characteristic.
+  ///   - doviProfile: The Dolby Vision profile ID.
   public init?(
     pixelBuffer: CVPixelBuffer,
     presentationTime: Double,

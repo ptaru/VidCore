@@ -6,6 +6,7 @@
 import CoreMedia
 
 extension VideoDecoder {
+  /// Consumes and returns any pending passthrough frames needed for context restoration.
   public func consumePendingPassthroughFrames() async -> [VideoFrame] {
     await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in

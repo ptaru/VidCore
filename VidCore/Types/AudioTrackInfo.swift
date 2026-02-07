@@ -54,6 +54,15 @@ public struct AudioTrackInfo: Sendable, Equatable, Identifiable {
         }
     }
     
+    /// Creates a new audio track info.
+    /// - Parameters:
+    ///   - streamIndex: The stream index in the container.
+    ///   - language: The language code.
+    ///   - title: The track title.
+    ///   - codecName: The codec name.
+    ///   - sampleRate: The sample rate in Hz.
+    ///   - channels: The number of channels.
+    ///   - isDefault: Whether this is the default track.
     public init(streamIndex: Int, language: String?, title: String?, codecName: String, sampleRate: Int, channels: Int, isDefault: Bool = false) {
         self.id = streamIndex
         self.streamIndex = streamIndex

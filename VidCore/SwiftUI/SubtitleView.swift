@@ -11,6 +11,8 @@ import SwiftUI
 public struct SubtitleView: View {
   let subtitle: SubtitleFrame?
 
+  /// Creates a new subtitle view.
+  /// - Parameter subtitle: The subtitle frame to display, or nil to hide subtitles.
   public init(subtitle: SubtitleFrame?) {
     self.subtitle = subtitle
   }

@@ -21,8 +21,10 @@ public actor PacketQueue {
         self.maxSize = maxSize
     }
     
-    /// Push a packet to the queue
-    /// Will wait if the queue is full (back-pressure)
+    /// Pushes a packet to the queue.
+    ///
+    /// This method will wait if the queue is full (back-pressure).
+    /// - Parameter packet: The packet to push.
     public func push(_ packet: FFmpegPacketData) async {
         guard !isClosed && !isSuspended else { return }
         
@@ -48,8 +50,8 @@ public actor PacketQueue {
         }
     }
     
-    /// Pop the next packet, waiting if empty
-    /// Returns nil if the queue is closed or suspended and empty
+    /// Pops the next packet from the queue, waiting if empty.
+    /// - Returns: The next packet, or `nil` if the queue is closed or suspended.
     public func pop() async -> FFmpegPacketData? {
         if !packets.isEmpty {
             let packet = packets.removeFirst()
@@ -74,7 +76,8 @@ public actor PacketQueue {
         }
     }
     
-    /// Pop without waiting - returns nil if empty
+    /// Returns a packet from the queue without waiting.
+    /// - Returns: The next packet, or `nil` if the queue is empty.
     public func tryPop() -> FFmpegPacketData? {
         guard !packets.isEmpty else { return nil }
         let packet = packets.removeFirst()
@@ -85,7 +88,7 @@ public actor PacketQueue {
         return packet
     }
     
-    /// Close the queue, waking all waiters
+    /// Closes the queue, waking all waiters.
     public func close() {
         isClosed = true
         
@@ -100,7 +103,7 @@ public actor PacketQueue {
         waitingProducers.removeAll()
     }
     
-    /// Clear the queue and reset for reuse
+    /// Clears the queue and resets it for reuse.
     public func reset() {
         packets.removeAll()
         packets = []
@@ -118,8 +121,7 @@ public actor PacketQueue {
         waitingProducers.removeAll()
     }
     
-    /// Suspend the queue - waiting operations return immediately
-    /// Packets are preserved in the queue
+    /// Suspends the queue. Waiting operations will return immediately with `nil`.
     public func suspend() {
         isSuspended = true
         for (_, consumer) in waitingConsumers {
@@ -132,24 +134,27 @@ public actor PacketQueue {
         waitingProducers.removeAll()
     }
     
-    /// Resume the queue - waiting operations will block again
+    /// Resumes the queue.
     public func resume() {
         isSuspended = false
     }
     
-    /// Whether the queue is currently suspended
+    /// Whether the queue is currently suspended.
     public var suspended: Bool {
         isSuspended
     }
     
+    /// The number of packets currently in the queue.
     public var count: Int {
         packets.count
     }
     
+    /// Whether the queue is empty.
     public var isEmpty: Bool {
         packets.isEmpty
     }
     
+    /// Whether the queue is full.
     public var isFull: Bool {
         packets.count >= maxSize
     }

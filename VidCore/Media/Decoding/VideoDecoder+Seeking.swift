@@ -7,6 +7,10 @@ import CoreMedia
 import Foundation
 
 extension VideoDecoder {
+  /// Seeks to a specific time in the video.
+  /// - Parameter seconds: The target time in seconds.
+  /// - Returns: The first video frame at or after the seek target, or `nil`.
+  /// - Throws: An error if the seek operation fails.
   public func seek(to seconds: Double) async throws -> VideoFrame? {
     try await withCheckedThrowingContinuation {
       (continuation: CheckedContinuation<VideoFrame?, Error>) in

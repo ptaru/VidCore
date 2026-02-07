@@ -60,6 +60,7 @@ public struct SampleBufferBuilderConfig {
   // Optional Dolby Vision configuration
   public let dolbyVisionConfig: Data?
 
+  /// Creates a new sample buffer builder configuration.
   public init(
     codec: SampleBufferBuilderCodec,
     width: Int32,
@@ -106,11 +107,15 @@ public final class SampleBufferBuilder: @unchecked Sendable {
   // MARK: - Initialization
 
   /// Check if a codec is supported by SampleBufferBuilder.
+  /// - Parameter codec: The codec to check.
+  /// - Returns: `true` if the codec is supported.
   public static func isCodecSupported(_ codec: SampleBufferBuilderCodec) -> Bool {
     return codec == .hevc || codec == .h264
   }
 
   /// Initialize the builder with configuration.
+  /// - Parameter config: The configuration for the builder.
+  /// - Throws: `SampleBufferBuilderError` if initialization fails.
   public init(config: SampleBufferBuilderConfig) throws {
     self.timeBaseNum = config.timeBaseNum
     self.timeBaseDen = config.timeBaseDen
@@ -269,6 +274,14 @@ public final class SampleBufferBuilder: @unchecked Sendable {
 
   /// Creates a CMSampleBuffer from raw packet data.
   /// This is used internally for passthrough (zero-copy) rendering.
+  /// - Parameters:
+  ///   - data: The raw packet data.
+  ///   - pts: The presentation timestamp.
+  ///   - dts: The decoding timestamp.
+  ///   - duration: The sample duration.
+  ///   - forPassthrough: Whether this is for passthrough rendering.
+  /// - Returns: A new CMSampleBuffer.
+  /// - Throws: `SampleBufferBuilderError` if creation fails.
   public func createSampleBuffer(
     from data: Data,
     pts: Int64,

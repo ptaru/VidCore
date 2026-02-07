@@ -10,17 +10,21 @@ import CoreMedia
 import Foundation
 
 public actor SystemAudioRenderer: AudioRendering {
+  /// Whether AVSampleBufferAudioRenderer is supported in the current process.
   public nonisolated static var isSupportedInCurrentProcess: Bool {
     // AVSampleBufferAudioRenderer is not supported in app extensions (e.g. QuickLook).
     Bundle.main.bundleURL.pathExtension != "appex"
   }
 
+  /// Whether the environment variable to force AudioEngine fallback is set.
   public nonisolated static var isForceFallbackEnabled: Bool {
     let value = ProcessInfo.processInfo.environment["VIDCORE_FORCE_AUDIO_ENGINE"] ?? "0"
     return value == "1" || value.lowercased() == "true"
   }
 
+  /// The underlying system audio renderer.
   public nonisolated let renderer: AVSampleBufferAudioRenderer?
+  /// Whether this renderer is enabled and functional.
   public nonisolated let isEnabled: Bool
   private let supportsRendererVolume: Bool
   private let outputChannelCount: AVAudioChannelCount
@@ -37,6 +41,8 @@ public actor SystemAudioRenderer: AudioRendering {
   private var pendingPTS: Double?
   private var pendingFormatKey: String?
 
+  /// Creates a new system audio renderer.
+  /// - Parameter enabled: Whether the renderer should be enabled.
   public init(enabled: Bool = SystemAudioRenderer.isSupportedInCurrentProcess) {
     self.isEnabled = enabled
     let renderer = enabled ? AVSampleBufferAudioRenderer() : nil
@@ -47,10 +53,12 @@ public actor SystemAudioRenderer: AudioRendering {
     self.outputChannelCount = engine.outputNode.outputFormat(forBus: 0).channelCount
   }
 
+  /// Whether the renderer is ready to accept more audio data.
   public nonisolated var isReadyForMoreMediaData: Bool {
     renderer?.isReadyForMoreMediaData ?? false
   }
 
+  /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
     guard let renderer else { return }
     if renderer.isReadyForMoreMediaData {
@@ -135,6 +143,7 @@ public actor SystemAudioRenderer: AudioRendering {
     waiter?.resume()
   }
 
+  /// Flushes the audio renderer.
   public func flush() async {
     renderer?.flush()
     pendingBuffer = nil
@@ -143,10 +152,17 @@ public actor SystemAudioRenderer: AudioRendering {
     resumeAllWaiters()
   }
 
+  /// Sets the audio volume.
+  /// - Parameter volume: The volume level (0.0 to 1.0).
   public nonisolated func setVolume(_ volume: Float) {
     Task { await _setVolume(volume) }
   }
 
+  /// Enqueues an audio buffer for playback.
+  /// - Parameters:
+  ///   - buffer: The PCM buffer containing audio data.
+  ///   - pts: The presentation timestamp in seconds.
+  ///   - volume: The volume level for this buffer.
   public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
     Task {
       await _enqueue(buffer, pts: pts, volume: volume)
@@ -426,6 +442,7 @@ public actor SystemAudioRenderer: AudioRendering {
     return desc
   }
 
+  /// Updates the playback state (no-op for system renderer as it follows the synchronizer).
   public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
     // System audio renderer follows the synchronizer timebase.
     // State is managed externally by PlaybackClock.

@@ -22,12 +22,15 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
   private var isRequestingReadiness: Bool = false
   private let readinessTimeoutNanos: UInt64 = 250_000_000
 
+  /// Creates a new layer renderer.
   public init() {
     // Essential for proper HDR rendering on macOS
     displayLayer.preventsCapture = false
     displayLayer.videoGravity = .resizeAspect
   }
 
+  /// Enqueues a video frame for display.
+  /// - Parameter frame: The video frame to display.
   public nonisolated func enqueue(_ frame: VideoFrame) async {
     await _enqueue(frame)
   }
@@ -41,10 +44,12 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
     displayLayer.sampleBufferRenderer.enqueue(frame.sampleBuffer)
   }
 
+  /// Whether the renderer is ready to accept more media data.
   public nonisolated var isReadyForMoreMediaData: Bool {
     displayLayer.sampleBufferRenderer.isReadyForMoreMediaData
   }
 
+  /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
     if displayLayer.sampleBufferRenderer.isReadyForMoreMediaData {
       return
@@ -131,6 +136,7 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
     waiter?.resume()
   }
 
+  /// Flushes the video renderer.
   public nonisolated func flush() {
     displayLayer.sampleBufferRenderer.flush()
   }
@@ -140,10 +146,13 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
 public struct AVSystemVideoRenderer: NSViewRepresentable {
   let player: VideoPlayer
 
+  /// Creates a new system video renderer view.
+  /// - Parameter player: The video player to display.
   public init(player: VideoPlayer) {
     self.player = player
   }
 
+  /// Creates the underlying NSView.
   public func makeNSView(context: Context) -> AVSampleBufferDisplayLayerWrapperView {
     let view = AVSampleBufferDisplayLayerWrapperView()
     // Connect the renderer and display source to the player
@@ -154,11 +163,14 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
     return view
   }
 
+  /// Updates the NSView when SwiftUI state changes.
   public func updateNSView(_ view: AVSampleBufferDisplayLayerWrapperView, context: Context) {
     // No-op: Updates happen directly via the layerRenderer
   }
 
   /// Creates a CGImage from a VideoFrame using VideoToolbox, handling HDR and Dolby Vision.
+  /// - Parameter frame: The video frame to convert.
+  /// - Returns: A CGImage representation of the frame, or `nil` if conversion fails.
   public static func createCGImage(from frame: VideoFrame) -> CGImage? {
     guard let pixelBuffer = frame.pixelBuffer else { return nil }
 
@@ -175,8 +187,10 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
 
 /// NSView wrapper for AVSampleBufferDisplayLayer
 public class AVSampleBufferDisplayLayerWrapperView: NSView {
+  /// The underlying layer renderer.
   public let layerRenderer = LayerRenderer()
 
+  /// Creates a new wrapper view.
   override public init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
     setupLayer()

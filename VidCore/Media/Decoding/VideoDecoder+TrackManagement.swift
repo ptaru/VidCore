@@ -70,14 +70,14 @@ extension VideoDecoder {
 
   // MARK: - Subtitle Track Management
 
-  /// Get all available subtitle tracks from the container.
+  /// Returns all available subtitle tracks in the container.
   public func getSubtitleTracks() -> [SubtitleTrackInfo] {
     lock.lock()
     defer { lock.unlock() }
     return videoInfo.subtitleTracks
   }
 
-  /// Get the currently selected subtitle stream index.
+  /// Returns the currently selected subtitle stream index, or -1 if none.
   public func selectedSubtitleStreamIndex() -> Int {
     lock.lock()
     defer { lock.unlock() }
@@ -85,7 +85,9 @@ extension VideoDecoder {
     return Int(demuxer.selectedSubtitleStreamIndex())
   }
 
-  /// Switch to a different subtitle track by its stream index.
+  /// Switches to a different subtitle track.
+  /// - Parameter streamIndex: The stream index to switch to, or -1 to disable subtitles.
+  /// - Returns: `true` if the switch was successful.
   public func switchSubtitleTrack(to streamIndex: Int) async -> Bool {
     await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in

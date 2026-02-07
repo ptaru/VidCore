@@ -45,6 +45,14 @@ public struct SubtitleTrackInfo: Sendable, Equatable, Identifiable {
     return lang
   }
 
+  /// Creates a new subtitle track info.
+  /// - Parameters:
+  ///   - streamIndex: The stream index in the container.
+  ///   - language: The language code.
+  ///   - title: The track title.
+  ///   - codecName: The codec name.
+  ///   - isDefault: Whether this is the default track.
+  ///   - isBitmap: Whether this is a bitmap-based subtitle format.
   public init(
     streamIndex: Int, language: String?, title: String?, codecName: String, isDefault: Bool = false,
     isBitmap: Bool = false

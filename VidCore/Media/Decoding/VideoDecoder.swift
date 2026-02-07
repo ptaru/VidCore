@@ -273,6 +273,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
   // MARK: - I/O Cancellation
 
+  /// Requests that all pending demuxing operations be aborted.
   public func requestDemuxAbort() async {
     await withCheckedContinuation { continuation in
       demuxQueue.async { [weak self] in
@@ -282,6 +283,7 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
+  /// Clears the demux abort flag.
   public func clearDemuxAbort() async {
     await withCheckedContinuation { continuation in
       demuxQueue.async { [weak self] in
@@ -293,8 +295,8 @@ public final class VideoDecoder: @unchecked Sendable {
 
   // MARK: - Parallel Demux/Decode API
 
-  /// Demux next packet from the container (runs on demux queue)
-  /// Returns nil at end of stream
+  /// Demuxes the next packet from the container.
+  /// - Returns: The next packet, or `nil` if the end of the stream is reached.
   public func demuxNextPacket() async -> FFmpegPacketData? {
     return await withCheckedContinuation { continuation in
       demuxQueue.async { [weak self] in
@@ -341,9 +343,9 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  /// Decode a packet into frames (can run concurrently on decode queue)
-  /// Returns array of decoded frames - may be multiple for video with multi-threaded decoding
-  /// Returns empty array if packet produces no output (e.g., decoder needs more data)
+  /// Decodes a packet into one or more frames.
+  /// - Parameter packet: The packet to decode.
+  /// - Returns: An array of decoded frames.
   public func decodePacket(_ packet: FFmpegPacketData) async -> [DecodedFrame] {
     return await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in
@@ -470,8 +472,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
   // MARK: - Decoder Flush/Drain (for multi-threaded decoders)
 
-  /// Flush the video decoder to signal end of stream
-  /// Must be called before draining remaining frames
+  /// Flushes the video decoder to signal the end of the stream.
   public func flushVideoDecoder() async {
     await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in
@@ -494,8 +495,7 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  /// Flush the audio decoder to signal end of stream
-  /// Must be called before draining remaining frames
+  /// Flushes the audio decoder to signal the end of the stream.
   public func flushAudioDecoder() async {
     await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in
@@ -518,8 +518,8 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  /// Drain remaining buffered frames from the decoder after flush
-  /// Returns nil when all frames have been drained
+  /// Drains any remaining video frames from the decoder after flushing.
+  /// - Returns: The next drained video frame, or `nil` if no more frames are available.
   public func drainVideoFrame() async -> VideoFrame? {
     return await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in
@@ -551,8 +551,8 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  /// Drain remaining buffered audio frames from the decoder after flush
-  /// Returns nil when all frames have been drained
+  /// Drains any remaining audio frames from the decoder after flushing.
+  /// - Returns: A tuple containing the drained audio buffer and its presentation timestamp, or `nil`.
   public func drainAudioFrame() async -> (AVAudioPCMBuffer, Double)? {
     return await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in
@@ -588,7 +588,7 @@ public final class VideoDecoder: @unchecked Sendable {
   /// Many video containers (especially MKV) can include embedded cover art as attachment streams.
   /// This method searches for JPEG, PNG, or BMP attachments and returns the image data.
   ///
-  /// - Returns: The cover image data, or nil if no cover image is found.
+  /// - Returns: The cover image data, or `nil` if no cover image is found.
   public func extractCoverImage() -> Data? {
     lock.lock()
     defer { lock.unlock() }

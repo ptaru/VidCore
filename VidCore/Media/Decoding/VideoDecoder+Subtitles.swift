@@ -12,7 +12,12 @@ extension VideoDecoder {
     return assPipeline.isASSActive(for: demuxer)
   }
 
-  /// Render current subtitle image for the given time.
+  /// Renders the subtitle image for a specific time and size.
+  /// - Parameters:
+  ///   - time: The presentation time in seconds.
+  ///   - size: The target render size in points.
+  ///   - scale: The display scale.
+  /// - Returns: A tuple containing the rendered image and a change counter.
   public func getSubtitleImage(
     at time: Double,
     size: CGSize,
@@ -26,7 +31,7 @@ extension VideoDecoder {
     return (nil, 0)
   }
 
-  /// Reset subtitle rendering state (e.g. before/after seeks).
+  /// Resets the subtitle rendering state.
   public func resetSubtitleState() async {
     await withCheckedContinuation { continuation in
       decodeQueue.async { [weak self] in

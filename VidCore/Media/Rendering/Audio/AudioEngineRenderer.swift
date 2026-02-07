@@ -9,6 +9,7 @@ import AVFoundation
 import Foundation
 
 public actor AudioEngineRenderer: AudioRendering {
+  /// Whether this renderer is enabled and functional.
   public nonisolated let isEnabled: Bool = true
 
   nonisolated private let engine = AVAudioEngine()
@@ -22,6 +23,7 @@ public actor AudioEngineRenderer: AudioRendering {
   private var enqueuedBufferCount: Int = 0
   private let minimumBufferCount: Int = 3
 
+  /// Creates a new audio engine renderer.
   public init() {
     engine.attach(playerNode)
     engine.attach(timePitch)
@@ -31,19 +33,28 @@ public actor AudioEngineRenderer: AudioRendering {
     startEngineIfNeeded()
   }
 
+  /// Whether the renderer is ready to accept more audio data.
   public nonisolated var isReadyForMoreMediaData: Bool {
     // AVAudioPlayerNode has no explicit backpressure; accept buffers freely.
     true
   }
 
+  /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
     // No backpressure; always ready.
   }
 
+  /// Sets the audio volume.
+  /// - Parameter volume: The volume level (0.0 to 1.0).
   public nonisolated func setVolume(_ volume: Float) {
     Task { await _setVolume(volume) }
   }
 
+  /// Enqueues an audio buffer for playback.
+  /// - Parameters:
+  ///   - buffer: The PCM buffer containing audio data.
+  ///   - pts: The presentation timestamp in seconds.
+  ///   - volume: The volume level for this buffer.
   public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
     Task {
       await _enqueue(buffer, pts: pts, volume: volume)
@@ -81,6 +92,7 @@ public actor AudioEngineRenderer: AudioRendering {
     enqueuedBufferCount -= 1
   }
 
+  /// Flushes the audio renderer.
   public func flush() async {
     // Stop player node immediately (thread-safe)
     playerNode.stop()
@@ -92,6 +104,10 @@ public actor AudioEngineRenderer: AudioRendering {
     enqueuedBufferCount = 0
   }
 
+  /// Updates the playback state.
+  /// - Parameters:
+  ///   - isPlaying: Whether playback should be active.
+  ///   - rate: The playback rate.
   public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
     Task {
       await _setPlaybackState(isPlaying: isPlaying, rate: rate)
@@ -149,7 +165,7 @@ public actor AudioEngineRenderer: AudioRendering {
   }
 
   /// Returns the PTS currently being played, if available.
-  /// AudioEngineRenderer doesn't track precise PTS - this is a fallback renderer.
+  /// - Returns: The current playback PTS in seconds, or `nil` if unavailable.
   public func currentPlaybackPTS() -> Double? {
     return nil
   }

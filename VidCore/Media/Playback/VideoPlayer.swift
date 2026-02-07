@@ -205,6 +205,7 @@ public class VideoPlayer {
   // MARK: - Public API
 
   /// Sets the target renderer for video frames and applies the shared timebase.
+  /// - Parameter target: The renderer target to use.
   public func setRenderer(_ target: VideoRendererTarget?) async {
     await MainActor.run {
       self.renderer = target
@@ -966,7 +967,10 @@ public class VideoPlayer {
   public private(set) var selectedAudioTrackIndex: Int = -1
 
   /// Select an audio track by its index in the audioTracks array.
-  /// Flow: pause -> switch -> accurate seek -> resume
+  ///
+  /// This method performs an accurate seek to the current playback position after switching
+  /// tracks to ensure the new audio stream is correctly synchronized.
+  ///
   /// - Parameter index: Index of the audio track to select.
   public func selectAudioTrack(at index: Int) async {
     guard let decoder = decoder else { return }

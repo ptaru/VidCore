@@ -150,6 +150,37 @@ public struct VideoInfo {
     return (Double(width) / Double(height)) * sar
   }
 
+  /// Creates a new video info structure.
+  /// - Parameters:
+  ///   - width: Video width in pixels.
+  ///   - height: Video height in pixels.
+  ///   - frameRate: Frame rate in FPS.
+  ///   - duration: Total duration in seconds.
+  ///   - containerName: Container format name.
+  ///   - codecName: Codec identifier.
+  ///   - isHardwareAccelerated: Whether hardware acceleration is used.
+  ///   - isHDR: Whether content is HDR.
+  ///   - colorPrimaries: Color primaries ID.
+  ///   - colorTransfer: Color transfer characteristic ID.
+  ///   - colorSpace: Color space/matrix ID.
+  ///   - colorRange: Color range ID.
+  ///   - bitsPerComponent: Bits per color component.
+  ///   - isDolbyVision: Whether content is Dolby Vision.
+  ///   - doviProfile: Dolby Vision profile ID.
+  ///   - maxContentLightLevel: MaxCLL in nits.
+  ///   - maxFrameAverageLightLevel: MaxFALL in nits.
+  ///   - masteringDisplayMaxLuminance: Mastering display max luminance in nits.
+  ///   - masteringDisplayMinLuminance: Mastering display min luminance in nits.
+  ///   - audioCodecName: Audio codec name.
+  ///   - audioSampleRate: Audio sample rate in Hz.
+  ///   - audioChannels: Number of audio channels.
+  ///   - audioTracks: All available audio tracks.
+  ///   - subtitleTracks: All available subtitle tracks.
+  ///   - sampleAspectRatioNum: SAR numerator.
+  ///   - sampleAspectRatioDen: SAR denominator.
+  ///   - decoderName: Name of the decoder used.
+  ///   - decoderDescription: Description of the decoder.
+  ///   - didSynthesizeExtradata: Whether extradata was synthesized.
   public init(
     width: Int, height: Int, frameRate: Double, duration: Double, containerName: String,
     codecName: String,

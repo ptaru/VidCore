@@ -22,6 +22,8 @@ public enum SubtitleContent: Sendable, Equatable {
 public struct ImageBox: @unchecked Sendable, Equatable {
   public let image: CGImage
 
+  /// Creates a new image box.
+  /// - Parameter image: The underlying CGImage.
   public init(_ image: CGImage) {
     self.image = image
   }
@@ -42,6 +44,12 @@ public struct SubtitleBitmap: Sendable, Equatable {
   /// Normalized frame (x, y, width, height) relative to video size (0.0-1.0).
   public let rect: CGRect
 
+  /// Creates a new subtitle bitmap.
+  /// - Parameters:
+  ///   - data: The raw pixel data.
+  ///   - width: The bitmap width in pixels.
+  ///   - height: The bitmap height in pixels.
+  ///   - rect: The normalized display rectangle.
   public init(data: Data, width: Int, height: Int, rect: CGRect) {
     self.data = data
     self.width = width
@@ -68,6 +76,12 @@ public struct SubtitleFrame: Sendable, Equatable {
     return nil
   }
 
+  /// Creates a new subtitle frame.
+  /// - Parameters:
+  ///   - content: The subtitle content.
+  ///   - isASS: Whether the content is ASS/SSA.
+  ///   - startTime: The start time in seconds.
+  ///   - endTime: The end time in seconds.
   public init(
     content: SubtitleContent, isASS: Bool = false, startTime: Double, endTime: Double? = nil
   ) {
