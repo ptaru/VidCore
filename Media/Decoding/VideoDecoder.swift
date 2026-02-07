@@ -141,11 +141,11 @@ public final class VideoDecoder: @unchecked Sendable {
         self.sampleBufferBuilder = try createSampleBufferBuilder(from: sbConfig)
         if let builder = self.sampleBufferBuilder {
           if builder.isDolbyVision {
-            finalDecoderName = "SampleBufferBuilder (DoVi P\(builder.dolbyVisionProfile))"
+            finalDecoderName = "HW Passthrough (DoVi P\(builder.dolbyVisionProfile))"
           } else {
-            finalDecoderName = "SampleBufferBuilder (\(info.codecName))"
+            finalDecoderName = "HW Passthrough (\(info.codecName))"
           }
-          finalDecoderDescription = "Hardware Passthrough (SampleBufferBuilder)"
+          finalDecoderDescription = "Hardware Passthrough"
           finalIsHardwareAccelerated = true
         }
       } catch {
@@ -269,6 +269,26 @@ public final class VideoDecoder: @unchecked Sendable {
     // Close FFmpegDemuxer
     demuxer?.close()
     demuxer = nil
+  }
+
+  // MARK: - I/O Cancellation
+
+  public func requestDemuxAbort() async {
+    await withCheckedContinuation { continuation in
+      demuxQueue.async { [weak self] in
+        self?.demuxer?.requestAbortIO()
+        continuation.resume()
+      }
+    }
+  }
+
+  public func clearDemuxAbort() async {
+    await withCheckedContinuation { continuation in
+      demuxQueue.async { [weak self] in
+        self?.demuxer?.clearAbortIO()
+        continuation.resume()
+      }
+    }
   }
 
   // MARK: - Parallel Demux/Decode API

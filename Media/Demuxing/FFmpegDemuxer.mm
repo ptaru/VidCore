@@ -15,6 +15,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <stdatomic.h>
+#import <time.h>
 
 #pragma mark - Data Structure Implementations
 
@@ -80,6 +82,9 @@ static const NSUInteger kMaxQueuedAudioPackets =
 #pragma mark - Implementation
 
 @implementation FFmpegDemuxer
+{
+  atomic_bool _abortRequested;
+}
 
 #pragma mark - Initialization
 
@@ -99,6 +104,7 @@ static const NSUInteger kMaxQueuedAudioPackets =
     _queuedAudioPackets = [NSMutableArray array];
     _subtitleStreamIndex = -1;
     _subtitleStreamIndices = [NSMutableArray array];
+    atomic_init(&_abortRequested, false);
 
     if (![self openFile:url error:error]) {
       return nil;
@@ -117,6 +123,30 @@ static const NSUInteger kMaxQueuedAudioPackets =
   _filePath = [url path];
   const char *filename = [_filePath UTF8String];
 
+  _formatContext = avformat_alloc_context();
+  if (!_formatContext) {
+    if (error) {
+      *error = [NSError
+          errorWithDomain:@"FFmpegDemuxer"
+                     code:1000
+                 userInfo:@{
+                   NSLocalizedDescriptionKey : @"Failed to allocate format context"
+                 }];
+    }
+    return NO;
+  }
+
+  _formatContext->interrupt_callback.opaque = (__bridge void *)self;
+  _formatContext->interrupt_callback.callback = [](void *opaque) -> int {
+    FFmpegDemuxer *demuxer = (__bridge FFmpegDemuxer *)opaque;
+    if (!demuxer) {
+      return 0;
+    }
+    return atomic_load_explicit(&demuxer->_abortRequested, memory_order_relaxed)
+               ? 1
+               : 0;
+  };
+
   // Open input file
   if (avformat_open_input(&_formatContext, filename, NULL, NULL) < 0) {
     if (error) {
@@ -126,6 +156,10 @@ static const NSUInteger kMaxQueuedAudioPackets =
                  userInfo:@{
                    NSLocalizedDescriptionKey : @"Failed to open video file"
                  }];
+    }
+    if (_formatContext) {
+      avformat_free_context(_formatContext);
+      _formatContext = NULL;
     }
     return NO;
   }
@@ -198,6 +232,16 @@ static const NSUInteger kMaxQueuedAudioPackets =
   [self buildVideoInfo];
 
   return YES;
+}
+
+#pragma mark - I/O Control
+
+- (void)requestAbortIO {
+  atomic_store_explicit(&_abortRequested, true, memory_order_relaxed);
+}
+
+- (void)clearAbortIO {
+  atomic_store_explicit(&_abortRequested, false, memory_order_relaxed);
 }
 
 - (void)ensureExtradata {

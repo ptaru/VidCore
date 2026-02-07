@@ -157,35 +157,48 @@ extension VideoDecoder {
     var packetCount = 0
     let maxPackets = 200  // Safety break
 
-    while packetCount < maxPackets {
+    func decodeVideoPacket(_ demuxerPacket: FFmpegDemuxerPacket) -> Bool {
+      guard demuxerPacket.isVideo else { return false }
+      packetCount += 1
+      let packet = self.convertPacket(demuxerPacket)
+
+      if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
+        for ffmpegFrame in ffmpegFrames {
+          let framePTS = ffmpegFrame.presentationTime
+
+          // Always wait for target (accurate seek)
+          if framePTS >= seconds - 0.05 {
+            if let frame = self.makeVideoFrame(
+              pixelBuffer: ffmpegFrame.pixelBuffer,
+              presentationTime: framePTS,
+              doviProfile: Int(ffmpegFrame.doviProfile)
+            ) {
+              foundFrame = frame
+              return true
+            }
+          }
+        }
+      }
+      return false
+    }
+
+    // Prime audio packets near the seek target for faster audio resume.
+    if let initialPackets = demuxer.collectPackets(until: seconds) {
+      for demuxerPacket in initialPackets {
+        if packetCount >= maxPackets { break }
+        if decodeVideoPacket(demuxerPacket) { break }
+      }
+    }
+
+    while packetCount < maxPackets, foundFrame == nil {
       let shouldStop = autoreleasepool { () -> Bool in
         // Read next packet directly
         guard let demuxerPacket = demuxer.demuxNextPacket() else {
           return true  // EOF
         }
 
-        // Filter for video packets
-        if demuxerPacket.isVideo {
-          packetCount += 1
-          let packet = self.convertPacket(demuxerPacket)
-
-          if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
-            for ffmpegFrame in ffmpegFrames {
-              let framePTS = ffmpegFrame.presentationTime
-
-              // Always wait for target (accurate seek)
-              if framePTS >= seconds - 0.05 {
-                if let frame = self.makeVideoFrame(
-                  pixelBuffer: ffmpegFrame.pixelBuffer,
-                  presentationTime: framePTS,
-                  doviProfile: Int(ffmpegFrame.doviProfile)
-                ) {
-                  foundFrame = frame
-                  return true
-                }
-              }
-            }
-          }
+        if decodeVideoPacket(demuxerPacket) {
+          return true
         }
         return false
       }

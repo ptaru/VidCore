@@ -624,7 +624,6 @@ Real-time playback statistics for debugging and monitoring.
 | `audioBackend` | `String` | Active audio backend (`System` or `AudioEngine`) |
 | `lastVideoPTS` | `Double` | Last video presentation timestamp |
 | `lastAudioPTS` | `Double` | Last audio presentation timestamp |
-| `isHardwareDecoded` | `Bool` | Whether hardware decoding is active |
 | `decoderName` | `String` | Name of active decoder |
 | `syncRate` | `Double` | Current AVSampleBufferRenderSynchronizer playback rate |
 

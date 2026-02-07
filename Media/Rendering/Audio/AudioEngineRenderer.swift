@@ -40,6 +40,10 @@ public actor AudioEngineRenderer: AudioRendering {
     // No backpressure; always ready.
   }
 
+  public nonisolated func setVolume(_ volume: Float) {
+    Task { await _setVolume(volume) }
+  }
+
   public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
     Task {
       await _enqueue(buffer, pts: pts, volume: volume)
@@ -67,6 +71,10 @@ public actor AudioEngineRenderer: AudioRendering {
       playerNode.play()
       isPlaying = true
     }
+  }
+
+  private func _setVolume(_ volume: Float) {
+    playerNode.volume = max(0.0, min(volume, 1.0))
   }
 
   private func decrementBufferCount() {

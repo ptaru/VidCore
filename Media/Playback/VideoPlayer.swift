@@ -131,6 +131,7 @@ public class VideoPlayer {
   )
   @ObservationIgnored
   private lazy var seekCoordinator = SeekCoordinator(player: self)
+  private var currentScrubToken: UInt64 = 0
   @ObservationIgnored
   private lazy var displayLink = DisplayLink { [weak self] in
     guard let self = self else { return }
@@ -460,20 +461,39 @@ public class VideoPlayer {
     return previousState
   }
 
-  fileprivate func performScrubSeek(to seconds: Double) async {
+  fileprivate func performScrubSeek(to seconds: Double, scrubToken: UInt64) async {
     guard let decoder = decoder else { return }
+    guard !Task.isCancelled else { return }
+    guard scrubToken == currentScrubToken else { return }
     let clampedSeconds = max(0, min(seconds, duration))
 
     do {
+      guard scrubToken == currentScrubToken else { return }
       if let frame = try await decoder.seek(to: clampedSeconds) {
+        guard !Task.isCancelled else { return }
+        guard scrubToken == currentScrubToken else { return }
         lastScrubFrameTime = frame.presentationTime
         await renderFrame(frame, flushRenderer: true)
       } else {
+        guard !Task.isCancelled else { return }
+        guard scrubToken == currentScrubToken else { return }
         currentTime = clampedSeconds
         updateSubtitles(for: clampedSeconds)
       }
     } catch {
     }
+  }
+
+  fileprivate func updateScrubToken(_ token: UInt64) {
+    currentScrubToken = token
+  }
+
+  fileprivate func requestScrubAbort() async {
+    await decoder?.requestDemuxAbort()
+  }
+
+  fileprivate func clearScrubAbort() async {
+    await decoder?.clearDemuxAbort()
   }
 
   fileprivate func performSeek(to seconds: Double, resumePlayback: Bool?) async {
@@ -531,7 +551,8 @@ public class VideoPlayer {
 
   fileprivate func finishScrub(at targetTime: Double, resumePlayback: Bool) async {
     state = .seeking
-    let resumeTime = lastScrubFrameTime ?? targetTime
+    // Always commit the final seek to the user's target time, even if the preview frame lagged behind.
+    let resumeTime = targetTime
     await playbackClock.seek(to: resumeTime)
     await audioOutput.flush()
 
@@ -547,7 +568,7 @@ public class VideoPlayer {
     assAnimatingUntilTime = 0
     assAnimatingUntilTime = 0
 
-    if lastScrubFrameTime == nil, let decoder {
+    if let decoder {
       do {
         if let frame = try await decoder.seek(to: targetTime) {
           await renderFrame(frame, flushRenderer: true)
@@ -1048,7 +1069,6 @@ public class VideoPlayer {
     let audioBackend: String = (audioOutput is SystemAudioRenderer) ? "System" : "AudioEngine"
     let syncRate = await playbackClock.rate
     let decoderName = decoder?.videoInfo.decoderName ?? "Unknown"
-    let isHardwareDecoded = decoder?.videoInfo.isHardwareAccelerated ?? false
 
     debugStats.packetQueueCount = queueCount
     debugStats.packetQueueMax = queueMax
@@ -1058,7 +1078,6 @@ public class VideoPlayer {
     debugStats.lastVideoPTS = lastVideoPTS
     debugStats.syncRate = syncRate
     debugStats.decoderName = decoderName
-    debugStats.isHardwareDecoded = isHardwareDecoded
   }
 }
 
@@ -1098,22 +1117,22 @@ extension VideoPlayer: PlaybackWorkerDelegate {
 private actor SeekCoordinator {
   private weak var player: VideoPlayer?
   private var activeSeekTask: Task<Void, Never>?
-  private var scrubTask: Task<Void, Never>?
-  private var scrubContinuation: AsyncStream<Double>.Continuation?
   private var latestScrubTime: Double?
   private var isScrubbing = false
+  private var previewTask: Task<Void, Never>?
+  private var scrubToken: UInt64 = 0
 
   init(player: VideoPlayer) {
     self.player = player
   }
 
   func cancelAll() async {
-    scrubContinuation?.finish()
-    scrubContinuation = nil
-
-    scrubTask?.cancel()
-    _ = await scrubTask?.result
-    scrubTask = nil
+    if let player {
+      await player.requestScrubAbort()
+    }
+    previewTask?.cancel()
+    _ = await previewTask?.result
+    previewTask = nil
 
     activeSeekTask?.cancel()
     _ = await activeSeekTask?.result
@@ -1121,6 +1140,12 @@ private actor SeekCoordinator {
 
     latestScrubTime = nil
     isScrubbing = false
+    scrubToken &+= 1
+    if let player {
+      let token = scrubToken
+      await player.updateScrubToken(token)
+      await player.clearScrubAbort()
+    }
   }
 
   func seek(to seconds: Double) async {
@@ -1144,18 +1169,10 @@ private actor SeekCoordinator {
 
     isScrubbing = true
     latestScrubTime = nil
-
-    let (stream, continuation) = AsyncStream<Double>.makeStream(
-      bufferingPolicy: .bufferingNewest(1)
-    )
-    scrubContinuation = continuation
-
-    scrubTask = Task { [weak player] in
-      for await targetTime in stream {
-        guard !Task.isCancelled else { break }
-        await player?.performScrubSeek(to: targetTime)
-      }
-    }
+    scrubToken &+= 1
+    let token = scrubToken
+    await player.updateScrubToken(token)
+    await player.clearScrubAbort()
   }
 
   func scrub(to time: Double) async {
@@ -1169,18 +1186,33 @@ private actor SeekCoordinator {
     }
 
     latestScrubTime = clamped
-    scrubContinuation?.yield(clamped)
+    await player.requestScrubAbort()
+    scrubToken &+= 1
+    previewTask?.cancel()
+    let token = scrubToken
+    await player.updateScrubToken(token)
+    await player.clearScrubAbort()
+    previewTask = Task { [weak player] in
+      await player?.performScrubSeek(to: clamped, scrubToken: token)
+    }
   }
 
   func endScrub(resumePlayback: Bool) async {
     guard isScrubbing else { return }
     isScrubbing = false
 
-    scrubContinuation?.finish()
-    scrubContinuation = nil
-    scrubTask?.cancel()
-    _ = await scrubTask?.result
-    scrubTask = nil
+    if let player {
+      await player.requestScrubAbort()
+    }
+    previewTask?.cancel()
+    _ = await previewTask?.result
+    previewTask = nil
+    scrubToken &+= 1
+    if let player {
+      let token = scrubToken
+      await player.updateScrubToken(token)
+      await player.clearScrubAbort()
+    }
 
     guard let player = player else { return }
     let finalTime: Double
@@ -1196,13 +1228,20 @@ private actor SeekCoordinator {
 
   private func cancelScrubIfNeeded() async {
     guard isScrubbing else { return }
-    scrubContinuation?.finish()
-    scrubContinuation = nil
-    scrubTask?.cancel()
-    _ = await scrubTask?.result
-    scrubTask = nil
     latestScrubTime = nil
     isScrubbing = false
+    if let player {
+      await player.requestScrubAbort()
+    }
+    previewTask?.cancel()
+    _ = await previewTask?.result
+    previewTask = nil
+    scrubToken &+= 1
+    if let player {
+      let token = scrubToken
+      await player.updateScrubToken(token)
+      await player.clearScrubAbort()
+    }
   }
 
   private func cancelActiveSeek() async {
@@ -1220,8 +1259,6 @@ public struct PlayerDebugStats: Sendable {
   public var audioRendererReady: Bool = false
   public var audioBackend: String = "Unknown"
   public var lastVideoPTS: Double = 0
-  public var isHardwareDecoded: Bool = false
   public var decoderName: String = "Unknown"
   public var syncRate: Double = 0.0
-  public var keyframeCount: Int = 0
 }

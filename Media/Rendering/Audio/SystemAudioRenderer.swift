@@ -22,6 +22,7 @@ public actor SystemAudioRenderer: AudioRendering {
 
   public nonisolated let renderer: AVSampleBufferAudioRenderer?
   public nonisolated let isEnabled: Bool
+  private let supportsRendererVolume: Bool
   private let outputChannelCount: AVAudioChannelCount
   private var hasLoggedOutputChannelWarning: Bool = false
 
@@ -38,7 +39,10 @@ public actor SystemAudioRenderer: AudioRendering {
 
   public init(enabled: Bool = SystemAudioRenderer.isSupportedInCurrentProcess) {
     self.isEnabled = enabled
-    self.renderer = enabled ? AVSampleBufferAudioRenderer() : nil
+    let renderer = enabled ? AVSampleBufferAudioRenderer() : nil
+    self.renderer = renderer
+    self.supportsRendererVolume =
+      renderer?.responds(to: NSSelectorFromString("setVolume:")) ?? false
     let engine = AVAudioEngine()
     self.outputChannelCount = engine.outputNode.outputFormat(forBus: 0).channelCount
   }
@@ -139,15 +143,25 @@ public actor SystemAudioRenderer: AudioRendering {
     resumeAllWaiters()
   }
 
+  public nonisolated func setVolume(_ volume: Float) {
+    Task { await _setVolume(volume) }
+  }
+
   public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
     Task {
       await _enqueue(buffer, pts: pts, volume: volume)
     }
   }
 
+  private func _setVolume(_ volume: Float) {
+    guard supportsRendererVolume, let renderer else { return }
+    let clamped = max(0.0, min(volume, 1.0))
+    renderer.setValue(clamped, forKey: "volume")
+  }
+
   private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
     let clampedVolume = max(0.0, min(volume, 1.0))
-    if clampedVolume != 1.0 {
+    if !supportsRendererVolume && clampedVolume != 1.0 {
       if let channels = buffer.floatChannelData {
         let channelCount = Int(buffer.format.channelCount)
         let frameCount = Int(buffer.frameLength)

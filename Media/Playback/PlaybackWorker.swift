@@ -57,6 +57,7 @@ actor PlaybackWorker {
 
   func updateVolume(_ volume: Double) {
     self.volume = volume
+    audioOutput.setVolume(Float(volume))
   }
 
   func start() {

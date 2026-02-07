@@ -102,6 +102,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// @return Initialized demuxer, or nil on failure.
 - (nullable instancetype)initWithURL:(NSURL *)url error:(NSError **)error;
 
+#pragma mark - I/O Control
+
+/// Request any in-flight I/O to abort (best-effort, used for scrub cancellation).
+- (void)requestAbortIO;
+
+/// Clear the abort flag so future I/O can proceed.
+- (void)clearAbortIO;
+
 #pragma mark - Metadata
 
 /// Get video stream information.

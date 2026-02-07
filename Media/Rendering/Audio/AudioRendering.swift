@@ -13,6 +13,7 @@ public protocol AudioRendering: AnyObject, Sendable {
   var isReadyForMoreMediaData: Bool { get }
   func waitUntilReady() async
 
+  func setVolume(_ volume: Float)
   func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float)
   func flush() async
 
