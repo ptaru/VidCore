@@ -1235,6 +1235,91 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Creates a video frame from the currently decoded frame in _frame.
 /// @param pts Presentation timestamp in seconds
 /// @return A new FFmpegVideoFrame or nil if pixel buffer creation fails
+- (void)attachColorPropertiesFromFrame:(AVFrame *)frame
+                         toPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+  if (!frame || !pixelBuffer)
+    return;
+
+  // Primaries
+  CFStringRef primaries = NULL;
+  switch (frame->color_primaries) {
+  case AVCOL_PRI_BT709:
+    primaries = kCVImageBufferColorPrimaries_ITU_R_709_2;
+    break;
+  case AVCOL_PRI_BT2020:
+    primaries = kCVImageBufferColorPrimaries_ITU_R_2020;
+    break;
+  case AVCOL_PRI_SMPTE170M:
+  case AVCOL_PRI_SMPTE240M:
+    primaries = kCVImageBufferColorPrimaries_SMPTE_C;
+    break;
+  case AVCOL_PRI_SMPTE431:
+  case AVCOL_PRI_SMPTE432:
+    primaries = kCVImageBufferColorPrimaries_P3_D65;
+    break;
+  default:
+    break;
+  }
+
+  if (primaries) {
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
+                          primaries, kCVAttachmentMode_ShouldPropagate);
+  }
+
+  // Transfer Function
+  CFStringRef transfer = NULL;
+  switch (frame->color_trc) {
+  case AVCOL_TRC_BT709:
+  case AVCOL_TRC_SMPTE170M:
+  case AVCOL_TRC_SMPTE240M:
+    transfer = kCVImageBufferTransferFunction_ITU_R_709_2;
+    break;
+  case AVCOL_TRC_SMPTE2084:
+    transfer = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ;
+    break;
+  case AVCOL_TRC_ARIB_STD_B67:
+    transfer = kCVImageBufferTransferFunction_ITU_R_2100_HLG;
+    break;
+  case AVCOL_TRC_LINEAR:
+    transfer = kCVImageBufferTransferFunction_Linear;
+    break;
+  case AVCOL_TRC_GAMMA22:
+  case AVCOL_TRC_GAMMA28:
+    transfer = kCVImageBufferTransferFunction_UseGamma;
+    break;
+  default:
+    break;
+  }
+
+  if (transfer) {
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
+                          transfer, kCVAttachmentMode_ShouldPropagate);
+  }
+
+  // Matrix
+  CFStringRef matrix = NULL;
+  switch (frame->colorspace) {
+  case AVCOL_SPC_BT709:
+    matrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2;
+    break;
+  case AVCOL_SPC_BT2020_NCL:
+  case AVCOL_SPC_BT2020_CL:
+    matrix = kCVImageBufferYCbCrMatrix_ITU_R_2020;
+    break;
+  case AVCOL_SPC_SMPTE170M:
+  case AVCOL_SPC_BT470BG:
+    matrix = kCVImageBufferYCbCrMatrix_ITU_R_601_4;
+    break;
+  default:
+    break;
+  }
+
+  if (matrix) {
+    CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, matrix,
+                          kCVAttachmentMode_ShouldPropagate);
+  }
+}
+
 - (nullable FFmpegVideoFrame *)createVideoFrameFromDecodedFrame:(double)pts {
   CVPixelBufferRef pixelBuffer = NULL;
   if (_usingHardwareDecoder && _frame->format == _hwPixelFormat) {
@@ -1246,6 +1331,9 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   if (!pixelBuffer) {
     return nil;
   }
+
+  // Attach color properties (critical for HDR)
+  [self attachColorPropertiesFromFrame:_frame toPixelBuffer:pixelBuffer];
 
   FFmpegVideoFrame *videoFrame = [[FFmpegVideoFrame alloc] init];
   videoFrame.type = FFmpegFrameTypeVideo;
