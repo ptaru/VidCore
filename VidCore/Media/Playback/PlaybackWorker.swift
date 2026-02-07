@@ -89,7 +89,7 @@ actor PlaybackWorker {
   }
 
   func primeFirstVideoFrame() async -> VideoFrame? {
-    guard let decoder else { return nil }
+    guard let decoder, decoder.videoInfo.width > 0, decoder.videoInfo.height > 0 else { return nil }
 
     while !Task.isCancelled {
       guard let packet = await decoder.demuxNextPacket() else { break }

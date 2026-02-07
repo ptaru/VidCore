@@ -126,7 +126,7 @@ public final class VideoDecoder: @unchecked Sendable {
     guard let demuxer = self.demuxer, let info = demuxer.getVideoInfo() else {
       throw NSError(
         domain: "VideoDecoder", code: -2,
-        userInfo: [NSLocalizedDescriptionKey: "Failed to get video info"])
+        userInfo: [NSLocalizedDescriptionKey: "Failed to get media info"])
     }
 
     // Phase 2: Try to initialize SampleBufferBuilder for supported codecs (HEVC/H264)

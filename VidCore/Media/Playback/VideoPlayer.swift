@@ -276,10 +276,11 @@ public class VideoPlayer {
 
         duration = decoder.videoInfo.duration
         videoInfo = decoder.videoInfo
+        hasAudio = !decoder.videoInfo.audioTracks.isEmpty
         updateDisplayLinkFrameRate(isAnimating: false, isASSActive: false)
 
         // Sync selected audio track with demuxer's default selection
-        if !decoder.videoInfo.audioTracks.isEmpty {
+        if hasAudio {
           let selectedStreamIndex = decoder.selectedAudioStreamIndex()
           selectedAudioTrackIndex =
             decoder.videoInfo.audioTracks.firstIndex { $0.streamIndex == selectedStreamIndex } ?? 0
@@ -299,9 +300,15 @@ public class VideoPlayer {
 
         await refreshDebugStats()
 
-        if let firstFrame = await worker.primeFirstVideoFrame() {
-          await renderFrame(firstFrame, flushRenderer: false)
-          await playbackClock.seek(to: firstFrame.presentationTime)
+        // Only prime if we actually have video dimensions
+        if decoder.videoInfo.width > 0 && decoder.videoInfo.height > 0 {
+          if let firstFrame = await worker.primeFirstVideoFrame() {
+            await renderFrame(firstFrame, flushRenderer: false)
+            await playbackClock.seek(to: firstFrame.presentationTime)
+          }
+        } else {
+          // For audio-only, just seek the clock to 0
+          await playbackClock.seek(to: 0)
         }
       }
       state = .ready

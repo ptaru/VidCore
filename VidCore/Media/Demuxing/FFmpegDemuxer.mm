@@ -81,8 +81,7 @@ static const NSUInteger kMaxQueuedAudioPackets =
 
 #pragma mark - Implementation
 
-@implementation FFmpegDemuxer
-{
+@implementation FFmpegDemuxer {
   atomic_bool _abortRequested;
 }
 
@@ -126,12 +125,12 @@ static const NSUInteger kMaxQueuedAudioPackets =
   _formatContext = avformat_alloc_context();
   if (!_formatContext) {
     if (error) {
-      *error = [NSError
-          errorWithDomain:@"FFmpegDemuxer"
-                     code:1000
-                 userInfo:@{
-                   NSLocalizedDescriptionKey : @"Failed to allocate format context"
-                 }];
+      *error = [NSError errorWithDomain:@"FFmpegDemuxer"
+                                   code:1000
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey :
+                                     @"Failed to allocate format context"
+                               }];
     }
     return NO;
   }
@@ -173,9 +172,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
   // Find the best video stream
   _videoStreamIndex =
       av_find_best_stream(_formatContext, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-  if (_videoStreamIndex < 0) {
-    DEMUXER_SET_ERROR_AND_CLOSE(error, 1003, @"No video stream found");
-  }
 
   // Find all audio streams and identify default
   _audioStreamIndices = [NSMutableArray array];
@@ -189,6 +185,10 @@ static const NSUInteger kMaxQueuedAudioPackets =
         defaultAudioStream = i;
       }
     }
+  }
+
+  if (_videoStreamIndex < 0 && _audioStreamIndices.count == 0) {
+    DEMUXER_SET_ERROR_AND_CLOSE(error, 1003, @"No video or audio stream found");
   }
   // Select default audio stream, or first if no default specified
   if (defaultAudioStream >= 0) {
@@ -467,15 +467,96 @@ static const NSUInteger kMaxQueuedAudioPackets =
 }
 
 - (void)buildVideoInfo {
-  AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
-  AVCodecParameters *codecPars = videoStream->codecpar;
-  const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
-
   _videoInfo = [[FFmpegDemuxerVideoInfo alloc] init];
-  _videoInfo.width = codecPars->width;
-  _videoInfo.height = codecPars->height;
-  _videoInfo.codecName =
-      codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
+
+  if (_videoStreamIndex >= 0) {
+    AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
+    AVCodecParameters *codecPars = videoStream->codecpar;
+    const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
+
+    _videoInfo.width = codecPars->width;
+    _videoInfo.height = codecPars->height;
+    _videoInfo.codecName =
+        codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
+
+    // Color metadata (prefer codec params, fallback to stream)
+    _videoInfo.colorPrimaries = codecPars->color_primaries;
+    _videoInfo.colorTransfer = codecPars->color_trc;
+    _videoInfo.colorSpace = codecPars->color_space;
+    _videoInfo.colorRange = codecPars->color_range;
+
+    // Check for Dolby Vision
+    const AVPacketSideData *doviSideData = av_packet_side_data_get(
+        codecPars->coded_side_data, codecPars->nb_coded_side_data,
+        AV_PKT_DATA_DOVI_CONF);
+    if (doviSideData &&
+        doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
+      _videoInfo.isDolbyVision = YES;
+      const AVDOVIDecoderConfigurationRecord *doviConf =
+          (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
+      _videoInfo.doviProfile = doviConf->dv_profile;
+    }
+
+    // Content Light Level
+    const AVPacketSideData *cllSideData = av_packet_side_data_get(
+        codecPars->coded_side_data, codecPars->nb_coded_side_data,
+        AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
+    if (cllSideData && cllSideData->size >= sizeof(AVContentLightMetadata)) {
+      const AVContentLightMetadata *cll =
+          (const AVContentLightMetadata *)cllSideData->data;
+      _videoInfo.maxContentLightLevel = cll->MaxCLL;
+      _videoInfo.maxFrameAverageLightLevel = cll->MaxFALL;
+    }
+
+    // Mastering Display Metadata
+    const AVPacketSideData *mdSideData = av_packet_side_data_get(
+        codecPars->coded_side_data, codecPars->nb_coded_side_data,
+        AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
+    if (mdSideData && mdSideData->size >= sizeof(AVMasteringDisplayMetadata)) {
+      const AVMasteringDisplayMetadata *md =
+          (const AVMasteringDisplayMetadata *)mdSideData->data;
+      if (md->has_luminance) {
+        _videoInfo.masteringDisplayMaxLuminance =
+            (double)av_q2d(md->max_luminance);
+        _videoInfo.masteringDisplayMinLuminance =
+            (double)av_q2d(md->min_luminance);
+      }
+    }
+
+    // Bits per component
+    const AVPixFmtDescriptor *pixFmtDesc =
+        av_pix_fmt_desc_get((enum AVPixelFormat)codecPars->format);
+    _videoInfo.bitsPerComponent = pixFmtDesc ? pixFmtDesc->comp[0].depth : 8;
+
+    // Frame rate
+    AVRational frameRate =
+        av_guess_frame_rate(_formatContext, videoStream, NULL);
+    if (frameRate.num && frameRate.den) {
+      _videoInfo.frameRate = (double)frameRate.num / (double)frameRate.den;
+    } else {
+      _videoInfo.frameRate = 30.0;
+    }
+
+    // Duration
+    if (videoStream->duration != AV_NOPTS_VALUE) {
+      _videoInfo.duration =
+          (double)videoStream->duration * av_q2d(videoStream->time_base);
+    }
+
+    // Sample Aspect Ratio
+    AVRational sar = videoStream->sample_aspect_ratio;
+    if (sar.num == 0 || sar.den == 0) {
+      sar = codecPars->sample_aspect_ratio;
+    }
+    _videoInfo.sampleAspectRatioNum = sar.num;
+    _videoInfo.sampleAspectRatioDen = sar.den;
+  } else {
+    _videoInfo.width = 0;
+    _videoInfo.height = 0;
+    _videoInfo.codecName = @"none";
+    _videoInfo.frameRate = 0;
+    _videoInfo.duration = 0;
+  }
 
   // Container format
   if (_formatContext->iformat) {
@@ -487,86 +568,10 @@ static const NSUInteger kMaxQueuedAudioPackets =
     _videoInfo.formatName = @"Unknown";
   }
 
-  // Color metadata (prefer codec params, fallback to stream)
-  _videoInfo.colorPrimaries = codecPars->color_primaries;
-  _videoInfo.colorTransfer = codecPars->color_trc;
-  _videoInfo.colorSpace = codecPars->color_space;
-  _videoInfo.colorRange = codecPars->color_range;
-
-  // Check for Dolby Vision
-  const AVPacketSideData *doviSideData = av_packet_side_data_get(
-      codecPars->coded_side_data, codecPars->nb_coded_side_data,
-      AV_PKT_DATA_DOVI_CONF);
-  if (doviSideData &&
-      doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
-    _videoInfo.isDolbyVision = YES;
-    const AVDOVIDecoderConfigurationRecord *doviConf =
-        (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
-    _videoInfo.doviProfile = doviConf->dv_profile;
-  }
-
-  // Content Light Level
-  const AVPacketSideData *cllSideData = av_packet_side_data_get(
-      codecPars->coded_side_data, codecPars->nb_coded_side_data,
-      AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-  if (cllSideData && cllSideData->size >= sizeof(AVContentLightMetadata)) {
-    const AVContentLightMetadata *cll =
-        (const AVContentLightMetadata *)cllSideData->data;
-    _videoInfo.maxContentLightLevel = cll->MaxCLL;
-    _videoInfo.maxFrameAverageLightLevel = cll->MaxFALL;
-  }
-
-  // Mastering Display Metadata
-  const AVPacketSideData *mdSideData = av_packet_side_data_get(
-      codecPars->coded_side_data, codecPars->nb_coded_side_data,
-      AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
-  if (mdSideData && mdSideData->size >= sizeof(AVMasteringDisplayMetadata)) {
-    const AVMasteringDisplayMetadata *md =
-        (const AVMasteringDisplayMetadata *)mdSideData->data;
-    if (md->has_luminance) {
-      _videoInfo.masteringDisplayMaxLuminance =
-          (double)av_q2d(md->max_luminance);
-      _videoInfo.masteringDisplayMinLuminance =
-          (double)av_q2d(md->min_luminance);
-    }
-  }
-
-  // Bits per component
-  const AVPixFmtDescriptor *pixFmtDesc =
-      av_pix_fmt_desc_get((enum AVPixelFormat)codecPars->format);
-  _videoInfo.bitsPerComponent = pixFmtDesc ? pixFmtDesc->comp[0].depth : 8;
-
-  // Frame rate
-  AVRational frameRate = av_guess_frame_rate(_formatContext, videoStream, NULL);
-  if (frameRate.num && frameRate.den) {
-    _videoInfo.frameRate = (double)frameRate.num / (double)frameRate.den;
-  } else {
-    _videoInfo.frameRate = 30.0;
-  }
-
-  // Duration
-  if (videoStream->duration != AV_NOPTS_VALUE) {
-    _videoInfo.duration =
-        (double)videoStream->duration * av_q2d(videoStream->time_base);
-  } else if (_formatContext->duration != AV_NOPTS_VALUE) {
+  // Use container duration if video duration is missing or zero
+  if (_videoInfo.duration <= 0 && _formatContext->duration != AV_NOPTS_VALUE) {
     _videoInfo.duration = (double)_formatContext->duration / AV_TIME_BASE;
   }
-
-  // Duration
-  if (videoStream->duration != AV_NOPTS_VALUE) {
-    _videoInfo.duration =
-        (double)videoStream->duration * av_q2d(videoStream->time_base);
-  } else if (_formatContext->duration != AV_NOPTS_VALUE) {
-    _videoInfo.duration = (double)_formatContext->duration / AV_TIME_BASE;
-  }
-
-  // Sample Aspect Ratio
-  AVRational sar = videoStream->sample_aspect_ratio;
-  if (sar.num == 0 || sar.den == 0) {
-    sar = codecPars->sample_aspect_ratio;
-  }
-  _videoInfo.sampleAspectRatioNum = sar.num;
-  _videoInfo.sampleAspectRatioDen = sar.den;
 
   // Audio info
   if (_audioStreamIndex >= 0) {
@@ -679,50 +684,65 @@ static const NSUInteger kMaxQueuedAudioPackets =
 }
 
 - (nullable NSDictionary<NSString *, id> *)getDecoderConfig {
-  if (!_formatContext || _videoStreamIndex < 0) {
+  if (!_formatContext) {
     return nil;
   }
 
-  AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
-  AVCodecParameters *codecPars = videoStream->codecpar;
-
   NSMutableDictionary *config = [NSMutableDictionary dictionary];
 
-  // Video codec info
-  config[@"videoCodecId"] = @(codecPars->codec_id);
-  config[@"width"] = @(codecPars->width);
-  config[@"height"] = @(codecPars->height);
-  config[@"pixelFormat"] = @(codecPars->format);
-  config[@"videoTimeBaseNum"] = @(videoStream->time_base.num);
-  config[@"videoTimeBaseDen"] = @(videoStream->time_base.den);
+  if (_videoStreamIndex >= 0) {
+    AVStream *videoStream = _formatContext->streams[_videoStreamIndex];
+    AVCodecParameters *codecPars = videoStream->codecpar;
 
-  // Video extradata
-  if (codecPars->extradata && codecPars->extradata_size > 0) {
-    config[@"videoExtradata"] =
-        [NSData dataWithBytes:codecPars->extradata
-                       length:codecPars->extradata_size];
-  }
+    // Video codec info
+    config[@"videoCodecId"] = @(codecPars->codec_id);
+    config[@"width"] = @(codecPars->width);
+    config[@"height"] = @(codecPars->height);
+    config[@"pixelFormat"] = @(codecPars->format);
+    config[@"videoTimeBaseNum"] = @(videoStream->time_base.num);
+    config[@"videoTimeBaseDen"] = @(videoStream->time_base.den);
 
-  // Color metadata
-  config[@"colorPrimaries"] = @(codecPars->color_primaries);
-  config[@"colorTransfer"] = @(codecPars->color_trc);
-  config[@"colorSpace"] = @(codecPars->color_space);
-  config[@"colorRange"] = @(codecPars->color_range);
-  config[@"sampleAspectRatioNum"] = @(_videoInfo.sampleAspectRatioNum);
-  config[@"sampleAspectRatioDen"] = @(_videoInfo.sampleAspectRatioDen);
+    // Video extradata
+    if (codecPars->extradata && codecPars->extradata_size > 0) {
+      config[@"videoExtradata"] =
+          [NSData dataWithBytes:codecPars->extradata
+                         length:codecPars->extradata_size];
+    }
 
-  // Dolby Vision config
-  const AVPacketSideData *doviSideData = av_packet_side_data_get(
-      codecPars->coded_side_data, codecPars->nb_coded_side_data,
-      AV_PKT_DATA_DOVI_CONF);
-  if (doviSideData && doviSideData->size > 0) {
-    config[@"dolbyVisionConfig"] = [NSData dataWithBytes:doviSideData->data
-                                                  length:doviSideData->size];
-    config[@"isDolbyVision"] = @YES;
-    if (doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
-      const AVDOVIDecoderConfigurationRecord *doviConf =
-          (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
-      config[@"doviProfile"] = @(doviConf->dv_profile);
+    // Color metadata
+    config[@"colorPrimaries"] = @(codecPars->color_primaries);
+    config[@"colorTransfer"] = @(codecPars->color_trc);
+    config[@"colorSpace"] = @(codecPars->color_space);
+    config[@"colorRange"] = @(codecPars->color_range);
+    config[@"sampleAspectRatioNum"] = @(_videoInfo.sampleAspectRatioNum);
+    config[@"sampleAspectRatioDen"] = @(_videoInfo.sampleAspectRatioDen);
+
+    // Dolby Vision config
+    const AVPacketSideData *doviSideData = av_packet_side_data_get(
+        codecPars->coded_side_data, codecPars->nb_coded_side_data,
+        AV_PKT_DATA_DOVI_CONF);
+    if (doviSideData && doviSideData->size > 0) {
+      config[@"dolbyVisionConfig"] = [NSData dataWithBytes:doviSideData->data
+                                                    length:doviSideData->size];
+      config[@"isDolbyVision"] = @YES;
+      if (doviSideData->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
+        const AVDOVIDecoderConfigurationRecord *doviConf =
+            (const AVDOVIDecoderConfigurationRecord *)doviSideData->data;
+        config[@"doviProfile"] = @(doviConf->dv_profile);
+      }
+    }
+
+    // Frame rate
+    AVRational frameRate =
+        av_guess_frame_rate(_formatContext, videoStream, NULL);
+    if (frameRate.num && frameRate.den) {
+      config[@"frameRate"] = @((double)frameRate.num / (double)frameRate.den);
+    }
+
+    // Video Duration
+    if (videoStream->duration != AV_NOPTS_VALUE) {
+      config[@"duration"] =
+          @((double)videoStream->duration * av_q2d(videoStream->time_base));
     }
   }
 
@@ -761,17 +781,8 @@ static const NSUInteger kMaxQueuedAudioPackets =
     }
   }
 
-  // Frame rate
-  AVRational frameRate = av_guess_frame_rate(_formatContext, videoStream, NULL);
-  if (frameRate.num && frameRate.den) {
-    config[@"frameRate"] = @((double)frameRate.num / (double)frameRate.den);
-  }
-
-  // Duration
-  if (videoStream->duration != AV_NOPTS_VALUE) {
-    config[@"duration"] =
-        @((double)videoStream->duration * av_q2d(videoStream->time_base));
-  } else if (_formatContext->duration != AV_NOPTS_VALUE) {
+  // Fallback duration if missing from video/audio specific info
+  if (!config[@"duration"] && _formatContext->duration != AV_NOPTS_VALUE) {
     config[@"duration"] = @((double)_formatContext->duration / AV_TIME_BASE);
   }
 

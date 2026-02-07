@@ -232,96 +232,104 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _isClosed = NO;
 
     // Extract config values
-    int videoCodecId = [config[@"videoCodecId"] intValue];
+    NSNumber *videoCodecIdNum = config[@"videoCodecId"];
+    int videoCodecId = videoCodecIdNum ? [videoCodecIdNum intValue] : 0;
     int width = [config[@"width"] intValue];
     int height = [config[@"height"] intValue];
     int pixelFormat = [config[@"pixelFormat"] intValue];
     NSData *videoExtradata = config[@"videoExtradata"];
 
-    // Find video codec
-    const AVCodec *codec = avcodec_find_decoder((enum AVCodecID)videoCodecId);
-    if (!codec) {
-      if (error) {
-        *error = [NSError
-            errorWithDomain:@"FFmpegDecoder"
-                       code:2001
-                   userInfo:@{NSLocalizedDescriptionKey : @"Codec not found"}];
-      }
-      return nil;
-    }
-
-    // Allocate video codec context
-    _codecContext = avcodec_alloc_context3(codec);
-    if (!_codecContext) {
-      if (error) {
-        *error = [NSError errorWithDomain:@"FFmpegDecoder"
-                                     code:2002
-                                 userInfo:@{
-                                   NSLocalizedDescriptionKey :
-                                       @"Failed to allocate codec context"
-                                 }];
-      }
-      return nil;
-    }
-
-    // Set codec parameters
-    _codecContext->width = width;
-    _codecContext->height = height;
-    _codecContext->pix_fmt = (enum AVPixelFormat)pixelFormat;
-    _codecContext->color_primaries =
-        (enum AVColorPrimaries)[config[@"colorPrimaries"] intValue];
-    _codecContext->color_trc =
-        (enum AVColorTransferCharacteristic)[config[@"colorTransfer"] intValue];
-    _codecContext->colorspace =
-        (enum AVColorSpace)[config[@"colorSpace"] intValue];
-    _codecContext->color_range =
-        (enum AVColorRange)[config[@"colorRange"] intValue];
-
-    // Set timebase
-    _videoTimeBaseNum = [config[@"videoTimeBaseNum"] intValue];
-    _videoTimeBaseDen = [config[@"videoTimeBaseDen"] intValue];
-
-    if (_videoTimeBaseDen > 0) {
-      AVRational tb = (AVRational){_videoTimeBaseNum, _videoTimeBaseDen};
-      _codecContext->pkt_timebase = tb;
-      _codecContext->time_base = tb;
-    }
-
-    // Set extradata
-    if (videoExtradata && videoExtradata.length > 0) {
-      _codecContext->extradata = (uint8_t *)av_malloc(
-          videoExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
-      if (_codecContext->extradata) {
-        memcpy(_codecContext->extradata, videoExtradata.bytes,
-               videoExtradata.length);
-        _codecContext->extradata_size = (int)videoExtradata.length;
+    const AVCodec *codec = NULL;
+    if (videoCodecId > 0) {
+      // Find video codec
+      codec = avcodec_find_decoder((enum AVCodecID)videoCodecId);
+      if (!codec) {
+        if (error) {
+          *error = [NSError
+              errorWithDomain:@"FFmpegDecoder"
+                         code:2001
+                     userInfo:@{
+                       NSLocalizedDescriptionKey : @"Video codec not found"
+                     }];
+        }
+        return nil;
       }
     }
 
-    // Try hardware acceleration
-    BOOL hwSuccess = [self initHardwareDecoder:codec error:nil];
-    if (hwSuccess && _hwDeviceCtx) {
-      _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
-      _codecContext->get_format = get_hw_format;
-      _usingHardwareDecoder = YES;
-    } else {
-      // Software decode with threading
-      _codecContext->thread_count = 0;
-      _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    }
-
-    // Open video codec
-    if (avcodec_open2(_codecContext, codec, NULL) < 0) {
-      if (error) {
-        *error = [NSError
-            errorWithDomain:@"FFmpegDecoder"
-                       code:2003
-                   userInfo:@{
-                     NSLocalizedDescriptionKey : @"Failed to open codec"
-                   }];
+    if (codec) {
+      // Allocate video codec context
+      _codecContext = avcodec_alloc_context3(codec);
+      if (!_codecContext) {
+        if (error) {
+          *error = [NSError errorWithDomain:@"FFmpegDecoder"
+                                       code:2002
+                                   userInfo:@{
+                                     NSLocalizedDescriptionKey :
+                                         @"Failed to allocate codec context"
+                                   }];
+        }
+        return nil;
       }
-      avcodec_free_context(&_codecContext);
-      return nil;
+
+      // Set codec parameters
+      _codecContext->width = width;
+      _codecContext->height = height;
+      _codecContext->pix_fmt = (enum AVPixelFormat)pixelFormat;
+      _codecContext->color_primaries =
+          (enum AVColorPrimaries)[config[@"colorPrimaries"] intValue];
+      _codecContext->color_trc = (enum AVColorTransferCharacteristic)
+          [config[@"colorTransfer"] intValue];
+      _codecContext->colorspace =
+          (enum AVColorSpace)[config[@"colorSpace"] intValue];
+      _codecContext->color_range =
+          (enum AVColorRange)[config[@"colorRange"] intValue];
+
+      // Set timebase
+      _videoTimeBaseNum = [config[@"videoTimeBaseNum"] intValue];
+      _videoTimeBaseDen = [config[@"videoTimeBaseDen"] intValue];
+
+      if (_videoTimeBaseDen > 0) {
+        AVRational tb = (AVRational){_videoTimeBaseNum, _videoTimeBaseDen};
+        _codecContext->pkt_timebase = tb;
+        _codecContext->time_base = tb;
+      }
+
+      // Set extradata
+      if (videoExtradata && videoExtradata.length > 0) {
+        _codecContext->extradata = (uint8_t *)av_malloc(
+            videoExtradata.length + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (_codecContext->extradata) {
+          memcpy(_codecContext->extradata, videoExtradata.bytes,
+                 videoExtradata.length);
+          _codecContext->extradata_size = (int)videoExtradata.length;
+        }
+      }
+
+      // Try hardware acceleration
+      BOOL hwSuccess = [self initHardwareDecoder:codec error:nil];
+      if (hwSuccess && _hwDeviceCtx) {
+        _codecContext->hw_device_ctx = av_buffer_ref(_hwDeviceCtx);
+        _codecContext->get_format = get_hw_format;
+        _usingHardwareDecoder = YES;
+      } else {
+        // Software decode with threading
+        _codecContext->thread_count = 0;
+        _codecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+      }
+
+      // Open video codec
+      if (avcodec_open2(_codecContext, codec, NULL) < 0) {
+        if (error) {
+          *error = [NSError
+              errorWithDomain:@"FFmpegDecoder"
+                         code:2003
+                     userInfo:@{
+                       NSLocalizedDescriptionKey : @"Failed to open video codec"
+                     }];
+        }
+        avcodec_free_context(&_codecContext);
+        return nil;
+      }
     }
 
     // Setup audio codec if present
@@ -417,22 +425,29 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _videoInfo = [[FFmpegVideoInfo alloc] init];
     _videoInfo.width = width;
     _videoInfo.height = height;
-    _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
+    if (codec) {
+      _videoInfo.codecName = [NSString stringWithUTF8String:codec->name];
+      _videoInfo.decoderName =
+          _usingHardwareDecoder
+              ? [NSString stringWithFormat:@"%s_videotoolbox", codec->name]
+              : [NSString stringWithFormat:@"%s", codec->name];
+      _videoInfo.decoderDescription =
+          _usingHardwareDecoder ? @"Hardware Acceleration (VideoToolbox)"
+                                : @"Software Decoding (CPU)";
+    } else {
+      _videoInfo.codecName = @"none";
+      _videoInfo.decoderName = @"none";
+      _videoInfo.decoderDescription = @"None";
+    }
     _videoInfo.isHardwareAccelerated = _usingHardwareDecoder;
-    _videoInfo.decoderName =
-        _usingHardwareDecoder
-            ? [NSString stringWithFormat:@"%s_videotoolbox", codec->name]
-            : [NSString stringWithFormat:@"%s", codec->name];
-    _videoInfo.decoderDescription =
-        _usingHardwareDecoder ? @"Hardware Acceleration (VideoToolbox)"
-                              : @"Software Decoding (CPU)";
     _videoInfo.colorPrimaries = [config[@"colorPrimaries"] intValue];
     _videoInfo.colorTransfer = [config[@"colorTransfer"] intValue];
     _videoInfo.colorSpace = [config[@"colorSpace"] intValue];
     _videoInfo.colorRange = [config[@"colorRange"] intValue];
     _videoInfo.isDolbyVision = [config[@"isDolbyVision"] boolValue];
     _videoInfo.doviProfile = [config[@"doviProfile"] intValue];
-    _videoInfo.frameRate = [config[@"frameRate"] doubleValue] ?: 30.0;
+    _videoInfo.frameRate =
+        [config[@"frameRate"] doubleValue] ?: (codec ? 30.0 : 0.0);
     _videoInfo.duration = [config[@"duration"] doubleValue];
 
     if (config[@"audioCodecId"]) {
