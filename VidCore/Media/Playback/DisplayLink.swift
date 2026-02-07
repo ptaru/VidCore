@@ -126,8 +126,17 @@ public final class DisplayLink {
   }
 
   deinit {
-    // Ensuring it stops if the object is released, though invalidate should usually be called explicitly.
-    // Note: CADisplayLink holds a strong reference to its target, so manual stop() is usually required
-    // unless the target is a weak proxy (not implemented here for simplicity as VideoPlayer will manage life).
+    // Ensure the CADisplayLink is invalidated to break the retain cycle.
+    if Thread.isMainThread {
+      MainActor.assumeIsolated {
+        stop()
+      }
+    } else {
+      DispatchQueue.main.sync {
+        MainActor.assumeIsolated {
+          stop()
+        }
+      }
+    }
   }
 }

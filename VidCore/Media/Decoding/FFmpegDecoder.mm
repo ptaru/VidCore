@@ -96,6 +96,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 @property(nonatomic, assign) int32_t swrSrcSampleRate;
 @property(nonatomic, assign) int32_t swrSrcChannels;
 @property(nonatomic, assign) enum AVSampleFormat swrSrcFormat;
+@property(nonatomic, assign) BOOL isClosed;
 @end
 #pragma mark - Internal Helper Functions
 
@@ -228,6 +229,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
     _swrSrcSampleRate = 0;
     _swrSrcChannels = 0;
     _swrSrcFormat = AV_SAMPLE_FMT_NONE;
+    _isClosed = NO;
 
     // Extract config values
     int videoCodecId = [config[@"videoCodecId"] intValue];
@@ -1251,9 +1253,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 - (void)close {
   // Guard against double-close (dealloc also calls close)
-  if (!_codecContext) {
+  if (_isClosed) {
     return;
   }
+  _isClosed = YES;
 
   if (_swrContext) {
     swr_free(&_swrContext);
