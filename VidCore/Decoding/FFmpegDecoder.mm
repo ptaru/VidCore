@@ -502,40 +502,19 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return _videoInfo;
 }
 
-- (nullable FFmpegFrame *)decodePacket:(FFmpegPacketData *)packetData {
-  if (!packetData) {
+- (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:
+    (FFmpegPacketData *)packetData {
+  if (!packetData || !packetData.isSubtitle || !_subtitleCodecContext) {
     return nil;
   }
 
-  // For audio, use decodeAudioPacket directly
-  if (packetData.isAudio && _audioCodecContext) {
-    AVPacket *pkt = [self createAVPacketFromData:packetData];
-    if (!pkt)
-      return nil;
-    FFmpegAudioFrame *result = [self decodeAudioPacket:pkt];
-    av_packet_free(&pkt);
-    return result;
-  }
+  AVPacket *pkt = [self createAVPacketFromData:packetData];
+  if (!pkt)
+    return nil;
 
-  if (packetData.isSubtitle && _subtitleCodecContext) {
-    AVPacket *pkt = [self createAVPacketFromData:packetData];
-    if (!pkt)
-      return nil;
-    FFmpegSubtitleFrame *result = [self decodeSubtitlePacket:pkt];
-    av_packet_free(&pkt);
-    return result;
-  }
-
-  // For video, decode all frames but return only the first one
-  // (for backward compatibility - use decodeVideoPacketWithAllFrames for full
-  // output)
-  if (packetData.isVideo && _codecContext) {
-    NSArray<FFmpegVideoFrame *> *frames =
-        [self decodeVideoPacketWithAllFrames:packetData];
-    return frames.firstObject;
-  }
-
-  return nil;
+  FFmpegSubtitleFrame *result = [self decodeSubtitlePacketAV:pkt];
+  av_packet_free(&pkt);
+  return result;
 }
 
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacketWithAllFrames:
@@ -581,9 +560,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
-  // Note: SampleBufferBuilder is now used by MediaDecoder.swift for H264/HEVC
-  // passthrough This method handles FFmpeg software and FFmpeg-VideoToolbox
-  // paths
+  // Note: SampleBufferBuilder handles H264/HEVC passthrough in MediaDecoder.
 
   if (avcodec_send_packet(_codecContext, pkt) < 0) {
     return nil;
@@ -708,7 +685,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return frames.count > 0 ? frames : nil;
 }
 
-- (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:(AVPacket *)pkt {
+- (nullable FFmpegSubtitleFrame *)decodeSubtitlePacketAV:(AVPacket *)pkt {
   if (!_subtitleCodecContext)
     return nil;
 
@@ -734,8 +711,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   double startTime = pts + (double)subtitle.start_display_time / 1000.0;
   double endTime = pts + (double)subtitle.end_display_time / 1000.0;
 
-  // If end time is invalid (<= start time), try to deduce from packet or
-  // default
+  // If end time is invalid, derive from packet duration or fallback.
   if (subtitle.end_display_time <= subtitle.start_display_time) {
     if (pkt->duration > 0 && _subtitleTimeBaseDen > 0) {
       double pktDuration = (double)pkt->duration *
@@ -743,9 +719,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                            (double)_subtitleTimeBaseDen;
       endTime = startTime + pktDuration;
     } else {
-      // Fallback to a default duration (e.g. 3.0 seconds) to ensure visibility
-      // or use -1 to indicate "until next" depending on player logic.
-      // Given the flash issue, a reasonable default is safe.
       endTime = startTime + 3.0;
     }
   }
@@ -799,18 +772,11 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                            // palette in data[1] for bitmaps
 
             if (rect->nb_colors > 0 && palette) {
-              // Paletted image (e.g. DVD/VobSub or PGS)
+              // Paletted image (e.g. DVD/VobSub or PGS).
               for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
                   uint8_t colorIndex = srcData[y * srcLinesize + x];
-                  // palette is likely BGRA or RGBA depending on platform,
-                  // FFmpeg usually outputs in native endian or specific
-                  // format FFmpeg palette is usually 0xAABBGGRR (little
-                  // endian) -> R, G, B, A in byte order? Actually FFmpeg
-                  // palettes are typically 32-bit AABBGGRR. Let's copy it
-                  // directly for now and fix color components if needed
-                  // during rendering or testing. AVPalette is uint32_t.
-
+                  // Copy palette color as-is (AABBGGRR).
                   uint32_t color = palette[colorIndex];
                   // Write to output buffer
                   uint32_t *dstPixel = (uint32_t *)(rgbaData + (y * w + x) * 4);
@@ -818,12 +784,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                 }
               }
             } else {
-              // Non-paletted (presumably already RGBA or similar, though rare
-              // for basic rects without swscale) If it's not paletted, we
-              // might need more complex handling, but PGS/VobSub are usually
-              // paletted. For safety, if no palette, we just zero it out or
-              // copy if format known. Assuming it *might* be raw RGB if
-              // encoded that way? Let's log warning and fill transparent.
+              // Unsupported non-paletted subtitle bitmap.
               free(rgbaData);
               rgbaData = NULL;
             }
@@ -833,9 +794,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                                         length:dataSize
                                                   freeWhenDone:YES];
 
-              // Raw pixel dimensions for image creation
-              // Normalize coordinates
-              // Prefer subtitle codec dimensions (canvas size) if available
+              // Normalize coordinates against subtitle or video dimensions.
               double refWidth = 0;
               double refHeight = 0;
 

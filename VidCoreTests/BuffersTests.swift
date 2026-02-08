@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import VidCore
 
 final class BuffersTests: XCTestCase {
@@ -29,7 +30,8 @@ final class BuffersTests: XCTestCase {
     func testNonAutoResolvedIsIdentity() {
         let resolvedSoftware = Buffers.software.resolved(isHardwareAccelerated: true)
         let resolvedHardware = Buffers.hardware.resolved(isHardwareAccelerated: false)
-        let resolvedCustom = Buffers.custom(frameBuffer: 1, packetQueue: 2).resolved(isHardwareAccelerated: true)
+        let resolvedCustom = Buffers.custom(frameBuffer: 1, packetQueue: 2).resolved(
+            isHardwareAccelerated: true)
 
         if case .software = resolvedSoftware {
             XCTAssertTrue(true)

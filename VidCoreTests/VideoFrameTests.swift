@@ -1,6 +1,7 @@
 import CoreMedia
 import CoreVideo
 import XCTest
+
 @testable import VidCore
 
 final class VideoFrameTests: XCTestCase {
@@ -41,7 +42,10 @@ final class VideoFrameTests: XCTestCase {
 
     func testApplyHDRAttachmentsSetsExpectedKeys() {
         let pixelBuffer = makePixelBuffer()
-        guard var frame = VideoFrame(pixelBuffer: pixelBuffer, presentationTime: 0.0, isHDR: true, colorTransfer: 18) else {
+        guard
+            var frame = VideoFrame(
+                pixelBuffer: pixelBuffer, presentationTime: 0.0, isHDR: true, colorTransfer: 18)
+        else {
             XCTFail("Expected frame to be created")
             return
         }
@@ -60,7 +64,8 @@ final class VideoFrameTests: XCTestCase {
 
     func testApplyHDRAttachmentsNoOpWhenNotHDR() {
         let pixelBuffer = makePixelBuffer()
-        guard var frame = VideoFrame(pixelBuffer: pixelBuffer, presentationTime: 0.0, isHDR: false) else {
+        guard var frame = VideoFrame(pixelBuffer: pixelBuffer, presentationTime: 0.0, isHDR: false)
+        else {
             XCTFail("Expected frame to be created")
             return
         }

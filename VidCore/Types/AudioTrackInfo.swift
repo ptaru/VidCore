@@ -28,21 +28,21 @@ public struct AudioTrackInfo: Sendable, Equatable, Identifiable {
     public let channels: Int
     /// Whether this is the default audio track from container metadata.
     public let isDefault: Bool
-    
+
     /// Display name for the track (full format).
     /// Format: "Title - Language, Codec, Xch" or "Language, Codec, Xch" if no title.
     public var displayName: String {
         let codecUpper = codecName.uppercased()
         let channelsDesc = channels == 1 ? "1ch" : "\(channels)ch"
         let lang = language?.uppercased() ?? "Unknown"
-        
+
         if let title = title, !title.isEmpty {
             return "\(title) - \(lang), \(codecUpper), \(channelsDesc)"
         } else {
             return "\(lang), \(codecUpper), \(channelsDesc)"
         }
     }
-    
+
     /// Short display name for compact UI (e.g., picker button).
     /// Format: "Language • Codec" or just "Codec" if no language.
     public var shortDisplayName: String {
@@ -53,7 +53,7 @@ public struct AudioTrackInfo: Sendable, Equatable, Identifiable {
             return codecUpper
         }
     }
-    
+
     /// Creates a new audio track info.
     /// - Parameters:
     ///   - streamIndex: The stream index in the container.
@@ -63,7 +63,10 @@ public struct AudioTrackInfo: Sendable, Equatable, Identifiable {
     ///   - sampleRate: The sample rate in Hz.
     ///   - channels: The number of channels.
     ///   - isDefault: Whether this is the default track.
-    public init(streamIndex: Int, language: String?, title: String?, codecName: String, sampleRate: Int, channels: Int, isDefault: Bool = false) {
+    public init(
+        streamIndex: Int, language: String?, title: String?, codecName: String, sampleRate: Int,
+        channels: Int, isDefault: Bool = false
+    ) {
         self.id = streamIndex
         self.streamIndex = streamIndex
         self.language = language

@@ -9,20 +9,20 @@ import AVFoundation
 import Foundation
 
 public protocol AudioRendering: AnyObject, Sendable {
-  var isEnabled: Bool { get }
-  var isReadyForMoreMediaData: Bool { get }
-  func waitUntilReady() async -> Bool
+    var isEnabled: Bool { get }
+    var isReadyForMoreMediaData: Bool { get }
+    func waitUntilReady() async -> Bool
 
-  func setVolume(_ volume: Float)
-  func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) async
-  func flush() async
+    func setVolume(_ volume: Float)
+    func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) async
+    func flush() async
 
-  /// Synchronize the renderer's playback state with an external clock.
-  /// - Parameters:
-  ///   - isPlaying: Whether playback should be active
-  ///   - rate: Playback rate (e.g., 1.0 = normal speed, 2.0 = double speed)
-  func setPlaybackState(isPlaying: Bool, rate: Double)
+    /// Synchronize the renderer's playback state with an external clock.
+    /// - Parameters:
+    ///   - isPlaying: Whether playback should be active
+    ///   - rate: Playback rate (e.g., 1.0 = normal speed, 2.0 = double speed)
+    func setPlaybackState(isPlaying: Bool, rate: Double)
 
-  /// Returns the PTS currently being played, if available.
-  func currentPlaybackPTS() async -> Double?
+    /// Returns the PTS currently being played, if available.
+    func currentPlaybackPTS() async -> Double?
 }

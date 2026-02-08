@@ -1,5 +1,6 @@
 import CoreGraphics
 import XCTest
+
 @testable import VidCore
 
 final class SubtitleFrameTests: XCTestCase {

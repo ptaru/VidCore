@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import VidCore
 
 final class TrackInfoTests: XCTestCase {

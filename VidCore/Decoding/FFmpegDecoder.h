@@ -157,11 +157,6 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Get metadata about the video stream.
 - (nullable FFmpegVideoInfo *)getVideoInfo;
 
-/// Decode a packet into frames.
-///
-/// @param packetData The packet to decode.
-- (nullable FFmpegFrame *)decodePacket:(FFmpegPacketData *)packetData;
-
 /// Decode a video packet and return ALL available frames.
 ///
 /// With multi-threaded decoding, a single packet may produce multiple frames.
@@ -174,6 +169,12 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// With codecs like TrueHD, a single packet may produce multiple frames.
 /// @param packetData The audio packet to decode.
 - (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFrames:
+    (FFmpegPacketData *)packetData;
+
+/// Decode a subtitle packet.
+///
+/// @param packetData The subtitle packet to decode.
+- (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:
     (FFmpegPacketData *)packetData;
 
 /// Flush the decoder to signal end of stream.

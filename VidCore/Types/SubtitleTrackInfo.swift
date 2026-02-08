@@ -12,57 +12,58 @@ import Foundation
 /// Contains information about a subtitle stream's codec, language, and title.
 /// Used for subtitle track selection in multi-track files.
 public struct SubtitleTrackInfo: Sendable, Equatable, Identifiable {
-  /// Unique identifier (stream index).
-  public let id: Int
-  /// Stream index in the container.
-  public let streamIndex: Int
-  /// Language code (e.g., "eng", "jpn", "spa"), nil if not specified.
-  public let language: String?
-  /// Track title (e.g., "Full Subtitles"), nil if not specified.
-  public let title: String?
-  /// Subtitle codec name (e.g., "subrip", "ass", "mov_text", "pgs").
-  public let codecName: String
-  /// Whether this is the default subtitle track.
-  public let isDefault: Bool
-  /// Whether this is a known bitmap format (e.g. dvd_subtitle, pgs, hdmv_pgs).
-  public let isBitmap: Bool
+    /// Unique identifier (stream index).
+    public let id: Int
+    /// Stream index in the container.
+    public let streamIndex: Int
+    /// Language code (e.g., "eng", "jpn", "spa"), nil if not specified.
+    public let language: String?
+    /// Track title (e.g., "Full Subtitles"), nil if not specified.
+    public let title: String?
+    /// Subtitle codec name (e.g., "subrip", "ass", "mov_text", "pgs").
+    public let codecName: String
+    /// Whether this is the default subtitle track.
+    public let isDefault: Bool
+    /// Whether this is a known bitmap format (e.g. dvd_subtitle, pgs, hdmv_pgs).
+    public let isBitmap: Bool
 
-  /// Display name for the track (full format).
-  /// Format: "Title - Language (Codec)" or "Language (Codec)"
-  public var displayName: String {
-    let codecUpper = codecName.uppercased()
-    let lang = language?.uppercased() ?? "Unknown"
-    if let title = title, !title.isEmpty {
-      return "\(title) - \(lang)"
-    } else {
-      return "\(lang) (\(codecUpper))"
+    /// Display name for the track (full format).
+    /// Format: "Title - Language (Codec)" or "Language (Codec)"
+    public var displayName: String {
+        let codecUpper = codecName.uppercased()
+        let lang = language?.uppercased() ?? "Unknown"
+        if let title = title, !title.isEmpty {
+            return "\(title) - \(lang)"
+        } else {
+            return "\(lang) (\(codecUpper))"
+        }
     }
-  }
 
-  /// Short display name for compact UI.
-  public var shortDisplayName: String {
-    let lang = language?.uppercased() ?? "Unknown"
-    return lang
-  }
+    /// Short display name for compact UI.
+    public var shortDisplayName: String {
+        let lang = language?.uppercased() ?? "Unknown"
+        return lang
+    }
 
-  /// Creates a new subtitle track info.
-  /// - Parameters:
-  ///   - streamIndex: The stream index in the container.
-  ///   - language: The language code.
-  ///   - title: The track title.
-  ///   - codecName: The codec name.
-  ///   - isDefault: Whether this is the default track.
-  ///   - isBitmap: Whether this is a bitmap-based subtitle format.
-  public init(
-    streamIndex: Int, language: String?, title: String?, codecName: String, isDefault: Bool = false,
-    isBitmap: Bool = false
-  ) {
-    self.id = streamIndex
-    self.streamIndex = streamIndex
-    self.language = language
-    self.title = title
-    self.codecName = codecName
-    self.isDefault = isDefault
-    self.isBitmap = isBitmap
-  }
+    /// Creates a new subtitle track info.
+    /// - Parameters:
+    ///   - streamIndex: The stream index in the container.
+    ///   - language: The language code.
+    ///   - title: The track title.
+    ///   - codecName: The codec name.
+    ///   - isDefault: Whether this is the default track.
+    ///   - isBitmap: Whether this is a bitmap-based subtitle format.
+    public init(
+        streamIndex: Int, language: String?, title: String?, codecName: String,
+        isDefault: Bool = false,
+        isBitmap: Bool = false
+    ) {
+        self.id = streamIndex
+        self.streamIndex = streamIndex
+        self.language = language
+        self.title = title
+        self.codecName = codecName
+        self.isDefault = isDefault
+        self.isBitmap = isBitmap
+    }
 }

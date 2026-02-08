@@ -16,18 +16,18 @@ public actor PacketQueue {
     private var waitingProducers: [(UUID, CheckedContinuation<Void, Never>)] = []
     private var isClosed = false
     private var isSuspended = false
-    
+
     public init(maxSize: Int = 15) {
         self.maxSize = maxSize
     }
-    
+
     /// Pushes a packet to the queue.
     ///
     /// This method will wait if the queue is full (back-pressure).
     /// - Parameter packet: The packet to push.
     public func push(_ packet: FFmpegPacketData) async {
         guard !isClosed && !isSuspended else { return }
-        
+
         while packets.count >= maxSize && !isClosed && !isSuspended {
             let waiterID = UUID()
             await withTaskCancellationHandler {
@@ -38,9 +38,9 @@ public actor PacketQueue {
                 Task { await self.cancelProducer(waiterID) }
             }
         }
-        
+
         guard !isClosed && !isSuspended else { return }
-        
+
         if let (id, consumer) = waitingConsumers.first {
             waitingConsumers.removeFirst()
             _ = id
@@ -49,7 +49,7 @@ public actor PacketQueue {
             packets.append(packet)
         }
     }
-    
+
     /// Pops the next packet from the queue, waiting if empty.
     /// - Returns: The next packet, or `nil` if the queue is closed or suspended.
     public func pop() async -> FFmpegPacketData? {
@@ -61,11 +61,11 @@ public actor PacketQueue {
             }
             return packet
         }
-        
+
         if isClosed || isSuspended {
             return nil
         }
-        
+
         let waiterID = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -75,7 +75,7 @@ public actor PacketQueue {
             Task { await self.cancelConsumer(waiterID) }
         }
     }
-    
+
     /// Returns a packet from the queue without waiting.
     /// - Returns: The next packet, or `nil` if the queue is empty.
     public func tryPop() -> FFmpegPacketData? {
@@ -87,40 +87,40 @@ public actor PacketQueue {
         }
         return packet
     }
-    
+
     /// Closes the queue, waking all waiters.
     public func close() {
         isClosed = true
-        
+
         for (_, consumer) in waitingConsumers {
             consumer.resume(returning: nil)
         }
         waitingConsumers.removeAll()
-        
+
         for (_, producer) in waitingProducers {
             producer.resume()
         }
         waitingProducers.removeAll()
     }
-    
+
     /// Clears the queue and resets it for reuse.
     public func reset() {
         packets.removeAll()
         packets = []
         isClosed = false
         isSuspended = false
-        
+
         for (_, consumer) in waitingConsumers {
             consumer.resume(returning: nil)
         }
         waitingConsumers.removeAll()
-        
+
         for (_, producer) in waitingProducers {
             producer.resume()
         }
         waitingProducers.removeAll()
     }
-    
+
     private var waitingResumers: [(UUID, CheckedContinuation<Void, Never>)] = []
 
     /// Suspends the queue. Waiting operations will return immediately with `nil`.
@@ -135,7 +135,7 @@ public actor PacketQueue {
         }
         waitingProducers.removeAll()
     }
-    
+
     /// Resumes the queue.
     public func resume() {
         isSuspended = false
@@ -144,11 +144,11 @@ public actor PacketQueue {
         }
         waitingResumers.removeAll()
     }
-    
+
     /// Waits until the queue is resumed if it is currently suspended.
     public func waitUntilResumed() async {
         guard isSuspended else { return }
-        
+
         let waiterID = UUID()
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -162,17 +162,17 @@ public actor PacketQueue {
             Task { await self.cancelResumer(waiterID) }
         }
     }
-    
+
     /// Whether the queue is currently suspended.
     public var suspended: Bool {
         isSuspended
     }
-    
+
     /// The number of packets currently in the queue.
     public var count: Int {
         packets.count
     }
-    
+
     /// Whether the queue is closed.
     public var isClosedQueue: Bool {
         isClosed
@@ -182,7 +182,7 @@ public actor PacketQueue {
     public var isEmpty: Bool {
         packets.isEmpty
     }
-    
+
     /// Whether the queue is full.
     public var isFull: Bool {
         packets.count >= maxSize

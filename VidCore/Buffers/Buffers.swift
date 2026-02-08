@@ -22,18 +22,18 @@ import Foundation
 public enum Buffers: Sendable {
     /// Automatically detect decoder type and use appropriate buffer sizes.
     case auto
-    
+
     /// Conservative buffer sizes for software decoding.
     /// - Packet queue: 15 packets
     case software
-    
+
     /// Aggressive buffer sizes for hardware decoding.
     /// - Packet queue: 120 packets
     case hardware
-    
+
     /// Custom buffer sizes.
     case custom(frameBuffer: Int, packetQueue: Int)
-    
+
     /// Size of the packet queue in packets.
     public var packetQueueSize: Int {
         switch self {
@@ -48,7 +48,7 @@ public enum Buffers: Sendable {
             return packetQueue
         }
     }
-    
+
     /// Returns the appropriate buffer configuration based on hardware acceleration status.
     ///
     /// - Parameter isHardwareAccelerated: Whether hardware acceleration is available

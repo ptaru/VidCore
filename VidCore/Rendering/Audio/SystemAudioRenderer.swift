@@ -11,363 +11,365 @@ import CoreMedia
 import Foundation
 
 public actor SystemAudioRenderer: AudioRendering {
-  /// Whether AVSampleBufferAudioRenderer is supported in the current process.
-  public nonisolated static var isSupportedInCurrentProcess: Bool {
-    // AVSampleBufferAudioRenderer is not supported in app extensions (e.g. QuickLook).
-    Bundle.main.bundleURL.pathExtension != "appex"
-  }
-
-  /// Whether the environment variable to force AudioEngine fallback is set.
-  public nonisolated static var isForceFallbackEnabled: Bool {
-    let value = ProcessInfo.processInfo.environment["VIDCORE_FORCE_AUDIO_ENGINE"] ?? "0"
-    return value == "1" || value.lowercased() == "true"
-  }
-
-  /// The underlying system audio renderer.
-  public nonisolated let renderer: AVSampleBufferAudioRenderer?
-  /// Whether this renderer is enabled and functional.
-  public nonisolated let isEnabled: Bool
-  private let outputChannelCount: AVAudioChannelCount
-  private var hasLoggedOutputChannelWarning: Bool = false
-
-  private var cachedFormatDescription: CMAudioFormatDescription?
-  private var cachedFormatKey: String?
-
-  private let minCoalesceFrames: AVAudioFrameCount = 128
-  private let maxCoalesceFrames: AVAudioFrameCount = 256
-  private var pendingBuffer: AVAudioPCMBuffer?
-  private var pendingPTS: Double?
-  private var pendingFormatKey: String?
-  private var flushGeneration: Int = 0
-
-  /// Creates a new system audio renderer.
-  /// - Parameter enabled: Whether the renderer should be enabled.
-  public init(enabled: Bool = SystemAudioRenderer.isSupportedInCurrentProcess) {
-    self.isEnabled = enabled
-    let renderer = enabled ? AVSampleBufferAudioRenderer() : nil
-    self.renderer = renderer
-    let engine = AVAudioEngine()
-    self.outputChannelCount = engine.outputNode.outputFormat(forBus: 0).channelCount
-  }
-
-  /// Whether the renderer is ready to accept more audio data.
-  public nonisolated var isReadyForMoreMediaData: Bool {
-    renderer?.isReadyForMoreMediaData ?? false
-  }
-
-  /// Waits until the renderer is ready for more data.
-  /// - Returns: `true` if ready, `false` if interrupted/flushed.
-  public func waitUntilReady() async -> Bool {
-    let startGeneration = flushGeneration
-    while renderer?.isReadyForMoreMediaData == false {
-      if Task.isCancelled || flushGeneration != startGeneration { return false }
-      try? await Task.sleep(nanoseconds: 10_000_000)
+    /// Whether AVSampleBufferAudioRenderer is supported in the current process.
+    public nonisolated static var isSupportedInCurrentProcess: Bool {
+        // AVSampleBufferAudioRenderer is not supported in app extensions (e.g. QuickLook).
+        Bundle.main.bundleURL.pathExtension != "appex"
     }
-    return true
-  }
 
-  /// Flushes the audio renderer.
-  public func flush() async {
-    renderer?.flush()
-    pendingBuffer = nil
-    pendingPTS = nil
-    pendingFormatKey = nil
+    /// Whether the environment variable to force AudioEngine fallback is set.
+    public nonisolated static var isForceFallbackEnabled: Bool {
+        let value = ProcessInfo.processInfo.environment["VIDCORE_FORCE_AUDIO_ENGINE"] ?? "0"
+        return value == "1" || value.lowercased() == "true"
+    }
 
-    pendingFormatKey = nil
-    flushGeneration += 1
-  }
+    /// The underlying system audio renderer.
+    public nonisolated let renderer: AVSampleBufferAudioRenderer?
+    /// Whether this renderer is enabled and functional.
+    public nonisolated let isEnabled: Bool
+    private let outputChannelCount: AVAudioChannelCount
+    private var hasLoggedOutputChannelWarning: Bool = false
 
-  /// Sets the audio volume.
-  /// - Parameter volume: The volume level (0.0 to 1.0).
-  public nonisolated func setVolume(_ volume: Float) {
-    Task { await _setVolume(volume) }
-  }
+    private var cachedFormatDescription: CMAudioFormatDescription?
+    private var cachedFormatKey: String?
 
-  /// Enqueues an audio buffer for playback.
-  /// - Parameters:
-  ///   - buffer: The PCM buffer containing audio data.
-  ///   - pts: The presentation timestamp in seconds.
-  ///   - volume: The volume level for this buffer.
-  /// Enqueues an audio buffer for playback.
-  /// - Parameters:
-  ///   - buffer: The PCM buffer containing audio data.
-  ///   - pts: The presentation timestamp in seconds.
-  ///   - volume: The volume level for this buffer.
-  public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) async {
-    _enqueue(buffer, pts: pts, volume: volume)
-  }
+    private let minCoalesceFrames: AVAudioFrameCount = 128
+    private let maxCoalesceFrames: AVAudioFrameCount = 256
+    private var pendingBuffer: AVAudioPCMBuffer?
+    private var pendingPTS: Double?
+    private var pendingFormatKey: String?
+    private var flushGeneration: Int = 0
 
-  private func _setVolume(_ volume: Float) {
-    guard let renderer else { return }
-    let clamped = max(0.0, min(volume, 1.0))
-    renderer.volume = clamped
-  }
+    /// Creates a new system audio renderer.
+    /// - Parameter enabled: Whether the renderer should be enabled.
+    public init(enabled: Bool = SystemAudioRenderer.isSupportedInCurrentProcess) {
+        self.isEnabled = enabled
+        let renderer = enabled ? AVSampleBufferAudioRenderer() : nil
+        self.renderer = renderer
+        let engine = AVAudioEngine()
+        self.outputChannelCount = engine.outputNode.outputFormat(forBus: 0).channelCount
+    }
 
-  private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
-    // Volume control is handled by the renderer.volume property.
+    /// Whether the renderer is ready to accept more audio data.
+    public nonisolated var isReadyForMoreMediaData: Bool {
+        renderer?.isReadyForMoreMediaData ?? false
+    }
 
-    let bufferFormatKey = formatKey(for: buffer.format)
-    if buffer.frameLength < minCoalesceFrames {
-      if pendingFormatKey != bufferFormatKey {
-        flushPendingIfNeeded()
-      }
-      if pendingBuffer == nil {
-        pendingBuffer = makePendingBuffer(format: buffer.format)
-        pendingFormatKey = bufferFormatKey
-        pendingPTS = pts
-      }
-
-      if let pendingBuffer = pendingBuffer {
-        if let pendingPTS = pendingPTS {
-          let expectedNextPTS =
-            pendingPTS
-            + Double(pendingBuffer.frameLength) / buffer.format.sampleRate
-          let ptsTolerance = max(2.0 / buffer.format.sampleRate, 0.001)
-          if abs(pts - expectedNextPTS) > ptsTolerance {
-            enqueueDirect(pendingBuffer, pts: pendingPTS)
-            self.pendingBuffer = makePendingBuffer(format: buffer.format)
-            self.pendingPTS = pts
-            self.pendingFormatKey = bufferFormatKey
-          }
+    /// Waits until the renderer is ready for more data.
+    /// - Returns: `true` if ready, `false` if interrupted/flushed.
+    public func waitUntilReady() async -> Bool {
+        let startGeneration = flushGeneration
+        while renderer?.isReadyForMoreMediaData == false {
+            if Task.isCancelled || flushGeneration != startGeneration { return false }
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
+        return true
+    }
 
-        if append(buffer, to: pendingBuffer) {
-          if pendingBuffer.frameLength >= minCoalesceFrames
-            || pendingBuffer.frameLength >= maxCoalesceFrames
-          {
-            if let pendingPTS = pendingPTS {
-              enqueueDirect(pendingBuffer, pts: pendingPTS)
+    /// Flushes the audio renderer.
+    public func flush() async {
+        renderer?.flush()
+        pendingBuffer = nil
+        pendingPTS = nil
+        pendingFormatKey = nil
+
+        pendingFormatKey = nil
+        flushGeneration += 1
+    }
+
+    /// Sets the audio volume.
+    /// - Parameter volume: The volume level (0.0 to 1.0).
+    public nonisolated func setVolume(_ volume: Float) {
+        Task { await _setVolume(volume) }
+    }
+
+    /// Enqueues an audio buffer for playback.
+    /// - Parameters:
+    ///   - buffer: The PCM buffer containing audio data.
+    ///   - pts: The presentation timestamp in seconds.
+    ///   - volume: The volume level for this buffer.
+    /// Enqueues an audio buffer for playback.
+    /// - Parameters:
+    ///   - buffer: The PCM buffer containing audio data.
+    ///   - pts: The presentation timestamp in seconds.
+    ///   - volume: The volume level for this buffer.
+    public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) async {
+        _enqueue(buffer, pts: pts, volume: volume)
+    }
+
+    private func _setVolume(_ volume: Float) {
+        guard let renderer else { return }
+        let clamped = max(0.0, min(volume, 1.0))
+        renderer.volume = clamped
+    }
+
+    private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
+        // Volume control is handled by the renderer.volume property.
+
+        let bufferFormatKey = formatKey(for: buffer.format)
+        if buffer.frameLength < minCoalesceFrames {
+            if pendingFormatKey != bufferFormatKey {
+                flushPendingIfNeeded()
             }
-            self.pendingBuffer = nil
-            self.pendingPTS = nil
-            self.pendingFormatKey = nil
-          }
-          return
+            if pendingBuffer == nil {
+                pendingBuffer = makePendingBuffer(format: buffer.format)
+                pendingFormatKey = bufferFormatKey
+                pendingPTS = pts
+            }
+
+            if let pendingBuffer = pendingBuffer {
+                if let pendingPTS = pendingPTS {
+                    let expectedNextPTS =
+                        pendingPTS
+                        + Double(pendingBuffer.frameLength) / buffer.format.sampleRate
+                    let ptsTolerance = max(2.0 / buffer.format.sampleRate, 0.001)
+                    if abs(pts - expectedNextPTS) > ptsTolerance {
+                        enqueueDirect(pendingBuffer, pts: pendingPTS)
+                        self.pendingBuffer = makePendingBuffer(format: buffer.format)
+                        self.pendingPTS = pts
+                        self.pendingFormatKey = bufferFormatKey
+                    }
+                }
+
+                if append(buffer, to: pendingBuffer) {
+                    if pendingBuffer.frameLength >= minCoalesceFrames
+                        || pendingBuffer.frameLength >= maxCoalesceFrames
+                    {
+                        if let pendingPTS = pendingPTS {
+                            enqueueDirect(pendingBuffer, pts: pendingPTS)
+                        }
+                        self.pendingBuffer = nil
+                        self.pendingPTS = nil
+                        self.pendingFormatKey = nil
+                    }
+                    return
+                } else {
+                    if let pendingPTS = pendingPTS {
+                        enqueueDirect(pendingBuffer, pts: pendingPTS)
+                    }
+                    self.pendingBuffer = nil
+                    self.pendingPTS = nil
+                    self.pendingFormatKey = nil
+                }
+            }
         } else {
-          if let pendingPTS = pendingPTS {
-            enqueueDirect(pendingBuffer, pts: pendingPTS)
-          }
-          self.pendingBuffer = nil
-          self.pendingPTS = nil
-          self.pendingFormatKey = nil
+            flushPendingIfNeeded()
         }
-      }
-    } else {
-      flushPendingIfNeeded()
+
+        enqueueDirect(buffer, pts: pts)
     }
 
-    enqueueDirect(buffer, pts: pts)
-  }
+    private func enqueueDirect(_ buffer: AVAudioPCMBuffer, pts: Double) {
+        let renderBuffer = makeSystemRenderBuffer(buffer)
+        guard let formatDescription = makeFormatDescription(for: renderBuffer.format) else {
+            return
+        }
 
-  private func enqueueDirect(_ buffer: AVAudioPCMBuffer, pts: Double) {
-    let renderBuffer = makeSystemRenderBuffer(buffer)
-    guard let formatDescription = makeFormatDescription(for: renderBuffer.format) else { return }
+        let timeScale = CMTimeScale(max(1, Int32(renderBuffer.format.sampleRate)))
+        let presentationTime = CMTime(
+            seconds: pts,
+            preferredTimescale: timeScale
+        )
 
-    let timeScale = CMTimeScale(max(1, Int32(renderBuffer.format.sampleRate)))
-    let presentationTime = CMTime(
-      seconds: pts,
-      preferredTimescale: timeScale
-    )
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMAudioSampleBufferCreateWithPacketDescriptions(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: formatDescription,
+            sampleCount: CMItemCount(renderBuffer.frameLength),
+            presentationTimeStamp: presentationTime,
+            packetDescriptions: nil,
+            sampleBufferOut: &sampleBuffer
+        )
 
-    var sampleBuffer: CMSampleBuffer?
-    let status = CMAudioSampleBufferCreateWithPacketDescriptions(
-      allocator: kCFAllocatorDefault,
-      dataBuffer: nil,
-      dataReady: false,
-      makeDataReadyCallback: nil,
-      refcon: nil,
-      formatDescription: formatDescription,
-      sampleCount: CMItemCount(renderBuffer.frameLength),
-      presentationTimeStamp: presentationTime,
-      packetDescriptions: nil,
-      sampleBufferOut: &sampleBuffer
-    )
+        guard status == noErr, let sbuf = sampleBuffer else { return }
 
-    guard status == noErr, let sbuf = sampleBuffer else { return }
+        // Copy audio data into an owned CMBlockBuffer so the CMSampleBuffer is self-contained.
+        let copyStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
+            sbuf,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            bufferList: renderBuffer.audioBufferList
+        )
+        guard copyStatus == noErr else { return }
 
-    // Copy audio data into an owned CMBlockBuffer so the CMSampleBuffer is self-contained.
-    let copyStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
-      sbuf,
-      blockBufferAllocator: kCFAllocatorDefault,
-      blockBufferMemoryAllocator: kCFAllocatorDefault,
-      flags: 0,
-      bufferList: renderBuffer.audioBufferList
-    )
-    guard copyStatus == noErr else { return }
+        let readyStatus = CMSampleBufferSetDataReady(sbuf)
+        guard readyStatus == noErr else { return }
 
-    let readyStatus = CMSampleBufferSetDataReady(sbuf)
-    guard readyStatus == noErr else { return }
-
-    renderer?.enqueue(sbuf)
-  }
-
-  private func flushPendingIfNeeded() {
-    if let pendingBuffer = pendingBuffer, let pendingPTS = pendingPTS {
-      enqueueDirect(pendingBuffer, pts: pendingPTS)
-    }
-    pendingBuffer = nil
-    pendingPTS = nil
-    pendingFormatKey = nil
-  }
-
-  private func makePendingBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
-    AVAudioPCMBuffer(pcmFormat: format, frameCapacity: maxCoalesceFrames)
-  }
-
-  private func append(_ src: AVAudioPCMBuffer, to dst: AVAudioPCMBuffer) -> Bool {
-    guard formatsMatch(src.format, dst.format) else { return false }
-    let totalFrames = dst.frameLength + src.frameLength
-    guard totalFrames <= dst.frameCapacity else { return false }
-
-    let bytesPerFrame = Int(src.format.streamDescription.pointee.mBytesPerFrame)
-    let dstOffsetBytes = Int(dst.frameLength) * bytesPerFrame
-    let srcBytes = Int(src.frameLength) * bytesPerFrame
-
-    let srcBuffers = UnsafeMutableAudioBufferListPointer(
-      UnsafeMutablePointer(mutating: src.audioBufferList)
-    )
-    let dstBuffers = UnsafeMutableAudioBufferListPointer(dst.mutableAudioBufferList)
-    guard srcBuffers.count == dstBuffers.count else { return false }
-
-    for idx in 0..<srcBuffers.count {
-      let srcBuffer = srcBuffers[idx]
-      let dstBuffer = dstBuffers[idx]
-      guard let srcData = srcBuffer.mData, let dstData = dstBuffer.mData else { return false }
-      memcpy(dstData.advanced(by: dstOffsetBytes), srcData, srcBytes)
+        renderer?.enqueue(sbuf)
     }
 
-    dst.frameLength = totalFrames
-    return true
-  }
-
-  private func makeSystemRenderBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
-    let format = buffer.format
-    guard let channels = buffer.floatChannelData else { return buffer }
-
-    // Use Float32 Interleaved for better quality and format compatibility
-    let channelLayout = format.channelLayout
-    let interleavedFormat: AVAudioFormat?
-    if let channelLayout {
-      interleavedFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: format.sampleRate,
-        interleaved: true,
-        channelLayout: channelLayout
-      )
-    } else {
-      interleavedFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: format.sampleRate,
-        channels: format.channelCount,
-        interleaved: true
-      )
+    private func flushPendingIfNeeded() {
+        if let pendingBuffer = pendingBuffer, let pendingPTS = pendingPTS {
+            enqueueDirect(pendingBuffer, pts: pendingPTS)
+        }
+        pendingBuffer = nil
+        pendingPTS = nil
+        pendingFormatKey = nil
     }
 
-    guard let interleavedFormat else { return buffer }
-
-    guard
-      let interleavedBuffer = AVAudioPCMBuffer(
-        pcmFormat: interleavedFormat,
-        frameCapacity: buffer.frameCapacity
-      )
-    else {
-      return buffer
+    private func makePendingBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        AVAudioPCMBuffer(pcmFormat: format, frameCapacity: maxCoalesceFrames)
     }
 
-    interleavedBuffer.frameLength = buffer.frameLength
+    private func append(_ src: AVAudioPCMBuffer, to dst: AVAudioPCMBuffer) -> Bool {
+        guard formatsMatch(src.format, dst.format) else { return false }
+        let totalFrames = dst.frameLength + src.frameLength
+        guard totalFrames <= dst.frameCapacity else { return false }
 
-    let channelCount = Int(format.channelCount)
-    let frameCount = Int(buffer.frameLength)
-    let dstAudioBuffer = interleavedBuffer.mutableAudioBufferList.pointee.mBuffers
-    guard let dstData = dstAudioBuffer.mData else { return buffer }
+        let bytesPerFrame = Int(src.format.streamDescription.pointee.mBytesPerFrame)
+        let dstOffsetBytes = Int(dst.frameLength) * bytesPerFrame
+        let srcBytes = Int(src.frameLength) * bytesPerFrame
 
-    // Bind to Float instead of Int16
-    let dst = dstData.bindMemory(to: Float.self, capacity: frameCount * channelCount)
+        let srcBuffers = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: src.audioBufferList)
+        )
+        let dstBuffers = UnsafeMutableAudioBufferListPointer(dst.mutableAudioBufferList)
+        guard srcBuffers.count == dstBuffers.count else { return false }
 
-    // Use Accelerate for accelerated interleaving (copy with stride)
-    // This effectively interleaves the planar data by copying each channel to its strided position.
-    for ch in 0..<channelCount {
-      var zero: Float = 0
-      vDSP_vsadd(
-        channels[ch],
-        1,
-        &zero,
-        dst.advanced(by: ch),
-        channelCount,
-        vDSP_Length(frameCount)
-      )
+        for idx in 0..<srcBuffers.count {
+            let srcBuffer = srcBuffers[idx]
+            let dstBuffer = dstBuffers[idx]
+            guard let srcData = srcBuffer.mData, let dstData = dstBuffer.mData else { return false }
+            memcpy(dstData.advanced(by: dstOffsetBytes), srcData, srcBytes)
+        }
+
+        dst.frameLength = totalFrames
+        return true
     }
 
-    return interleavedBuffer
-  }
+    private func makeSystemRenderBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        let format = buffer.format
+        guard let channels = buffer.floatChannelData else { return buffer }
 
-  private func formatKey(for format: AVAudioFormat) -> String {
-    "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
-  }
+        // Use Float32 Interleaved for better quality and format compatibility
+        let channelLayout = format.channelLayout
+        let interleavedFormat: AVAudioFormat?
+        if let channelLayout {
+            interleavedFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: format.sampleRate,
+                interleaved: true,
+                channelLayout: channelLayout
+            )
+        } else {
+            interleavedFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: format.sampleRate,
+                channels: format.channelCount,
+                interleaved: true
+            )
+        }
 
-  private func formatsMatch(_ lhs: AVAudioFormat, _ rhs: AVAudioFormat) -> Bool {
-    lhs.sampleRate == rhs.sampleRate
-      && lhs.channelCount == rhs.channelCount
-      && lhs.commonFormat == rhs.commonFormat
-      && lhs.isInterleaved == rhs.isInterleaved
-  }
+        guard let interleavedFormat else { return buffer }
 
-  private func makeFormatDescription(for format: AVAudioFormat) -> CMAudioFormatDescription? {
-    guard isEnabled else { return nil }
-    let key =
-      "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
-    if key == cachedFormatKey, let cached = cachedFormatDescription {
-      return cached
+        guard
+            let interleavedBuffer = AVAudioPCMBuffer(
+                pcmFormat: interleavedFormat,
+                frameCapacity: buffer.frameCapacity
+            )
+        else {
+            return buffer
+        }
+
+        interleavedBuffer.frameLength = buffer.frameLength
+
+        let channelCount = Int(format.channelCount)
+        let frameCount = Int(buffer.frameLength)
+        let dstAudioBuffer = interleavedBuffer.mutableAudioBufferList.pointee.mBuffers
+        guard let dstData = dstAudioBuffer.mData else { return buffer }
+
+        // Bind to Float instead of Int16
+        let dst = dstData.bindMemory(to: Float.self, capacity: frameCount * channelCount)
+
+        // Use Accelerate for accelerated interleaving (copy with stride)
+        // This effectively interleaves the planar data by copying each channel to its strided position.
+        for ch in 0..<channelCount {
+            var zero: Float = 0
+            vDSP_vsadd(
+                channels[ch],
+                1,
+                &zero,
+                dst.advanced(by: ch),
+                channelCount,
+                vDSP_Length(frameCount)
+            )
+        }
+
+        return interleavedBuffer
     }
 
-    let asbd = format.streamDescription.pointee
-    var desc: CMAudioFormatDescription?
+    private func formatKey(for format: AVAudioFormat) -> String {
+        "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
+    }
 
-    if let layout = format.channelLayout?.layout.pointee {
-      var asbdCopy = asbd
-      var layoutCopy = layout
-      let status = CMAudioFormatDescriptionCreate(
-        allocator: kCFAllocatorDefault,
-        asbd: &asbdCopy,
-        layoutSize: MemoryLayout<AudioChannelLayout>.size,
-        layout: &layoutCopy,
-        magicCookieSize: 0,
-        magicCookie: nil,
-        extensions: nil,
-        formatDescriptionOut: &desc
-      )
-      guard status == noErr else {
+    private func formatsMatch(_ lhs: AVAudioFormat, _ rhs: AVAudioFormat) -> Bool {
+        lhs.sampleRate == rhs.sampleRate
+            && lhs.channelCount == rhs.channelCount
+            && lhs.commonFormat == rhs.commonFormat
+            && lhs.isInterleaved == rhs.isInterleaved
+    }
+
+    private func makeFormatDescription(for format: AVAudioFormat) -> CMAudioFormatDescription? {
+        guard isEnabled else { return nil }
+        let key =
+            "\(format.sampleRate)-\(format.channelCount)-\(format.commonFormat.rawValue)-\(format.isInterleaved)"
+        if key == cachedFormatKey, let cached = cachedFormatDescription {
+            return cached
+        }
+
+        let asbd = format.streamDescription.pointee
+        var desc: CMAudioFormatDescription?
+
+        if let layout = format.channelLayout?.layout.pointee {
+            var asbdCopy = asbd
+            var layoutCopy = layout
+            let status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbdCopy,
+                layoutSize: MemoryLayout<AudioChannelLayout>.size,
+                layout: &layoutCopy,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &desc
+            )
+            guard status == noErr else {
+                return nil
+            }
+        } else {
+            var asbdCopy = asbd
+            let status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbdCopy,
+                layoutSize: 0,
+                layout: nil,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &desc
+            )
+            guard status == noErr else {
+                return nil
+            }
+        }
+
+        cachedFormatKey = key
+        cachedFormatDescription = desc
+        return desc
+    }
+
+    /// Updates the playback state (no-op for system renderer as it follows the synchronizer).
+    public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
+        // State is managed externally by PlaybackClock.
+    }
+
+    /// Returns the PTS currently being played (always nil for system renderer).
+    public func currentPlaybackPTS() async -> Double? {
         return nil
-      }
-    } else {
-      var asbdCopy = asbd
-      let status = CMAudioFormatDescriptionCreate(
-        allocator: kCFAllocatorDefault,
-        asbd: &asbdCopy,
-        layoutSize: 0,
-        layout: nil,
-        magicCookieSize: 0,
-        magicCookie: nil,
-        extensions: nil,
-        formatDescriptionOut: &desc
-      )
-      guard status == noErr else {
-        return nil
-      }
     }
-
-    cachedFormatKey = key
-    cachedFormatDescription = desc
-    return desc
-  }
-
-  /// Updates the playback state (no-op for system renderer as it follows the synchronizer).
-  public nonisolated func setPlaybackState(isPlaying: Bool, rate: Double) {
-    // State is managed externally by PlaybackClock.
-  }
-
-  /// Returns the PTS currently being played (always nil for system renderer).
-  public func currentPlaybackPTS() async -> Double? {
-    return nil
-  }
 }

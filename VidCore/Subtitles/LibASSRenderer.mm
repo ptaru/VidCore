@@ -50,13 +50,7 @@ extern "C" {
       return nil;
     }
 
-    // Configure font provider (CoreText via libass-coretext would be ideal, but
-    // for now relies on fontconfig or default) Since we disabled system font
-    // provider mostly in build, we might need to set default fonts or fonts
-    // dir. For simplicity in this step, we let libass use its internal defaults
-    // or FontConfig if available. In a real iOS/macOS app without fontconfig,
-    // we'd need to provide a custom callback, but let's assume standard
-    // behavior for now.
+    // Configure fonts (autodetect provider, sans-serif fallback).
     ass_set_fonts(_assRenderer, NULL, "sans-serif", ASS_FONTPROVIDER_AUTODETECT,
                   NULL, 1);
 
@@ -115,19 +109,13 @@ extern "C" {
   if (!data || data.length == 0)
     return;
 
-  // NSString *dataStr = [[NSString alloc] initWithData:data
-  // encoding:NSUTF8StringEncoding];
-
   dispatch_async(_renderQueue, ^{
     char *entry = (char *)data.bytes;
     int len = (int)data.length;
 
     // Check if it starts with a digit (Layer/ReadOrder)
     if (len > 0 && isdigit(entry[0])) {
-      // Matroska/FFmpeg usually provides: "Layer,ReadOrder?,Style,Name,..."
-      // Or "Layer,0,Style,..." where 0 is placeholder for timestamps?
-      // Header Format: Layer, Start, End, Style, Name, ...
-      // We need to construct: "Dialogue: Layer,Start,End,Style,Name,..."
+      // Convert Matroska ASS packets to "Dialogue: Layer,Start,End,Style,..."
 
       // Parse the first two fields
       NSString *rawStr = [[NSString alloc] initWithData:data
@@ -140,9 +128,7 @@ extern "C" {
       if (firstComma.location != NSNotFound) {
         NSString *layerStr = [rawStr substringToIndex:firstComma.location];
 
-        // Search for second comma to find where Style starts
-        // We want to skip the field between 1st and 2nd comma (the '0'
-        // placeholder)
+        // Skip the ReadOrder placeholder between the first two commas.
         NSRange searchRange = NSMakeRange(
             firstComma.location + 1, rawStr.length - (firstComma.location + 1));
         NSRange secondComma = [rawStr rangeOfString:@","
@@ -254,9 +240,7 @@ extern "C" {
         ass_render_frame(self->_assRenderer, self->_assTrack, now_ms, &changed);
     self->_lastRenderChanged = changed;
 
-    // Performance optimization: If nothing changed and we have a cached image,
-    // return it. changed == 0: no change changed == 1: positions changed (e.g.
-    // scrolling) changed == 2: content changed
+    // Reuse cached image when libass reports no changes.
     if (!changed && self->_cachedImage && !sizeChanged) {
       resultImage = CGImageRetain(self->_cachedImage);
       return;
@@ -285,8 +269,7 @@ extern "C" {
       memset(self->_pixelBuffer, 0, newSize);
     }
 
-    // Manual blending loop: much faster than multiple CoreGraphics masking
-    // calls
+    // Blend ASS images into an RGBA buffer.
     ASS_Image *curr = img;
     while (curr) {
       if (curr->w > 0 && curr->h > 0) {
@@ -317,19 +300,12 @@ extern "C" {
                 continue;
               }
 
-              // Combine libass opacity (from style/tags) with bitmap alpha
-              // (from font rendering/blur)
+              // Combine libass opacity with bitmap alpha.
               uint32_t final_alpha = (src_alpha * a) / 255;
-
-              // Blending: dst = src * alpha + dst * (1 - alpha)
-              // We use kCGImageAlphaPremultipliedLast for the output image.
-              // So we need to store (r*alpha, g*alpha, b*alpha, alpha).
 
               uint8_t *dst_pixel = dst_line;
               uint32_t inv_alpha = 255 - final_alpha;
 
-              // This is standard alpha blending into a buffer.
-              // Premultiply source for later use in context.
               uint32_t pr = (r * final_alpha) / 255;
               uint32_t pg = (g * final_alpha) / 255;
               uint32_t pb = (b * final_alpha) / 255;
