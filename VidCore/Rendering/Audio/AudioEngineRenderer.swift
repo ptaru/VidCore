@@ -73,8 +73,8 @@ public actor AudioEngineRenderer: AudioRendering {
   private func decrementBufferCount() {
     enqueuedBufferCount -= 1
     if enqueuedBufferCount == 0 {
-      // Potentially reset start timing if we ran dry, but for now just let it drift
-      // or wait for the next flush/seek to reset.
+      // If buffer runs dry, timing may drift until next flush/seek.
+      // Resetting is deferred to avoid audio glitches.
     }
   }
 

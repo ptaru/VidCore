@@ -81,10 +81,8 @@ extension VideoPlayer {
     let track = subtitleTracks[index]
 
     // Switch track in decoder
-    // Note: We don't necessarily need to seek if we just want to start showing from now,
-    // but seeking ensures we get the current subtitle if we are in the middle of one.
-    // For now, let's just switch lightly without full seek-reset cycle unless needed.
-
+    // Switching tracks without a full seek avoids re-buffering but may miss
+    // correct subtitle display until the next segment if currently mid-subtitle.
     let success = await decoder.switchSubtitleTrack(to: track.streamIndex)
     if success {
       selectedSubtitleTrackIndex = index

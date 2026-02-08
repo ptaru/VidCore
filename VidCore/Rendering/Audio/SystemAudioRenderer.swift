@@ -56,7 +56,7 @@ public actor SystemAudioRenderer: AudioRendering {
 
   /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
-    // The previously complex logic to wait for readiness has been removed as unnecessary.
+
     // AVSampleBufferAudioRenderer manages its own readiness or we accept potential drops if not ready.
   }
 

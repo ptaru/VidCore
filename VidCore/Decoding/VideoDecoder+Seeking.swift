@@ -7,63 +7,49 @@ import CoreMedia
 import Foundation
 
 extension VideoDecoder {
-  /// Seeks to a specific time in the video.
+  /// Asynchronously seeks to a specific time in the video.
+  ///
+  /// This method handles both normal FFmpeg decoding and hardware passthrough seeking.
+  /// It flushes internal buffers and prepares the decoder for the new timeline.
+  ///
   /// - Parameter seconds: The target time in seconds.
-  /// - Returns: The first video frame at or after the seek target, or `nil`.
-  /// - Throws: An error if the seek operation fails.
+  /// - Returns: The first `VideoFrame` at or after the seek target, or `nil` if seeking fails or no frame is found.
+  /// - Throws: An error if the seek operation fails (e.g., invalid time, I/O error).
   public func seek(to seconds: Double) async throws -> VideoFrame? {
-    try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<VideoFrame?, Error>) in
-      demuxQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: nil)
-          return
-        }
+    // Acquire lock to check state
+    stateLock.lock()
+    guard !isClosed else {
+        stateLock.unlock()
+        return nil
+    }
+    stateLock.unlock()
 
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        // Dispatch based on available decoder
-        if self.hardwareDecodeMode == .passThrough, self.sampleBufferBuilder != nil {
-          do {
-            let frame = try self.seekPassthrough(to: seconds)
-            continuation.resume(returning: frame)
-          } catch {
-            continuation.resume(throwing: error)
-          }
-        } else if self.decoder != nil {
-          do {
-            let frame = try self.seekFFmpeg(to: seconds)
-            continuation.resume(returning: frame)
-          } catch {
-            continuation.resume(throwing: error)
-          }
-        } else {
-          continuation.resume(
-            throwing: NSError(
-              domain: "VideoDecoder", code: -3,
-              userInfo: [NSLocalizedDescriptionKey: "Seek failed - decoder unavailable"]))
-        }
-      }
+    // Dispatch based on available decoder
+    if self.hardwareDecodeMode == .passThrough, self.sampleBufferBuilder != nil {
+      return try await self.seekPassthrough(to: seconds)
+    } else if self.decoderActor != nil {
+      return try await self.seekFFmpeg(to: seconds)
+    } else {
+      throw NSError(
+          domain: "VideoDecoder", code: -3,
+          userInfo: [NSLocalizedDescriptionKey: "Seek failed - decoder unavailable"])
     }
   }
 
-  private func seekPassthrough(to seconds: Double) throws -> VideoFrame? {
-    guard let demuxer = self.demuxer, let builder = self.sampleBufferBuilder else { return nil }
+  private func seekPassthrough(to seconds: Double) async throws -> VideoFrame? {
+    guard let builder = self.sampleBufferBuilder else { return nil }
 
-    // Clear pending packets
+    stateLock.lock()
+    // Clear pending packets locally
     self.pendingContextRestorationPackets.removeAll()
+    stateLock.unlock()
 
     // Passthrough path: use demuxer for seeking and getting packets
     // Flush decoder to reset internal state (critical for audio PTS monotonicity reset)
-    self.decoder?.flushCodecBuffers()
+    await self.decoderActor?.flushCodecBuffers()
 
-    guard demuxer.seek(toKeyframe: seconds) else {
+    let seekSuccess = await demuxerActor.seek(toKeyframe: seconds)
+    guard seekSuccess else {
       throw NSError(
         domain: "VideoDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - seek error"])
@@ -71,7 +57,7 @@ extension VideoDecoder {
 
     // Collect packets from demuxer
     // Always collect until target for accurate seek
-    guard let packets = demuxer.collectPackets(until: seconds), !packets.isEmpty else {
+    guard let packets = await demuxerActor.collectPackets(until: seconds), !packets.isEmpty else {
       throw NSError(
         domain: "VideoDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packets"])
@@ -107,11 +93,13 @@ extension VideoDecoder {
         targetPacket = firstAfterTarget ?? lastPacket
       }
 
+      stateLock.lock()
       if let targetPacket, targetPacket.isKeyframe {
         self.pendingContextRestorationPackets = packets.filter { $0 !== targetPacket }
       } else {
         self.pendingContextRestorationPackets = packets
       }
+      stateLock.unlock()
 
       guard let packet = targetPacket else {
         throw NSError(
@@ -119,6 +107,10 @@ extension VideoDecoder {
           userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packet found"])
       }
 
+      // Convert demuxer packet to usable data for sample buffer
+      // Note: original code used packet.data directly from FFmpegDemuxerPacket.
+      // Safe to use here as long as we hold the reference.
+      
       let sampleBuffer = try builder.createSampleBuffer(
         from: packet.data,
         pts: packet.pts,
@@ -144,15 +136,16 @@ extension VideoDecoder {
       userInfo: [NSLocalizedDescriptionKey: "Seek failed - passthrough only path"])
   }
 
-  private func seekFFmpeg(to seconds: Double) throws -> VideoFrame? {
-    guard let demuxer = self.demuxer, let decoder = self.decoder else { return nil }
+  private func seekFFmpeg(to seconds: Double) async throws -> VideoFrame? {
+    guard let decoderActor = self.decoderActor else { return nil }
 
     // Non-passthrough path: use demuxer to seek, decoder to decode
 
     // Flush decoder buffers to clear state (fix for replay issues)
-    decoder.flushCodecBuffers()
+    await decoderActor.flushCodecBuffers()
 
-    guard demuxer.seek(toKeyframe: seconds) else {
+    let seekSuccess = await demuxerActor.seek(toKeyframe: seconds)
+    guard seekSuccess else {
       throw NSError(
         domain: "VideoDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed"])
@@ -163,60 +156,60 @@ extension VideoDecoder {
     var packetCount = 0
     let maxPackets = 200  // Safety break
 
-    func decodeVideoPacket(_ demuxerPacket: FFmpegDemuxerPacket) -> Bool {
-      guard demuxerPacket.isVideo else { return false }
-      packetCount += 1
-      let packet = self.convertPacket(demuxerPacket)
-
-      if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
-        for ffmpegFrame in ffmpegFrames {
-          let framePTS = ffmpegFrame.presentationTime
-
-          // Always wait for target (accurate seek)
-          if framePTS >= seconds - 0.05 {
-            if let frame = self.makeVideoFrame(
-              pixelBuffer: ffmpegFrame.pixelBuffer,
-              presentationTime: framePTS,
-              doviProfile: Int(ffmpegFrame.doviProfile),
-              ambientLightMetadata: ffmpegFrame.ambientLightMetadata
-            ) {
-              foundFrame = frame
-              return true
-            }
-          }
-        }
-      }
-      return false
-    }
-
-    // Prime audio packets near the seek target for faster audio resume.
-    if let initialPackets = demuxer.collectPackets(until: seconds) {
+    // Pre-collect audio
+    if let initialPackets = await demuxerActor.collectPackets(until: seconds) {
       for demuxerPacket in initialPackets {
-        let shouldStop = autoreleasepool {
-          if packetCount >= maxPackets { return true }
-          if decodeVideoPacket(demuxerPacket) { return true }
-          return false
+        if packetCount >= maxPackets { break }
+        
+        if demuxerPacket.isVideo {
+            packetCount += 1
+            let packet = self.convertPacket(demuxerPacket)
+            if let ffmpegFrames = await decoderActor.decodeVideoPacket(withAllFrames: packet) {
+                for ffmpegFrame in ffmpegFrames {
+                   let framePTS = ffmpegFrame.presentationTime
+                   if framePTS >= seconds - 0.05 {
+                        if let frame = self.makeVideoFrame(
+                          pixelBuffer: ffmpegFrame.pixelBuffer,
+                          presentationTime: framePTS,
+                          doviProfile: Int(ffmpegFrame.doviProfile),
+                          ambientLightMetadata: ffmpegFrame.ambientLightMetadata
+                        ) {
+                          foundFrame = frame
+                          break
+                        }
+                   }
+                }
+            }
         }
-        if shouldStop { break }
+        if foundFrame != nil { break }
       }
     }
 
     while packetCount < maxPackets, foundFrame == nil {
-      let shouldStop = autoreleasepool { () -> Bool in
-        // Read next packet directly
-        guard let demuxerPacket = demuxer.demuxNextPacket() else {
-          return true  // EOF
+        if let demuxerPacket = await demuxerActor.demuxNextPacket() {
+             if demuxerPacket.isVideo {
+                packetCount += 1
+                let packet = self.convertPacket(demuxerPacket)
+                if let ffmpegFrames = await decoderActor.decodeVideoPacket(withAllFrames: packet) {
+                    for ffmpegFrame in ffmpegFrames {
+                       let framePTS = ffmpegFrame.presentationTime
+                       if framePTS >= seconds - 0.05 {
+                            if let frame = self.makeVideoFrame(
+                              pixelBuffer: ffmpegFrame.pixelBuffer,
+                              presentationTime: framePTS,
+                              doviProfile: Int(ffmpegFrame.doviProfile),
+                              ambientLightMetadata: ffmpegFrame.ambientLightMetadata
+                            ) {
+                              foundFrame = frame
+                              break
+                            }
+                       }
+                    }
+                }
+             }
+        } else {
+            break // EOF
         }
-
-        if decodeVideoPacket(demuxerPacket) {
-          return true
-        }
-        return false
-      }
-
-      if shouldStop {
-        break
-      }
     }
 
     if let frame = foundFrame {

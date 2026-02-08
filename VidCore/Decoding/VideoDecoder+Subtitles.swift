@@ -9,7 +9,7 @@ import Foundation
 extension VideoDecoder {
   /// Whether the currently selected subtitle track is ASS/SSA.
   public var isCurrentSubtitleTrackASS: Bool {
-    return assPipeline.isASSActive(for: demuxer)
+    return self.isASSActive // Uses the thread-safe property on VideoDecoder
   }
 
   /// Renders the subtitle image for a specific time and size.
@@ -33,34 +33,30 @@ extension VideoDecoder {
 
   /// Resets the subtitle rendering state.
   public func resetSubtitleState() async {
-    await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume()
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed else {
-          continuation.resume()
-          return
-        }
-
-        self.assPipeline.reset(flush: true)
-
-        if let demuxer = self.demuxer {
-          let index = demuxer.selectedSubtitleStreamIndex()
-          if index >= 0,
-             let config = demuxer.getSubtitleDecoderConfig(forStream: index) {
-            self.assPipeline.configureHeaderIfNeeded(from: config)
-          }
-        }
-
-        continuation.resume()
-      }
+    // Acquire state lock for safe modification of _isASSActive if needed, 
+    // although assPipeline is internal logic.
+    stateLock.lock()
+    if isClosed {
+        stateLock.unlock()
+        return
     }
+    stateLock.unlock()
+    
+    // Reset pipeline synchronously (class logic)
+    self.assPipeline.reset(flush: true)
+
+    // Re-configure based on selected stream from demuxer actor
+    let index = await demuxerActor.selectedSubtitleStreamIndex()
+    if index >= 0 {
+         if let config = await demuxerActor.getSubtitleDecoderConfig(forStream: index) {
+            self.assPipeline.configureHeaderIfNeeded(from: config)
+         }
+    }
+    
+    // Update active cache
+    stateLock.lock()
+    self._isASSActive = (self.assRenderer != nil)
+    stateLock.unlock()
   }
 
   /// Cleans ASS/SSA formatted subtitle text.
@@ -70,19 +66,8 @@ extension VideoDecoder {
     // 1. Remove ASS event prefix (comma-separated fields)
     // Heuristic: If we find 8 or more commas at the start, drop them.
     // Standard format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-    // User reported 8 commas: 14,0,Default,,0,0,0,,Text
-    // We'll look for the first 8 or 9 fields.
-    // Pattern: at least 8 groups of "something," at the start.
-    // Use simple comma counting to be robust.
-
     let parts = cleaned.split(separator: ",", maxSplits: 10, omittingEmptySubsequences: false)
-    if parts.count >= 9 {  // 8 commas implies 9 parts
-      // Check if the first few parts look like metadata (digits, known styles)
-      // Or just blindly take the 9th part (index 8) onwards.
-      // Given "14,0,Default,,0,0,0,,Text", the text is parts[8...] joined back.
-      // Or simply find the 8th comma index.
-
-      // Let's count commas to find the cut point.
+    if parts.count >= 9 {
       var commaCount = 0
       var cutIndex: String.Index?
 
@@ -90,18 +75,10 @@ extension VideoDecoder {
         if char == "," {
           commaCount += 1
           if commaCount == 8 {
-            // Found the 8th comma. The text likely starts after this.
             let nextIndex = cleaned.index(cleaned.startIndex, offsetBy: index + 1)
             if nextIndex < cleaned.endIndex {
               cutIndex = nextIndex
             }
-            // Keep checking if 9th comma exists? (Standard is 9)
-            // But user log shows 8 commas. The last field (Text) contains the content.
-            // If we cut after 8th comma: "I will make it happen."
-            // If we wait for 9th, we might cut into text if user source is non-standard.
-            // A safe heuristic involves checking what these fields are, but stripped is better.
-            // Let's settle on stripping first 8 fields (8 commas).
-            // But wait, if text has commas, simple split won't work perfectly if we don't limit splits?
             break
           }
         }

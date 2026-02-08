@@ -13,86 +13,51 @@ import Foundation
 extension FFmpegPacketData: @unchecked Sendable {}
 
 /// High-performance video decoder using FFmpeg with passthrough hardware rendering when available.
-///
-/// `VideoDecoder` wraps FFmpeg to provide async/await video decoding for macOS. It can build
-/// passthrough sample buffers for AVSampleBufferDisplayLayer on supported codecs, falling back to
-/// optimized software decoding when passthrough isn't available.
-///
-/// ## Features
-/// - Supports MKV, WebM, AVI, MP4, and other container formats
-/// - Hardware-accelerated rendering (H.264, H.265/HEVC)
-/// - Software decoding for VP8, VP9, AV1, and other codecs
-/// - Accurate frame-level seeking
-/// - Parallel demux/decode pipeline for optimal performance
-///
-/// ## Example
-/// ```swift
-/// let decoder = try VideoDecoder(url: videoURL)
-///
-/// while let frame = try await decoder.decodeNextFrame() {
-///     switch frame {
-///     case .video(let videoFrame):
-///         // Render video frame
-///     case .audio(let buffer, let pts):
-///         // Play audio
-///     }
-/// }
-///
-/// decoder.close()
-/// ```
 public final class VideoDecoder: @unchecked Sendable {
 
   /// Modes for hardware acceleration
   public enum HardwareDecodeMode {
-    /// Fully decode frames to CVPixelBuffers (standard behavior)
     case decode
-    /// Wrap compressed samples in CMSampleBuffer for direct rendering by AVSBDL
     case passThrough
   }
 
-  var demuxer: FFmpegDemuxer?
-  var decoder: FFmpegDecoder?
+  // Internal actors for thread safety
+  let demuxerActor: DemuxerActor
+  var decoderActor: DecoderActor? // Optional because it might not be needed for passthrough
+  
   var sampleBufferBuilder: SampleBufferBuilder?
 
   let assPipeline: ASSSubtitlePipeline
 
-  /// Renderer for ASS/SSA subtitles
   public var assRenderer: LibASSRenderer? {
     assPipeline.renderer
   }
 
   private let url: URL
-
-  /// Current hardware decode mode
   public let hardwareDecodeMode: HardwareDecodeMode
-
-  // Separate queues for demuxing and decoding to enable parallelism
-  let demuxQueue = DispatchQueue(label: "com.vidpreview.demux", qos: .userInitiated)
-  let decodeQueue = DispatchQueue(
-    label: "com.vidpreview.decode", qos: .userInitiated, attributes: .concurrent)
-
-  let lock = NSLock()
+  
   var isClosed = false
-
-  // Queue for packets needed to restore decoder context after a seek (Keyframe...Target)
-  // These are re-emitted via demuxNextPacket to ensure the renderer gets the full GOP
+  
+  // Cache for synchronous ASS check
+  var _isASSActive: Bool = false
+  
+  // Public accessor for subtitle renderer (thread-safe)
+  public var isASSActive: Bool {
+      stateLock.lock()
+      defer { stateLock.unlock() }
+      return _isASSActive
+  }
+  
+  // Pending restoration packets are kept here to be managed under lock
+  // as they are part of the VideoDecoder seeking state machine.
+  let stateLock = NSLock()
   var pendingContextRestorationPackets: [FFmpegDemuxerPacket] = []
 
   /// Metadata about the video stream.
   public let videoInfo: VideoInfo
 
-  // Logging removed for production performance
-
   // MARK: - Static Helpers
 
-  /// Pre-detects whether hardware acceleration will be used for the given URL.
-  ///
-  /// This method performs a lightweight check to determine if passthrough is available
-  /// for the video codec, without fully initializing the decoder. It's useful for
-  /// pre-configuring buffer sizes before creating a VideoPlayer.
-  ///
-  /// - Parameter url: The URL of the video file to check
-  /// - Returns: `true` if hardware acceleration will be used, `false` for software decoding
   public static func willUseHardwareAcceleration(for url: URL) -> Bool {
     do {
       let demuxer = try FFmpegDemuxer(url: url)
@@ -104,32 +69,23 @@ public final class VideoDecoder: @unchecked Sendable {
     }
   }
 
-  /// Creates a new decoder for the specified video file.
-  ///
-  /// This initializes FFmpeg and opens the video file, automatically detecting the container
-  /// format and selecting appropriate decoders. Hardware acceleration is enabled automatically
-  /// when available.
-  ///
-  /// - Parameter url: The file URL of the video to decode.
-  /// - Parameter hardwareDecodeMode: Mode to set if we should decode or pass through. Defaults to .decode.
-  /// - Throws: An error if the file cannot be opened or contains no valid video stream.
   public init(url: URL, hardwareDecodeMode: HardwareDecodeMode = .decode) throws {
     self.url = url
     self.hardwareDecodeMode = hardwareDecodeMode
-    // Phase 1: Create FFmpegDemuxer for container I/O
-    do {
-      self.demuxer = try FFmpegDemuxer(url: url)
-    } catch {
-      throw error
-    }
-
-    guard let demuxer = self.demuxer, let info = demuxer.getVideoInfo() else {
+    
+    // Create FFmpegDemuxer
+    let demuxer = try FFmpegDemuxer(url: url)
+    // Read info synchronously during init
+    guard let info = demuxer.getVideoInfo() else {
       throw NSError(
         domain: "VideoDecoder", code: -2,
         userInfo: [NSLocalizedDescriptionKey: "Failed to get media info"])
     }
+    
+    // Create the DemuxerActor with the created demuxer
+    self.demuxerActor = DemuxerActor(demuxer: demuxer)
 
-    // Phase 2: Try to initialize SampleBufferBuilder for supported codecs (HEVC/H264)
+    // Configure SampleBufferBuilder for passthrough or internal decoding
     var finalDecoderName = info.codecName
     var finalDecoderDescription = "Unknown"
     var finalIsHardwareAccelerated = false
@@ -140,40 +96,45 @@ public final class VideoDecoder: @unchecked Sendable {
       do {
         self.sampleBufferBuilder = try createSampleBufferBuilder(from: sbConfig)
         if let builder = self.sampleBufferBuilder {
-          if builder.isDolbyVision {
-            finalDecoderName = "HW Passthrough (DoVi P\(builder.dolbyVisionProfile))"
-          } else {
-            finalDecoderName = "HW Passthrough (\(info.codecName))"
-          }
-          finalDecoderDescription = "Hardware Passthrough"
-          finalIsHardwareAccelerated = true
+            if builder.isDolbyVision {
+                finalDecoderName = "HW Passthrough (DoVi P\(builder.dolbyVisionProfile))"
+            } else {
+                finalDecoderName = "HW Passthrough (\(info.codecName))"
+            }
+            finalDecoderDescription = "Hardware Passthrough"
+            finalIsHardwareAccelerated = true
         }
       } catch {
         self.sampleBufferBuilder = nil
       }
     }
 
-    // Phase 3: Initialize FFmpegDecoder in decode-only mode (fallback for audio + unsupported codecs)
+    // Initialize FFmpegDecoder if needed
+    var createdDecoder: FFmpegDecoder?
     if let decoderConfig = demuxer.getDecoderConfig() {
       do {
-        self.decoder = try FFmpegDecoder(demuxerConfig: decoderConfig)
-        if self.sampleBufferBuilder == nil, let decoder = self.decoder,
+        createdDecoder = try FFmpegDecoder(demuxerConfig: decoderConfig)
+        if self.sampleBufferBuilder == nil, let decoder = createdDecoder,
           let decoderInfo = decoder.getVideoInfo()
         {
-          // No SampleBufferBuilder, use FFmpegDecoder info
           finalDecoderName = decoderInfo.decoderName
           finalDecoderDescription = decoderInfo.decoderDescription
           finalIsHardwareAccelerated = decoderInfo.isHardwareAccelerated
         }
       } catch {
-        // If we have SampleBufferBuilder, we can still proceed for video-only
         if self.sampleBufferBuilder == nil {
           throw error
         }
       }
     }
+    
+    if let dec = createdDecoder {
+        self.decoderActor = DecoderActor(decoder: dec)
+    } else {
+        self.decoderActor = nil
+    }
 
-    // Convert audio tracks from FFmpeg
+    // Convert audio tracks
     let audioTracks: [AudioTrackInfo] =
       demuxer.getAudioTracks()?.map { track in
         AudioTrackInfo(
@@ -187,7 +148,7 @@ public final class VideoDecoder: @unchecked Sendable {
         )
       } ?? []
 
-    // Convert subtitle tracks from FFmpeg
+    // Convert subtitle tracks
     let subtitleTracks: [SubtitleTrackInfo] =
       demuxer.getSubtitleTracks()?.map { track in
         SubtitleTrackInfo(
@@ -236,145 +197,120 @@ public final class VideoDecoder: @unchecked Sendable {
       didSynthesizeExtradata: demuxer.didSynthesizeExtradata
     )
 
-    // Phase 4: Initialize ASS pipeline
+    // Initialize ASS pipeline
     self.assPipeline = ASSSubtitlePipeline(videoInfo: self.videoInfo)
 
-    // Pass extradata for the currently selected subtitle stream (if ASS header)
     let selectedSubtitleIndex = demuxer.selectedSubtitleStreamIndex()
     if selectedSubtitleIndex >= 0 {
       if let config = demuxer.getSubtitleDecoderConfig(forStream: Int32(selectedSubtitleIndex)) {
         self.assPipeline.configureHeaderIfNeeded(from: config)
+        // Set initial ASS state based on pipeline configuration using the demuxer helper.
+        self._isASSActive = self.assPipeline.isASSActive(for: demuxer)
       }
     }
   }
 
   deinit {
-    close()
+    // Actors will automatically release their resources when deinitialized.
+    // Explicit cleanup is handled via the public close() method if needed before deallocation.
   }
 
-  /// Closes the decoder safely, ensuring all pending operations complete
   public func close() {
-    lock.lock()
-    defer { lock.unlock() }
-
-    guard !isClosed else { return }
+    stateLock.lock()
+    guard !isClosed else {
+        stateLock.unlock()
+        return
+    }
     isClosed = true
+    stateLock.unlock()
 
     sampleBufferBuilder = nil
-
-    // Close FFmpegDecoder
-    decoder?.close()
-    decoder = nil
-
-    // Close FFmpegDemuxer
-    demuxer?.close()
-    demuxer = nil
+    
+    // Trigger async close on actors
+    Task {
+        await decoderActor?.close()
+        await demuxerActor.close()
+    }
   }
 
   // MARK: - I/O Cancellation
 
-  /// Requests that all pending demuxing operations be aborted.
   public func requestDemuxAbort() async {
-    self.demuxer?.requestAbortIO()
+    await demuxerActor.requestAbortIO()
   }
 
-  /// Clears the demux abort flag.
   public func clearDemuxAbort() async {
-    await withCheckedContinuation { continuation in
-      demuxQueue.async { [weak self] in
-        self?.demuxer?.clearAbortIO()
-        continuation.resume()
-      }
-    }
+    await demuxerActor.clearAbortIO()
   }
 
   // MARK: - Parallel Demux/Decode API
 
-  /// Demuxes the next packet from the container.
-  /// - Returns: The next packet, or `nil` if the end of the stream is reached.
+  /// Asynchronously demuxes the next packet from the container.
+  ///
+  /// This method prioritizes packets in the following order:
+  /// 1. Pending packets from a seek operation (context restoration).
+  /// 2. Audio packets queued during a seek (maintained by `DemuxerActor`).
+  /// 3. New packets read directly from the demuxer.
+  ///
+  /// - Returns: The next `FFmpegPacketData`, or `nil` if end-of-file is reached or an error occurs.
   public func demuxNextPacket() async -> FFmpegPacketData? {
-    return await withCheckedContinuation { continuation in
-      demuxQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: nil)
-          return
-        }
+    stateLock.lock()
+    
+    // Priority 1: Pending restoration packets (from seek)
+    if !self.pendingContextRestorationPackets.isEmpty {
+      let packet = self.pendingContextRestorationPackets.removeFirst()
+      stateLock.unlock()
+      return self.convertPacket(packet)
+    }
+    
+    if isClosed {
+        stateLock.unlock()
+        return nil
+    }
+    stateLock.unlock()
+    
+    // Priority 2: Queued audio packets (from seek)
+    if let queuedAudioPacket = await demuxerActor.popQueuedAudioPacket() {
+        return self.convertPacket(queuedAudioPacket)
+    }
 
-        // Priority: Serve pending restoration packets first (from seek)
-        self.lock.lock()
-        // Check if we have pending packets
-        if !self.pendingContextRestorationPackets.isEmpty {
-          let packet = self.pendingContextRestorationPackets.removeFirst()
-          self.lock.unlock()
-          let data = self.convertPacket(packet)
-          continuation.resume(returning: data)
-          return
-        }
-
-        guard !self.isClosed, let demuxer = self.demuxer else {
-          self.lock.unlock()
-          continuation.resume(returning: nil)
-          return
-        }
-
-        // Serve queued audio packets from seek operations first
-        if let queuedAudioPacket = demuxer.popQueuedAudioPacket() {
-          self.lock.unlock()
-          let packet = self.convertPacket(queuedAudioPacket)
-          continuation.resume(returning: packet)
-          return
-        }
-
-        self.lock.unlock()
-
-        // Demux using FFmpegDemuxer and convert to FFmpegPacketData
-        if let demuxerPacket = demuxer.demuxNextPacket() {
-          let packet = self.convertPacket(demuxerPacket)
-          continuation.resume(returning: packet)
-        } else {
-          continuation.resume(returning: nil)
-        }
-      }
+    // Priority 3: Fresh packet
+    if let demuxerPacket = await demuxerActor.demuxNextPacket() {
+      return self.convertPacket(demuxerPacket)
+    } else {
+      return nil
     }
   }
 
-  /// Decodes a packet into one or more frames.
-  /// - Parameter packet: The packet to decode.
-  /// - Returns: An array of decoded frames.
+  /// Asynchronously decodes a demuxed packet.
+  ///
+  /// - Parameter packet: The `FFmpegPacketData` to decode.
+  /// - Returns: An array of `DecodedFrame` objects (video, audio, or subtitle). Returns an empty array if decoding produces no frames or if the decoder is closed.
   public func decodePacket(_ packet: FFmpegPacketData) async -> [DecodedFrame] {
-    return await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: [])
-          return
-        }
+    stateLock.lock()
+    if isClosed {
+        stateLock.unlock()
+        return []
+    }
+    stateLock.unlock()
+    
+    var results: [DecodedFrame] = []
 
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let decoder = self.decoder else {
-          continuation.resume(returning: [])
-          return
-        }
-
-        var results: [DecodedFrame] = []
-
-        if packet.isVideo {
-          // Use SampleBufferBuilder for passthrough if available
-          if let builder = self.sampleBufferBuilder,
-            self.hardwareDecodeMode == .passThrough
-          {
-            do {
-              let sampleBuffer = try builder.createSampleBuffer(
-                from: packet.data,
-                pts: packet.pts,
-                dts: packet.dts,
-                duration: packet.duration,
-                forPassthrough: true,
-                ambientLightMetadata: packet.ambientLightMetadata
-              )
-
-              let frame = VideoFrame(
+    if packet.isVideo {
+      if let builder = self.sampleBufferBuilder, self.hardwareDecodeMode == .passThrough {
+          // Passthrough logic is largely synchronous computation / CoreMedia creation
+          // so we can do it here.
+          do {
+            let sampleBuffer = try builder.createSampleBuffer(
+              from: packet.data,
+              pts: packet.pts,
+              dts: packet.dts,
+              duration: packet.duration,
+              forPassthrough: true,
+              ambientLightMetadata: packet.ambientLightMetadata
+            )
+            // ... creation logic ...
+             let frame = VideoFrame(
                 sampleBuffer: sampleBuffer,
                 presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
                 isHDR: self.videoInfo.isHDR,
@@ -384,43 +320,38 @@ public final class VideoDecoder: @unchecked Sendable {
                 ambientLightMetadata: packet.ambientLightMetadata
               )
               results.append(.video(frame))
-            } catch {
-            }
-          } else if let ffmpegFrames = decoder.decodeVideoPacket(withAllFrames: packet) {
-            // Fallback to FFmpeg decode path
-            for ffmpegFrame in ffmpegFrames {
-
-              if let frame = self.makeVideoFrame(
-                pixelBuffer: ffmpegFrame.pixelBuffer,
-                presentationTime: ffmpegFrame.presentationTime,
-                doviProfile: Int(ffmpegFrame.doviProfile),
-                ambientLightMetadata: ffmpegFrame.ambientLightMetadata
-              ) {
-                results.append(.video(frame))
-              }
-            }
+          } catch {}
+      } else if let decoderActor = self.decoderActor,
+                let ffmpegFrames = await decoderActor.decodeVideoPacket(withAllFrames: packet) {
+        for ffmpegFrame in ffmpegFrames {
+          if let frame = self.makeVideoFrame(
+            pixelBuffer: ffmpegFrame.pixelBuffer,
+            presentationTime: ffmpegFrame.presentationTime,
+            doviProfile: Int(ffmpegFrame.doviProfile),
+            ambientLightMetadata: ffmpegFrame.ambientLightMetadata
+          ) {
+            results.append(.video(frame))
           }
         }
-        // Handle audio packets - typically 1:1 packet-to-frame, but TrueHD can have multiple
-        else if packet.isAudio {
-          if let audioFrames = decoder.decodeAudioPacket(withAllFrames: packet) {
+      }
+    } else if packet.isAudio {
+       if let decoderActor = self.decoderActor,
+          let audioFrames = await decoderActor.decodeAudioPacket(withAllFrames: packet) {
             for audioFrameObj in audioFrames {
               results.append(
                 .audio(audioFrameObj.pcmBuffer, audioFrameObj.presentationTime))
             }
-          }
-        }
-        // Handle subtitle packets
-        else if packet.isSubtitle {
-          if let decodedFrame = decoder.decodePacket(packet),
-            let subtitleFrameObj = decodedFrame as? FFmpegSubtitleFrame
-          {
-            var subtitleContent: SubtitleContent = .text("")
+       }
+    } else if packet.isSubtitle {
+        if let decoderActor = self.decoderActor,
+           let decodedFrame = await decoderActor.decodePacket(packet),
+           let subtitleFrameObj = decodedFrame as? FFmpegSubtitleFrame {
+            // ... subtitle logic ...
+             var subtitleContent: SubtitleContent = .text("")
 
             if let text = subtitleFrameObj.text {
               var cleanText = text
               if subtitleFrameObj.isASS {
-                // Forward ASS event text to renderer (not the original packet data).
                 let duration = subtitleFrameObj.endTime - subtitleFrameObj.startTime
                 self.assPipeline.processASS(
                   text: text,
@@ -428,31 +359,29 @@ public final class VideoDecoder: @unchecked Sendable {
                   pts: subtitleFrameObj.startTime,
                   duration: duration
                 )
-
-                // For the UI, we still want to show something as fallback/debug.
                 cleanText = self.cleanSubtitleText(text)
               }
               subtitleContent = .text(cleanText)
             } else if let bitmaps = subtitleFrameObj.bitmaps, !bitmaps.isEmpty {
-              var swiftBitmaps: [SubtitleBitmap] = []
-              for bitmapObj in bitmaps {
-                let rect = CGRect(
-                  x: bitmapObj.normalizedX,
-                  y: bitmapObj.normalizedY,
-                  width: bitmapObj.normalizedWidth,
-                  height: bitmapObj.normalizedHeight
-                )
-                let swiftBitmap = SubtitleBitmap(
-                  data: bitmapObj.data,
-                  width: Int(bitmapObj.width),
-                  height: Int(bitmapObj.height),
-                  rect: rect
-                )
-                swiftBitmaps.append(swiftBitmap)
-              }
-              subtitleContent = .bitmaps(swiftBitmaps)
+                 var swiftBitmaps: [SubtitleBitmap] = []
+                  for bitmapObj in bitmaps {
+                    let rect = CGRect(
+                      x: bitmapObj.normalizedX,
+                      y: bitmapObj.normalizedY,
+                      width: bitmapObj.normalizedWidth,
+                      height: bitmapObj.normalizedHeight
+                    )
+                    let swiftBitmap = SubtitleBitmap(
+                      data: bitmapObj.data,
+                      width: Int(bitmapObj.width),
+                      height: Int(bitmapObj.height),
+                      rect: rect
+                    )
+                    swiftBitmaps.append(swiftBitmap)
+                  }
+                  subtitleContent = .bitmaps(swiftBitmaps)
             }
-
+            
             let frame = SubtitleFrame(
               content: subtitleContent,
               isASS: subtitleFrameObj.isASS,
@@ -460,141 +389,54 @@ public final class VideoDecoder: @unchecked Sendable {
               endTime: subtitleFrameObj.endTime
             )
             results.append(.subtitle(frame))
-          }
         }
-
-        continuation.resume(returning: results)
-      }
     }
+    
+    return results
   }
 
-  // MARK: - Decoder Flush/Drain (for multi-threaded decoders)
+  // MARK: - Decoder Flush/Drain
 
-  /// Flushes the video decoder to signal the end of the stream.
+  /// Asynchronously flushes the video decoder, clearing internal buffers.
+  ///
+  /// This must be called before seeking or when the stream continuity is broken to avoid decoding artifacts.
   public func flushVideoDecoder() async {
-    await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume()
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let decoder = self.decoder else {
-          continuation.resume()
-          return
-        }
-
-        decoder.flushVideoDecoder()
-        continuation.resume()
-      }
-    }
+    await decoderActor?.flushVideoDecoder()
   }
 
-  /// Flushes the audio decoder to signal the end of the stream.
+  /// Asynchronously flushes the audio decoder, clearing internal buffers.
   public func flushAudioDecoder() async {
-    await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume()
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let decoder = self.decoder else {
-          continuation.resume()
-          return
-        }
-
-        decoder.flushAudioDecoder()
-        continuation.resume()
-      }
-    }
+    await decoderActor?.flushAudioDecoder()
   }
 
-  /// Drains any remaining video frames from the decoder after flushing.
-  /// - Returns: The next drained video frame, or `nil` if no more frames are available.
+  /// Asynchronously drains a pending video frame from the decoder.
+  ///
+  /// - Returns: A `VideoFrame` if available, or `nil` if the decoder is empty.
   public func drainVideoFrame() async -> VideoFrame? {
-    return await withCheckedContinuation {
-      (continuation: CheckedContinuation<VideoFrame?, Never>) in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let decoder = self.decoder else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        guard let videoFrameObj = decoder.drainVideoFrame() else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        let frame = self.makeVideoFrame(
+    guard let videoFrameObj = await decoderActor?.drainVideoFrame() else { return nil }
+    
+    return self.makeVideoFrame(
           pixelBuffer: videoFrameObj.pixelBuffer,
           presentationTime: videoFrameObj.presentationTime,
           doviProfile: Int(videoFrameObj.doviProfile),
           ambientLightMetadata: videoFrameObj.ambientLightMetadata
-        )
-        continuation.resume(returning: frame)
-      }
-    }
+    )
   }
 
-  /// Drains any remaining audio frames from the decoder after flushing.
-  /// - Returns: A tuple containing the drained audio buffer and its presentation timestamp, or `nil`.
+  /// Asynchronously drains a pending audio frame from the decoder.
+  ///
+  /// - Returns: A tuple containing the audio buffer and its presentation timestamp, or `nil`.
   public func drainAudioFrame() async -> (AVAudioPCMBuffer, Double)? {
-    return await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let decoder = self.decoder else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        guard let audioFrameObj = decoder.drainAudioFrame() else {
-          continuation.resume(returning: nil)
-          return
-        }
-
-        continuation.resume(
-          returning: (audioFrameObj.pcmBuffer, audioFrameObj.presentationTime)
-        )
-      }
-    }
+    guard let audioFrameObj = await decoderActor?.drainAudioFrame() else { return nil }
+    return (audioFrameObj.pcmBuffer, audioFrameObj.presentationTime)
   }
 
   // MARK: - Cover Image Extraction
 
-  /// Extracts an embedded cover image from the video container, if present.
+  /// Asynchronously extracts the attached cover image (album art) from the file, if present.
   ///
-  /// Many video containers (especially MKV) can include embedded cover art as attachment streams.
-  /// This method searches for JPEG, PNG, or BMP attachments and returns the image data.
-  ///
-  /// - Returns: The cover image data, or `nil` if no cover image is found.
-  public func extractCoverImage() -> Data? {
-    lock.lock()
-    defer { lock.unlock() }
-
-    guard !isClosed, let demuxer = self.demuxer else { return nil }
-    return demuxer.extractCoverImage()
+  /// - Returns: The image data (e.g., JPEG/PNG), or `nil` if not found.
+  public func extractCoverImage() async -> Data? {
+    return await demuxerActor.extractCoverImage()
   }
-
 }

@@ -91,19 +91,19 @@ actor PlaybackWorker {
   func primeFirstVideoFrame() async -> VideoFrame? {
     guard let decoder, decoder.videoInfo.width > 0, decoder.videoInfo.height > 0 else { return nil }
 
+    // Simplified prime loop
     while !Task.isCancelled {
       guard let packet = await decoder.demuxNextPacket() else { break }
       let frames = await decoder.decodePacket(packet)
-      if let videoFrame = frames.compactMap({ frame -> VideoFrame? in
-        if case .video(let vf) = frame { return vf }
-        return nil
-      }).first {
-        return videoFrame
+      // Check for video frame
+      for case .video(let vf) in frames {
+          return vf
       }
     }
-
     return nil
   }
+
+  // MARK: - Loops
 
   private func runDemuxLoop() async {
     guard let decoder else { return }
@@ -133,74 +133,73 @@ actor PlaybackWorker {
       }
 
       guard let packet = await packetQueue.pop() else {
-        if await packetQueue.suspended {
-          continue
-        }
-
-        await decoder.flushVideoDecoder()
-        await decoder.flushAudioDecoder()
-
-        while !Task.isCancelled {
-          guard let frame = await decoder.drainVideoFrame() else {
-            break
-          }
-          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
-            await readinessAwaiter.waitUntilReady()
-          }
-          guard !Task.isCancelled else { break }
-          await renderer?.enqueue(frame)
-          await delegate?.workerDidRenderVideoFrame(frame)
-          await delegate?.workerRefreshDebugStats(videoPTS: frame.presentationTime)
-        }
-
-        while !Task.isCancelled {
-          guard let (buffer, pts) = await decoder.drainAudioFrame() else {
-            break
-          }
-          guard audioOutput.isEnabled else { break }
-          await audioOutput.waitUntilReady()
-          if !Task.isCancelled {
-            await audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
-            if !hasSignaledAudio {
-              hasSignaledAudio = true
-              await delegate?.workerDidDetectAudio()
-            }
-            await delegate?.workerRefreshDebugStats(videoPTS: nil)
-          }
-        }
-
-        await delegate?.workerDidFinishStream()
-        break
+         if await packetQueue.suspended { continue }
+         
+         // Queue closed - Drain leftovers
+         await drainDecoder(decoder)
+         break
       }
 
-      guard !Task.isCancelled else { break }
-
+      // Process normal packet
+      await processPacket(packet, decoder: decoder)
+    }
+  }
+  
+  // MARK: - Helpers
+  
+  private func processPacket(_ packet: FFmpegPacketData, decoder: VideoDecoder) async {
       let decodedFrames = await decoder.decodePacket(packet)
       for frame in decodedFrames {
         switch frame {
         case .video(let videoFrame):
-          if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
-            await readinessAwaiter.waitUntilReady()
-          }
-          guard !Task.isCancelled else { break }
-          await renderer?.enqueue(videoFrame)
-          await delegate?.workerDidRenderVideoFrame(videoFrame)
-          await delegate?.workerRefreshDebugStats(videoPTS: videoFrame.presentationTime)
+          await processVideoFrame(videoFrame)
         case .audio(let buffer, let pts):
-          guard audioOutput.isEnabled else { break }
-          await audioOutput.waitUntilReady()
-          if !Task.isCancelled {
-            await audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
-            if !hasSignaledAudio {
-              hasSignaledAudio = true
-              await delegate?.workerDidDetectAudio()
-            }
-            await delegate?.workerRefreshDebugStats(videoPTS: nil)
-          }
+          await processAudioFrame(buffer, pts: pts)
         case .subtitle(let subtitleFrame):
           await delegate?.workerDidDecodeSubtitle(subtitleFrame)
         }
       }
-    }
+  }
+  
+  private func drainDecoder(_ decoder: VideoDecoder) async {
+      await decoder.flushVideoDecoder()
+      await decoder.flushAudioDecoder()
+      
+      while !Task.isCancelled {
+          guard let frame = await decoder.drainVideoFrame() else { break }
+          await processVideoFrame(frame)
+      }
+      
+      while !Task.isCancelled {
+          guard let (buffer, pts) = await decoder.drainAudioFrame() else { break }
+          await processAudioFrame(buffer, pts: pts)
+      }
+      
+      await delegate?.workerDidFinishStream()
+  }
+  
+  private func processVideoFrame(_ frame: VideoFrame) async {
+      if let readinessAwaiter = renderer as? MediaDataReadinessAwaiting {
+        await readinessAwaiter.waitUntilReady()
+      }
+      guard !Task.isCancelled else { return }
+      
+      await renderer?.enqueue(frame)
+      await delegate?.workerDidRenderVideoFrame(frame)
+      await delegate?.workerRefreshDebugStats(videoPTS: frame.presentationTime)
+  }
+  
+  private func processAudioFrame(_ buffer: AVAudioPCMBuffer, pts: Double) async {
+      guard audioOutput.isEnabled else { return }
+      await audioOutput.waitUntilReady()
+      
+      guard !Task.isCancelled else { return }
+      
+      await audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
+      if !hasSignaledAudio {
+        hasSignaledAudio = true
+        await delegate?.workerDidDetectAudio()
+      }
+      await delegate?.workerRefreshDebugStats(videoPTS: nil)
   }
 }

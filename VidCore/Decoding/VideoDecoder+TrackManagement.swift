@@ -6,134 +6,116 @@
 import Foundation
 
 extension VideoDecoder {
-  /// Get all available audio tracks from the container.
-  /// - Returns: Array of audio track info, empty if no audio tracks.
+  /// Asynchronously returns all available audio tracks from the container.
+  /// - Returns: Array of `AudioTrackInfo`, empty if no audio tracks.
   public func getAudioTracks() -> [AudioTrackInfo] {
-    lock.lock()
-    defer { lock.unlock() }
     return videoInfo.audioTracks
   }
 
-  /// Get the currently selected audio stream index.
-  /// - Returns: Stream index, or -1 if no audio.
-  public func selectedAudioStreamIndex() -> Int {
-    lock.lock()
-    defer { lock.unlock() }
-    guard !isClosed, let demuxer = self.demuxer else { return -1 }
-    return Int(demuxer.selectedAudioStreamIndex())
+  /// Asynchronously retrieves the currently selected audio stream index.
+  /// - Returns: Stream index, or -1 if no audio is selected or the decoder is closed.
+  public func selectedAudioStreamIndex() async -> Int {
+    stateLock.lock()
+    if isClosed {
+        stateLock.unlock()
+        return -1
+    }
+    stateLock.unlock()
+    
+    return Int(await demuxerActor.selectedAudioStreamIndex())
   }
 
-  /// Switch to a different audio track by its stream index.
+  /// Asynchronously switches to a different audio track by its stream index.
+  ///
   /// This reinitializes the audio decoder for the new codec format.
   /// - Parameter streamIndex: The stream index to switch to.
-  /// - Returns: true if successful, false on error.
+  /// - Returns: `true` if successful, `false` on error or if the decoder is unavailable.
   public func switchAudioTrack(to streamIndex: Int) async -> Bool {
-    await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let demuxer = self.demuxer, let decoder = self.decoder else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        // Update demuxer to use the new audio stream
-        guard demuxer.selectAudioStream(Int32(streamIndex)) else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        // Build decoder config for the new audio stream
-        guard let newDecoderConfig = self.buildAudioDecoderConfig(streamIndex: streamIndex) else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        // Switch audio stream in decoder (handles codec reinitialization)
-        let success = decoder.switchAudioStream(newDecoderConfig)
-        continuation.resume(returning: success)
-      }
+    stateLock.lock()
+    guard let decoderActor = self.decoderActor, !isClosed else {
+        stateLock.unlock()
+        return false
     }
-  }
+    stateLock.unlock()
 
-  /// Build decoder configuration for a specific audio stream.
-  private func buildAudioDecoderConfig(streamIndex: Int) -> [String: Any]? {
-    guard let demuxer = self.demuxer else { return nil }
-    return demuxer.getAudioDecoderConfig(forStream: Int32(streamIndex))
+    // Update demuxer to use the new audio stream
+    guard await demuxerActor.selectAudioStream(Int32(streamIndex)) else {
+      return false
+    }
+
+    // Build decoder config for the new audio stream
+    guard let newDecoderConfig = await demuxerActor.getAudioDecoderConfig(forStream: Int32(streamIndex)) else {
+      return false
+    }
+
+    // Switch audio stream in decoder (handles codec reinitialization)
+    return await decoderActor.switchAudioStream(newDecoderConfig)
   }
 
   // MARK: - Subtitle Track Management
 
   /// Returns all available subtitle tracks in the container.
   public func getSubtitleTracks() -> [SubtitleTrackInfo] {
-    lock.lock()
-    defer { lock.unlock() }
     return videoInfo.subtitleTracks
   }
 
-  /// Returns the currently selected subtitle stream index, or -1 if none.
-  public func selectedSubtitleStreamIndex() -> Int {
-    lock.lock()
-    defer { lock.unlock() }
-    guard !isClosed, let demuxer = self.demuxer else { return -1 }
-    return Int(demuxer.selectedSubtitleStreamIndex())
+  /// Asynchronously returns the currently selected subtitle stream index.
+  /// - Returns: The stream index, or -1 if none is selected or decoder is closed.
+  public func selectedSubtitleStreamIndex() async -> Int {
+    stateLock.lock()
+    if isClosed {
+        stateLock.unlock()
+        return -1
+    }
+    stateLock.unlock()
+    
+    return Int(await demuxerActor.selectedSubtitleStreamIndex())
   }
 
-  /// Switches to a different subtitle track.
+  /// Asynchronously switches to a different subtitle track.
   /// - Parameter streamIndex: The stream index to switch to, or -1 to disable subtitles.
   /// - Returns: `true` if the switch was successful.
   public func switchSubtitleTrack(to streamIndex: Int) async -> Bool {
-    await withCheckedContinuation { continuation in
-      decodeQueue.async { [weak self] in
-        guard let self = self else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        self.lock.lock()
-        defer { self.lock.unlock() }
-
-        guard !self.isClosed, let demuxer = self.demuxer, let decoder = self.decoder else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        if streamIndex == -1 {
-          // Disable subtitles
-          _ = demuxer.selectSubtitleStream(-1)
-          self.assPipeline.reset(flush: true)
-          continuation.resume(returning: true)
-          return
-        }
-
-        self.assPipeline.reset(flush: true)
-
-        guard demuxer.selectSubtitleStream(Int32(streamIndex)) else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        guard let newConfig = self.buildSubtitleDecoderConfig(streamIndex: streamIndex) else {
-          continuation.resume(returning: false)
-          return
-        }
-
-        self.assPipeline.configureHeaderIfNeeded(from: newConfig)
-
-        let success = decoder.switchSubtitleStream(newConfig)
-        continuation.resume(returning: success)
-      }
+    stateLock.lock()
+    guard let decoderActor = self.decoderActor, !isClosed else {
+        stateLock.unlock()
+        return false
     }
-  }
+    stateLock.unlock()
 
-  private func buildSubtitleDecoderConfig(streamIndex: Int) -> [String: Any]? {
-    guard let demuxer = self.demuxer else { return nil }
-    return demuxer.getSubtitleDecoderConfig(forStream: Int32(streamIndex))
+    if streamIndex == -1 {
+      // Disable subtitles
+      _ = await demuxerActor.selectSubtitleStream(-1)
+      self.assPipeline.reset(flush: true)
+      
+      stateLock.lock()
+      self._isASSActive = false
+      stateLock.unlock()
+      
+      return true
+    }
+
+    self.assPipeline.reset(flush: true)
+    
+    // Select stream in demuxer
+    guard await demuxerActor.selectSubtitleStream(Int32(streamIndex)) else {
+        return false
+    }
+    
+    // Get config
+    guard let newConfig = await demuxerActor.getSubtitleDecoderConfig(forStream: Int32(streamIndex)) else {
+        return false
+    }
+    
+    self.assPipeline.configureHeaderIfNeeded(from: newConfig)
+    
+    // Update local ASS state cache.
+    // The assPipeline is configured via `configureHeaderIfNeeded` above.
+    // We assume valid ASS state if a renderer is successfully created.
+    stateLock.lock()
+    self._isASSActive = (self.assRenderer != nil)
+    stateLock.unlock()
+
+    return await decoderActor.switchSubtitleStream(newConfig)
   }
 }

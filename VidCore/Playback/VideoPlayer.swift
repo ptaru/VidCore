@@ -281,7 +281,7 @@ public class VideoPlayer {
 
         // Sync selected audio track with demuxer's default selection
         if hasAudio {
-          let selectedStreamIndex = decoder.selectedAudioStreamIndex()
+          let selectedStreamIndex = await decoder.selectedAudioStreamIndex()
           selectedAudioTrackIndex =
             decoder.videoInfo.audioTracks.firstIndex { $0.streamIndex == selectedStreamIndex } ?? 0
         } else {
@@ -290,7 +290,7 @@ public class VideoPlayer {
 
         // Sync selected subtitle track
         if !decoder.videoInfo.subtitleTracks.isEmpty {
-          let selectedStreamIndex = decoder.selectedSubtitleStreamIndex()
+          let selectedStreamIndex = await decoder.selectedSubtitleStreamIndex()
           selectedSubtitleTrackIndex =
             decoder.videoInfo.subtitleTracks.firstIndex { $0.streamIndex == selectedStreamIndex }
             ?? -1
