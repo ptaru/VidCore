@@ -147,6 +147,9 @@ public class MediaPlayer {
   var pendingASSRenderTime: Double?
   var lastASSRenderTime: Double = 0
   var assAnimatingUntilTime: Double = 0
+  
+  /// Helper to track if we requested play but are waiting for first frame
+  var pendingPlay: Bool = false
 
   // MARK: - Initialization
 
@@ -356,9 +359,9 @@ public class MediaPlayer {
       return
     }
 
-    // Debug logging removed: noisy in Quick Look extensions.
+    // Start playback (clock will start when first frame renders)
+    pendingPlay = true
     state = .playing
-    Task { await playbackClock.play(rate: clampedRate) }
     audioOutput.setPlaybackState(isPlaying: true, rate: clampedRate)
 
     startTasks()
@@ -369,6 +372,7 @@ public class MediaPlayer {
   public func pause() {
     guard state == .playing else { return }
 
+    pendingPlay = false
     state = .paused
     Task { await playbackClock.pause() }
     audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)

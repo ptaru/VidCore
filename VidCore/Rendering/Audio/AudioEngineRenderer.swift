@@ -45,8 +45,9 @@ public actor AudioEngineRenderer: AudioRendering {
   }
 
   /// Waits until the renderer is ready for more data.
-  public func waitUntilReady() async {
+  public func waitUntilReady() async -> Bool {
     // No backpressure; always ready.
+    return true
   }
 
   /// Sets the audio volume.

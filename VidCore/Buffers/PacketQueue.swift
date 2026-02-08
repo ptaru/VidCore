@@ -173,6 +173,11 @@ public actor PacketQueue {
         packets.count
     }
     
+    /// Whether the queue is closed.
+    public var isClosedQueue: Bool {
+        isClosed
+    }
+
     /// Whether the queue is empty.
     public var isEmpty: Bool {
         packets.isEmpty

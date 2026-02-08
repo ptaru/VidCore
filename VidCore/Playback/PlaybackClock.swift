@@ -61,7 +61,7 @@ public actor PlaybackClock {
   }
 
   /// The current playback rate.
-  public var rate: Double {
+  public nonisolated var rate: Double {
     Double(synchronizer.rate)
   }
 

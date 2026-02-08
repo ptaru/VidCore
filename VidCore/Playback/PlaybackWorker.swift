@@ -14,6 +14,8 @@ protocol PlaybackWorkerDelegate: AnyObject {
   func workerDidDetectAudio()
   func workerDidFinishStream()
   func workerRefreshDebugStats(videoPTS: Double?) async
+  func workerDidStall()
+  func workerDidUnstall()
 }
 
 actor PlaybackWorker {
@@ -27,6 +29,7 @@ actor PlaybackWorker {
   private var demuxTask: Task<Void, Never>?
   private var decodeTask: Task<Void, Never>?
   private var hasSignaledAudio = false
+  private var isStalled = false
 
   init(
     decoder: MediaDecoder?,
@@ -80,6 +83,7 @@ actor PlaybackWorker {
 
     // Wake up any blocked producers/consumers so they can observe cancellation.
     await packetQueue.suspend()
+    await audioOutput.flush()
 
     await demuxTask?.value
     await decodeTask?.value
@@ -132,12 +136,27 @@ actor PlaybackWorker {
         continue
       }
 
+      // Check for stall
+      if await packetQueue.isEmpty && !isStalled {
+          isStalled = true
+          await delegate?.workerDidStall()
+      }
+
       guard let packet = await packetQueue.pop() else {
          if await packetQueue.suspended { continue }
          
          // Queue closed - Drain leftovers
-         await drainDecoder(decoder)
-         break
+         if await packetQueue.isClosedQueue {
+            await drainDecoder(decoder)
+            break
+         }
+         continue
+      }
+      
+      // If we were stalled, we have a packet now
+      if isStalled {
+          isStalled = false
+          await delegate?.workerDidUnstall()
       }
 
       // Process normal packet
@@ -191,7 +210,7 @@ actor PlaybackWorker {
   
   private func processAudioFrame(_ buffer: AVAudioPCMBuffer, pts: Double) async {
       guard audioOutput.isEnabled else { return }
-      await audioOutput.waitUntilReady()
+      guard await audioOutput.waitUntilReady() else { return }
       
       guard !Task.isCancelled else { return }
       

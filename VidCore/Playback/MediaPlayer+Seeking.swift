@@ -40,9 +40,12 @@ extension MediaPlayer {
     state = .scrubbing
     lastScrubFrameTime = nil
 
-    await stopTasks()
+    // Stop output/timing immediately to unblock any waiting workers
     await playbackClock.pause()
     audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
+    await audioOutput.flush()
+
+    await stopTasks()
     await packetQueue.suspend()
 
     return previousState
@@ -92,11 +95,14 @@ extension MediaPlayer {
     let shouldResume = resumePlayback ?? wasPlaying
 
     state = .seeking
+    // Stop output/timing immediately to unblock any waiting workers
+    await playbackClock.pause()
+    audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
+    await audioOutput.flush()
+
     await stopTasks()
     if Task.isCancelled { return }
-    await playbackClock.pause()
-    if Task.isCancelled { return }
-    audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
+    
     await packetQueue.suspend()
     if Task.isCancelled { return }
     
@@ -329,7 +335,11 @@ actor SeekCoordinator {
 
     guard let player = player else { return }
     let finalTime: Double
-    if let latestScrubTime {
+    // Use the timestamp of the last *actually rendered* frame if available.
+    // This ensures "what you see is what you get" when releasing the scrubber.
+    if let renderedTime = await player.lastScrubFrameTime {
+      finalTime = renderedTime
+    } else if let latestScrubTime {
       finalTime = latestScrubTime
     } else {
       finalTime = await player.snapshotCurrentTime()

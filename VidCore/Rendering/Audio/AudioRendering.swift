@@ -11,7 +11,7 @@ import Foundation
 public protocol AudioRendering: AnyObject, Sendable {
   var isEnabled: Bool { get }
   var isReadyForMoreMediaData: Bool { get }
-  func waitUntilReady() async
+  func waitUntilReady() async -> Bool
 
   func setVolume(_ volume: Float)
   func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) async

@@ -9,7 +9,17 @@ import Foundation
 
 extension MediaPlayer: PlaybackWorkerDelegate {
   func workerDidRenderVideoFrame(_ frame: VideoFrame) {
+    if pendingPlay {
+      pendingPlay = false
+      Task {
+        await playbackClock.play(rate: playbackRate)
+      }
+    }
     currentFrame = frame
+    // Ensure we are playing if we were stalled
+    if state == .playing && playbackClock.rate == 0 {
+      Task { await playbackClock.setRate(playbackRate) }
+    }
   }
 
   func workerDidDecodeSubtitle(_ subtitle: SubtitleFrame) {
@@ -22,6 +32,13 @@ extension MediaPlayer: PlaybackWorkerDelegate {
 
   func workerDidDetectAudio() {
     hasAudio = true
+    // If audio-only or audio starts first
+    if pendingPlay {
+      pendingPlay = false
+      Task {
+        await playbackClock.play(rate: playbackRate)
+      }
+    }
   }
 
   func workerDidFinishStream() {
@@ -29,6 +46,16 @@ extension MediaPlayer: PlaybackWorkerDelegate {
     state = .finished
     Task { await playbackClock.pause() }
     Task { await audioOutput.flush() }
+  }
+
+  func workerDidStall() {
+    guard state == .playing else { return }
+    Task { await playbackClock.setRate(0.0) }
+  }
+
+  func workerDidUnstall() {
+    guard state == .playing else { return }
+    Task { await playbackClock.setRate(playbackRate) }
   }
 
   func workerRefreshDebugStats(videoPTS: Double?) async {

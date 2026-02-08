@@ -38,6 +38,7 @@ public actor SystemAudioRenderer: AudioRendering {
   private var pendingBuffer: AVAudioPCMBuffer?
   private var pendingPTS: Double?
   private var pendingFormatKey: String?
+  private var flushGeneration: Int = 0
 
   /// Creates a new system audio renderer.
   /// - Parameter enabled: Whether the renderer should be enabled.
@@ -55,11 +56,14 @@ public actor SystemAudioRenderer: AudioRendering {
   }
 
   /// Waits until the renderer is ready for more data.
-  public func waitUntilReady() async {
+  /// - Returns: `true` if ready, `false` if interrupted/flushed.
+  public func waitUntilReady() async -> Bool {
+    let startGeneration = flushGeneration
     while renderer?.isReadyForMoreMediaData == false {
-      if Task.isCancelled { return }
+      if Task.isCancelled || flushGeneration != startGeneration { return false }
       try? await Task.sleep(nanoseconds: 10_000_000)
     }
+    return true
   }
 
   /// Flushes the audio renderer.
@@ -69,6 +73,8 @@ public actor SystemAudioRenderer: AudioRendering {
     pendingPTS = nil
     pendingFormatKey = nil
 
+    pendingFormatKey = nil
+    flushGeneration += 1
   }
 
   /// Sets the audio volume.
