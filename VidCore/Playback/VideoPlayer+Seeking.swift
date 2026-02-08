@@ -99,7 +99,8 @@ extension VideoPlayer {
     audioOutput.setPlaybackState(isPlaying: false, rate: playbackRate)
     await packetQueue.suspend()
     if Task.isCancelled { return }
-
+    
+    guard !Task.isCancelled else { return }
     await resetPlaybackStateForSeek()
     if Task.isCancelled { return }
 

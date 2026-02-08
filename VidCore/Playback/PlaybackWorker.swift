@@ -110,7 +110,7 @@ actor PlaybackWorker {
 
     while !Task.isCancelled {
       if await packetQueue.suspended {
-        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        await packetQueue.waitUntilResumed()
         continue
       }
 
@@ -128,7 +128,7 @@ actor PlaybackWorker {
 
     while !Task.isCancelled {
       if await packetQueue.suspended {
-        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        await packetQueue.waitUntilResumed()
         continue
       }
 
@@ -160,7 +160,7 @@ actor PlaybackWorker {
           guard audioOutput.isEnabled else { break }
           await audioOutput.waitUntilReady()
           if !Task.isCancelled {
-            audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
+            await audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
             if !hasSignaledAudio {
               hasSignaledAudio = true
               await delegate?.workerDidDetectAudio()
@@ -190,7 +190,7 @@ actor PlaybackWorker {
           guard audioOutput.isEnabled else { break }
           await audioOutput.waitUntilReady()
           if !Task.isCancelled {
-            audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
+            await audioOutput.enqueue(buffer, pts: pts, volume: Float(volume))
             if !hasSignaledAudio {
               hasSignaledAudio = true
               await delegate?.workerDidDetectAudio()

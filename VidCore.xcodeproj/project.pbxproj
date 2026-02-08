@@ -573,8 +573,8 @@
 		58AB76E82F37AF650058B125 /* Exceptions for "VidCore" folder in "VidCore" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			publicHeaders = (
-				Media/Decoding/FFmpegDecoder.h,
-				Media/Demuxing/FFmpegDemuxer.h,
+				Decoding/FFmpegDecoder.h,
+				Demuxing/FFmpegDemuxer.h,
 				Subtitles/LibASSRenderer.h,
 				VidCore.h,
 			);

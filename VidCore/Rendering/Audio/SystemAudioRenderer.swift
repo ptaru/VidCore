@@ -80,10 +80,13 @@ public actor SystemAudioRenderer: AudioRendering {
   ///   - buffer: The PCM buffer containing audio data.
   ///   - pts: The presentation timestamp in seconds.
   ///   - volume: The volume level for this buffer.
-  public nonisolated func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) {
-    Task {
-      await _enqueue(buffer, pts: pts, volume: volume)
-    }
+  /// Enqueues an audio buffer for playback.
+  /// - Parameters:
+  ///   - buffer: The PCM buffer containing audio data.
+  ///   - pts: The presentation timestamp in seconds.
+  ///   - volume: The volume level for this buffer.
+  public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) async {
+    await _enqueue(buffer, pts: pts, volume: volume)
   }
 
   private func _setVolume(_ volume: Float) {

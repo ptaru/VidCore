@@ -121,6 +121,8 @@ public actor PacketQueue {
         waitingProducers.removeAll()
     }
     
+    private var waitingResumers: [(UUID, CheckedContinuation<Void, Never>)] = []
+
     /// Suspends the queue. Waiting operations will return immediately with `nil`.
     public func suspend() {
         isSuspended = true
@@ -137,6 +139,28 @@ public actor PacketQueue {
     /// Resumes the queue.
     public func resume() {
         isSuspended = false
+        for (_, resumer) in waitingResumers {
+            resumer.resume()
+        }
+        waitingResumers.removeAll()
+    }
+    
+    /// Waits until the queue is resumed if it is currently suspended.
+    public func waitUntilResumed() async {
+        guard isSuspended else { return }
+        
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if !isSuspended {
+                    continuation.resume()
+                } else {
+                    waitingResumers.append((waiterID, continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelResumer(waiterID) }
+        }
     }
     
     /// Whether the queue is currently suspended.
@@ -170,6 +194,13 @@ public actor PacketQueue {
         if let index = waitingConsumers.firstIndex(where: { $0.0 == id }) {
             let (_, consumer) = waitingConsumers.remove(at: index)
             consumer.resume(returning: nil)
+        }
+    }
+
+    private func cancelResumer(_ id: UUID) {
+        if let index = waitingResumers.firstIndex(where: { $0.0 == id }) {
+            let (_, resumer) = waitingResumers.remove(at: index)
+            resumer.resume()
         }
     }
 }
