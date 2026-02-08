@@ -192,8 +192,12 @@ extension VideoDecoder {
     // Prime audio packets near the seek target for faster audio resume.
     if let initialPackets = demuxer.collectPackets(until: seconds) {
       for demuxerPacket in initialPackets {
-        if packetCount >= maxPackets { break }
-        if decodeVideoPacket(demuxerPacket) { break }
+        let shouldStop = autoreleasepool {
+          if packetCount >= maxPackets { return true }
+          if decodeVideoPacket(demuxerPacket) { return true }
+          return false
+        }
+        if shouldStop { break }
       }
     }
 

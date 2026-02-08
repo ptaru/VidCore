@@ -275,12 +275,7 @@ public final class VideoDecoder: @unchecked Sendable {
 
   /// Requests that all pending demuxing operations be aborted.
   public func requestDemuxAbort() async {
-    await withCheckedContinuation { continuation in
-      demuxQueue.async { [weak self] in
-        self?.demuxer?.requestAbortIO()
-        continuation.resume()
-      }
-    }
+    self.demuxer?.requestAbortIO()
   }
 
   /// Clears the demux abort flag.

@@ -257,6 +257,14 @@ actor SeekCoordinator {
     await cancelActiveSeek()
 
     guard let player = player else { return }
+
+    // Explicitly abort any running demux/decode operations from the previous seek
+    // to ensure the new seek starts immediately.
+    await player.requestScrubAbort()
+
+    // Clear the abort flag before starting the NEW seek
+    await player.clearScrubAbort()
+
     activeSeekTask = Task { [weak player] in
       await player?.performSeek(to: seconds, resumePlayback: nil)
     }
