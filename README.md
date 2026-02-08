@@ -16,7 +16,7 @@ VidCore provides high-performance video playback capabilities for macOS applicat
 - **Audio Playback**: System-scheduled audio via AVSampleBufferAudioRenderer (with AVAudioEngine fallback for app extensions; best-effort sync)
   - Quick Look runs in an app extension, so VidCore automatically switches to AVAudioEngine there.
   - For testing the fallback in a normal app, set `VIDCORE_FORCE_AUDIO_ENGINE=1` in the environment.
-- **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `VideoPlayer`
+- **SwiftUI Integration**: Drop-in `VidPlayer` view with optional debug overlay, similar to AVKit's `MediaPlayer`
 - **Async/Await API**: Modern Swift concurrency with parallel demux/decode pipelines
 - **Optimized Buffering**: Intelligent buffer management with CVPixelBufferPool and frame reordering for multi-threaded decoders
 - **Optimized Seeking**: Zero-latency scrub interaction with two-phase seek (instant jump + precise refinement)
@@ -92,7 +92,7 @@ struct ContentView: View {
 ```
 
 ### Advanced Control
-For fine-grained control (play/pause, seek, metadata), create a `VideoPlayer` instance.
+For fine-grained control (play/pause, seek, metadata), create a `MediaPlayer` instance.
 
 ```swift
 import SwiftUI
@@ -100,7 +100,7 @@ import VidCore
 
 struct PlayerView: View {
     let videoURL: URL
-    @State private var player = VideoPlayer()
+    @State private var player = MediaPlayer()
     
     var body: some View {
         VStack {
@@ -151,7 +151,7 @@ VidPlayer(url: videoURL, autoPlay: true, allowsDebugMenu: true)  // With debug o
 For full control over playback:
 
 ```swift
-@State private var player = VideoPlayer()
+@State private var player = MediaPlayer()
 
 VidPlayer(player: player)
     .task {
@@ -162,7 +162,7 @@ VidPlayer(player: player)
 
 #### Custom Overlays
 
-Add custom controls on top of the video (like AVKit's `VideoPlayer`):
+Add custom controls on top of the video (like AVKit's `MediaPlayer`):
 
 ```swift
 VidPlayer(player: player) {
@@ -185,12 +185,12 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 
 ---
 
-### VideoPlayer API
+### MediaPlayer API
 
-The `VideoPlayer` class is the core playback controller:
+The `MediaPlayer` class is the core playback controller:
 
 ```swift
-let player = VideoPlayer()
+let player = MediaPlayer()
 
 // Load
 try await player.load(url: videoURL)
@@ -273,12 +273,12 @@ if let japaneseIndex = player.audioTracks.firstIndex(where: { $0.language == "jp
 
 ### Low-Level API (Advanced)
 
-#### VideoDecoder
+#### MediaDecoder
 
 For building custom decode pipelines with parallel demux/decode:
 
 ```swift
-let decoder = try VideoDecoder(url: videoURL)
+let decoder = try MediaDecoder(url: videoURL)
 
 // Access metadata
 print("Resolution: \(decoder.videoInfo.width)x\(decoder.videoInfo.height)")
@@ -301,7 +301,7 @@ while let packet = await decoder.demuxNextPacket() {
 }
 
 // End of stream - flush decoder for remaining frames
-await decoder.flushVideoDecoder()
+await decoder.flushMediaDecoder()
 while let frame = await decoder.drainVideoFrame() {
     // Process remaining buffered frames
 }
@@ -311,10 +311,10 @@ decoder.close()
 
 #### Audio Track Management (Low-Level)
 
-The VideoDecoder also provides low-level access to audio tracks:
+The MediaDecoder also provides low-level access to audio tracks:
 
 ```swift
-let decoder = try VideoDecoder(url: videoURL)
+let decoder = try MediaDecoder(url: videoURL)
 
 // Get available tracks
 let tracks = decoder.getAudioTracks()
@@ -334,7 +334,7 @@ decoder.close()
 MKV and other containers can include embedded cover art (common for movies/anime):
 
 ```swift
-let decoder = try VideoDecoder(url: videoURL)
+let decoder = try MediaDecoder(url: videoURL)
 
 if let coverData = decoder.extractCoverImage() {
     // coverData is JPEG, PNG, or BMP image data
@@ -349,7 +349,7 @@ decoder.close()
 You can use the `AVSystemVideoRenderer` helper to convert video frames (including complex Dolby Vision frames) to images:
 
 ```swift
-let decoder = try VideoDecoder(url: videoURL)
+let decoder = try MediaDecoder(url: videoURL)
 
 // Seek to 10% into the video for a representative frame
 let seekTime = decoder.videoInfo.duration * 0.1
@@ -398,7 +398,7 @@ This approach provides:
 You can inspect the stream's HDR capabilities via `VideoInfo`:
 
 ```swift
-let decoder = try VideoDecoder(url: videoURL)
+let decoder = try MediaDecoder(url: videoURL)
 
 if decoder.videoInfo.isHDR {
     print("HDR Content Detected!")
@@ -416,7 +416,7 @@ if decoder.videoInfo.isHDR {
 
 ## API Reference
 
-### VideoPlayer
+### MediaPlayer
 
 High-level playback orchestrator with A/V sync and state management.
 
@@ -450,13 +450,13 @@ public enum Buffers {
 
 ```swift
 // Automatic selection (recommended)
-let player = VideoPlayer()
+let player = MediaPlayer()
 
 // Force software decoding buffers
-let player = VideoPlayer(buffers: .software)
+let player = MediaPlayer(buffers: .software)
 
 // Custom sizes for specific use cases
-let player = VideoPlayer(buffers: .custom(frameBuffer: 3, packetQueue: 16))
+let player = MediaPlayer(buffers: .custom(frameBuffer: 3, packetQueue: 16))
 ```
 
 ### PlaybackState
@@ -470,14 +470,14 @@ enum PlaybackState {
     case paused     // Paused
     case seeking    // Seek in progress
     case finished   // Playback completed
-    case error(VideoPlayerError)
+    case error(MediaPlayerError)
 }
 ```
 
-### VideoPlayerError
+### MediaPlayerError
 
 ```swift
-enum VideoPlayerError: Error, Equatable, LocalizedError, Sendable {
+enum MediaPlayerError: Error, Equatable, LocalizedError, Sendable {
     case fileNotFound
     case decoderInitFailed(String)
     case unsupportedFormat
@@ -492,17 +492,17 @@ SwiftUI view for displaying video with optional overlay.
 
 ```swift
 // Basic
-VidPlayer(player: VideoPlayer)
+VidPlayer(player: MediaPlayer)
 
 // With overlay
-VidPlayer(player: VideoPlayer) { OverlayView() }
+VidPlayer(player: MediaPlayer) { OverlayView() }
 
 // With options
-VidPlayer(player: VideoPlayer, showsBuiltInControls: Bool, allowsDebugMenu: Bool, overlay: () -> Overlay)
+VidPlayer(player: MediaPlayer, showsBuiltInControls: Bool, allowsDebugMenu: Bool, overlay: () -> Overlay)
 ```
 
 **Parameters:**
-- `player`: The `VideoPlayer` instance to display
+- `player`: The `MediaPlayer` instance to display
 - `showsBuiltInControls`: Show built-in loading/error/finished UI (default: `true`)
 - `allowsDebugMenu`: Enable right-click context menu to toggle debug overlay (default: `false`)
 - `overlay`: Custom content to display over the video
@@ -520,7 +520,7 @@ Enable the debug overlay to inspect video playback in real-time. When enabled (v
 | **Audio** | Codec, sample rate, channel count |
 | **A/V Sync** | Current drift, dropped frames, queue health |
 
-### VideoDecoder
+### MediaDecoder
 
 Low-level decoder with split demux/decode pipeline.
 
@@ -530,7 +530,7 @@ Low-level decoder with split demux/decode pipeline.
 | `demuxNextPacket()` | Get next packet from container (async) |
 | `decodePacket(_:)` | Decode packet to frames (async) |
 | `seek(to:accurate:)` | Seek to timestamp (async, throws) |
-| `flushVideoDecoder()` | Signal end of stream (async) |
+| `flushMediaDecoder()` | Signal end of stream (async) |
 | `drainVideoFrame()` | Get remaining buffered frames (async) |
 | `extractCoverImage()` | Extract embedded cover art (JPEG/PNG) from container |
 | `getAudioTracks()` | Get available audio tracks |
