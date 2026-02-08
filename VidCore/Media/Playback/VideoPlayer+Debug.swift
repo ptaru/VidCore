@@ -10,7 +10,6 @@ public struct PlayerDebugStats: Sendable {
   public var packetQueueCount: Int = 0
   public var packetQueueMax: Int = 0
   public var videoRendererReady: Bool = false
-  public var audioRendererReady: Bool = false
   public var audioBackend: String = "Unknown"
   public var lastVideoPTS: Double = 0
   public var decoderName: String = "Unknown"
@@ -32,7 +31,6 @@ extension VideoPlayer {
     let queueCount = await packetQueue.count
     let queueMax = packetQueue.maxSize
     let videoReady = (renderer as? SampleBufferRenderer)?.isReadyForMoreMediaData ?? false
-    let audioReady = audioOutput.isReadyForMoreMediaData
     let audioBackend: String = (audioOutput is SystemAudioRenderer) ? "System" : "AudioEngine"
     let syncRate = await playbackClock.rate
     let decoderName = decoder?.videoInfo.decoderName ?? "Unknown"
@@ -40,7 +38,6 @@ extension VideoPlayer {
     debugStats.packetQueueCount = queueCount
     debugStats.packetQueueMax = queueMax
     debugStats.videoRendererReady = videoReady
-    debugStats.audioRendererReady = audioReady
     debugStats.audioBackend = audioBackend
     debugStats.lastVideoPTS = lastVideoPTS
     debugStats.syncRate = syncRate

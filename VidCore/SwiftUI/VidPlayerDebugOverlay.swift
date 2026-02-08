@@ -85,11 +85,6 @@ struct VidPlayerDebugOverlay: View {
             stats.videoRendererReady ? "Ready" : "Backpressure",
             color: stats.videoRendererReady ? .green : .orange
           )
-          debugRow(
-            "Audio Renderer",
-            stats.audioRendererReady ? "Ready" : "Backpressure",
-            color: stats.audioRendererReady ? .green : .orange
-          )
           debugRow("Audio Path", stats.audioBackend)
         }
       }

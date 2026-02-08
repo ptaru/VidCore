@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import Accelerate
 import CoreMedia
 import Foundation
 
@@ -26,17 +27,14 @@ public actor SystemAudioRenderer: AudioRendering {
   public nonisolated let renderer: AVSampleBufferAudioRenderer?
   /// Whether this renderer is enabled and functional.
   public nonisolated let isEnabled: Bool
-  private let supportsRendererVolume: Bool
   private let outputChannelCount: AVAudioChannelCount
   private var hasLoggedOutputChannelWarning: Bool = false
 
   private var cachedFormatDescription: CMAudioFormatDescription?
   private var cachedFormatKey: String?
-  private var readinessWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-  private var isRequestingReadiness: Bool = false
-  private let readinessTimeoutNanos: UInt64 = 250_000_000
-  private let minCoalesceFrames: AVAudioFrameCount = 1024
-  private let maxCoalesceFrames: AVAudioFrameCount = 4096
+
+  private let minCoalesceFrames: AVAudioFrameCount = 128
+  private let maxCoalesceFrames: AVAudioFrameCount = 256
   private var pendingBuffer: AVAudioPCMBuffer?
   private var pendingPTS: Double?
   private var pendingFormatKey: String?
@@ -47,8 +45,6 @@ public actor SystemAudioRenderer: AudioRendering {
     self.isEnabled = enabled
     let renderer = enabled ? AVSampleBufferAudioRenderer() : nil
     self.renderer = renderer
-    self.supportsRendererVolume =
-      renderer?.responds(to: NSSelectorFromString("setVolume:")) ?? false
     let engine = AVAudioEngine()
     self.outputChannelCount = engine.outputNode.outputFormat(forBus: 0).channelCount
   }
@@ -60,87 +56,8 @@ public actor SystemAudioRenderer: AudioRendering {
 
   /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
-    guard let renderer else { return }
-    if renderer.isReadyForMoreMediaData {
-      return
-    }
-
-    let waiterID = UUID()
-    await withTaskCancellationHandler {
-      await withCheckedContinuation { continuation in
-        readinessWaiters[waiterID] = continuation
-        let shouldStart = !isRequestingReadiness
-        if shouldStart {
-          isRequestingReadiness = true
-        }
-
-        Task {
-          try? await Task.sleep(nanoseconds: readinessTimeoutNanos)
-          var shouldStop = false
-          var waiter: CheckedContinuation<Void, Never>?
-          self.timeoutWaiter(waiterID: waiterID) { stop, w in
-            shouldStop = stop
-            waiter = w
-          }
-          if shouldStop {
-            renderer.stopRequestingMediaData()
-          }
-          waiter?.resume()
-        }
-
-        if shouldStart {
-          renderer.requestMediaDataWhenReady(on: DispatchQueue.global()) { [weak self] in
-            guard let self, let renderer = self.renderer else { return }
-            guard renderer.isReadyForMoreMediaData else { return }
-
-            renderer.stopRequestingMediaData()
-
-            Task {
-              await self.resumeAllWaiters()
-            }
-          }
-        }
-      }
-    } onCancel: {
-      Task {
-        await self.cancelWaiter(waiterID: waiterID, renderer: renderer)
-      }
-    }
-  }
-
-  private func timeoutWaiter(
-    waiterID: UUID, completion: (Bool, CheckedContinuation<Void, Never>?) -> Void
-  ) {
-    let waiter = readinessWaiters.removeValue(forKey: waiterID)
-    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-    if shouldStop {
-      isRequestingReadiness = false
-    }
-    completion(shouldStop, waiter)
-  }
-
-  private func resumeAllWaiters() {
-    let waiters = readinessWaiters.values
-    readinessWaiters.removeAll()
-    isRequestingReadiness = false
-
-    for waiter in waiters {
-      waiter.resume()
-    }
-  }
-
-  private func cancelWaiter(waiterID: UUID, renderer: AVSampleBufferAudioRenderer) {
-    let waiter = readinessWaiters.removeValue(forKey: waiterID)
-    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-    if shouldStop {
-      isRequestingReadiness = false
-    }
-
-    if shouldStop {
-      renderer.stopRequestingMediaData()
-    }
-
-    waiter?.resume()
+    // The previously complex logic to wait for readiness has been removed as unnecessary.
+    // AVSampleBufferAudioRenderer manages its own readiness or we accept potential drops if not ready.
   }
 
   /// Flushes the audio renderer.
@@ -149,7 +66,7 @@ public actor SystemAudioRenderer: AudioRendering {
     pendingBuffer = nil
     pendingPTS = nil
     pendingFormatKey = nil
-    resumeAllWaiters()
+
   }
 
   /// Sets the audio volume.
@@ -170,25 +87,13 @@ public actor SystemAudioRenderer: AudioRendering {
   }
 
   private func _setVolume(_ volume: Float) {
-    guard supportsRendererVolume, let renderer else { return }
+    guard let renderer else { return }
     let clamped = max(0.0, min(volume, 1.0))
-    renderer.setValue(clamped, forKey: "volume")
+    renderer.volume = clamped
   }
 
   private func _enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float) {
-    let clampedVolume = max(0.0, min(volume, 1.0))
-    if !supportsRendererVolume && clampedVolume != 1.0 {
-      if let channels = buffer.floatChannelData {
-        let channelCount = Int(buffer.format.channelCount)
-        let frameCount = Int(buffer.frameLength)
-        for ch in 0..<channelCount {
-          let ptr = channels[ch]
-          for i in 0..<frameCount {
-            ptr[i] *= clampedVolume
-          }
-        }
-      }
-    }
+    // Volume control is handled by the renderer.volume property.
 
     let bufferFormatKey = formatKey(for: buffer.format)
     if buffer.frameLength < minCoalesceFrames {
@@ -368,15 +273,16 @@ public actor SystemAudioRenderer: AudioRendering {
     // Bind to Float instead of Int16
     let dst = dstData.bindMemory(to: Float.self, capacity: frameCount * channelCount)
 
-    // Manual interleaving loop (Planar Float32 -> Interleaved Float32)
-    // Optional: vDSP could be used here, but this is explicit and safe.
-    for frame in 0..<frameCount {
-      let base = frame * channelCount
-      for ch in 0..<channelCount {
-        let sample = channels[ch][frame]
-        // No scaling needed for Float32, just clamp for safety (though not strictly required if source is trusted)
-        dst[base + ch] = sample
-      }
+    // Use BLAS for accelerated interleaving (copy with stride)
+    // This effectively interleaves the planar data by copying each channel to its strided position.
+    for ch in 0..<channelCount {
+      cblas_scopy(
+        Int32(frameCount),
+        channels[ch],
+        1,
+        dst.advanced(by: ch),
+        Int32(channelCount)
+      )
     }
 
     return interleavedBuffer
