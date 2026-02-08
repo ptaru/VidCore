@@ -1186,10 +1186,6 @@ static const NSUInteger kMaxQueuedAudioPackets =
     return NO;
 
   _subtitleStreamIndex = streamIndex;
-  AVCodecParameters *codecPars = _formatContext->streams[streamIndex]->codecpar;
-  const AVCodec *codec = avcodec_find_decoder(codecPars->codec_id);
-  NSString *codecName =
-      codec ? [NSString stringWithUTF8String:codec->name] : @"unknown";
   return YES;
 }
 

@@ -88,7 +88,7 @@ public actor SystemAudioRenderer: AudioRendering {
   ///   - pts: The presentation timestamp in seconds.
   ///   - volume: The volume level for this buffer.
   public func enqueue(_ buffer: AVAudioPCMBuffer, pts: Double, volume: Float = 1.0) async {
-    await _enqueue(buffer, pts: pts, volume: volume)
+    _enqueue(buffer, pts: pts, volume: volume)
   }
 
   private func _setVolume(_ volume: Float) {
@@ -278,15 +278,17 @@ public actor SystemAudioRenderer: AudioRendering {
     // Bind to Float instead of Int16
     let dst = dstData.bindMemory(to: Float.self, capacity: frameCount * channelCount)
 
-    // Use BLAS for accelerated interleaving (copy with stride)
+    // Use Accelerate for accelerated interleaving (copy with stride)
     // This effectively interleaves the planar data by copying each channel to its strided position.
     for ch in 0..<channelCount {
-      cblas_scopy(
-        Int32(frameCount),
+      var zero: Float = 0
+      vDSP_vsadd(
         channels[ch],
         1,
+        &zero,
         dst.advanced(by: ch),
-        Int32(channelCount)
+        channelCount,
+        vDSP_Length(frameCount)
       )
     }
 

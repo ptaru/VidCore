@@ -17,12 +17,9 @@ extension MediaDecoder {
   /// - Throws: An error if the seek operation fails (e.g., invalid time, I/O error).
   public func seek(to seconds: Double) async throws -> VideoFrame? {
     // Acquire lock to check state
-    stateLock.lock()
-    guard !isClosed else {
-        stateLock.unlock()
+    if checkIsClosed() {
         return nil
     }
-    stateLock.unlock()
 
     // Dispatch based on available decoder
     if self.hardwareDecodeMode == .passThrough, self.sampleBufferBuilder != nil {
@@ -39,10 +36,10 @@ extension MediaDecoder {
   private func seekPassthrough(to seconds: Double) async throws -> VideoFrame? {
     guard let builder = self.sampleBufferBuilder else { return nil }
 
-    stateLock.lock()
-    // Clear pending packets locally
-    self.pendingContextRestorationPackets.removeAll()
-    stateLock.unlock()
+    performUnderLock {
+      // Clear pending packets locally
+      self.pendingContextRestorationPackets.removeAll()
+    }
 
     // Passthrough path: use demuxer for seeking and getting packets
     // Flush decoder to reset internal state (critical for audio PTS monotonicity reset)
@@ -93,13 +90,13 @@ extension MediaDecoder {
         targetPacket = firstAfterTarget ?? lastPacket
       }
 
-      stateLock.lock()
-      if let targetPacket, targetPacket.isKeyframe {
-        self.pendingContextRestorationPackets = packets.filter { $0 !== targetPacket }
-      } else {
-        self.pendingContextRestorationPackets = packets
+      performUnderLock {
+        if let targetPacket, targetPacket.isKeyframe {
+          self.pendingContextRestorationPackets = packets.filter { $0 !== targetPacket }
+        } else {
+          self.pendingContextRestorationPackets = packets
+        }
       }
-      stateLock.unlock()
 
       guard let packet = targetPacket else {
         throw NSError(

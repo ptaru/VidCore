@@ -1232,9 +1232,13 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 #pragma mark - Seeking
 
-/// Creates a video frame from the currently decoded frame in _frame.
-/// @param pts Presentation timestamp in seconds
-/// @return A new FFmpegVideoFrame or nil if pixel buffer creation fails
+#pragma mark - Color Properties
+
+/**
+ * Attaches color properties to a pixel buffer based on the frame's metadata.
+ * @param frame The source FFmpeg frame
+ * @param pixelBuffer The target CVPixelBuffer
+ */
 - (void)attachColorPropertiesFromFrame:(AVFrame *)frame
                          toPixelBuffer:(CVPixelBufferRef)pixelBuffer {
   if (!frame || !pixelBuffer)

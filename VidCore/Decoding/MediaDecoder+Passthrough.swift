@@ -8,21 +8,23 @@ import CoreMedia
 extension MediaDecoder {
   /// Consumes and returns any pending passthrough frames needed for context restoration.
   public func consumePendingPassthroughFrames() async -> [VideoFrame] {
-    stateLock.lock()
+    let packets = withLock {
+        if isClosed || hardwareDecodeMode != .passThrough || pendingContextRestorationPackets.isEmpty {
+            return [FFmpegDemuxerPacket]()
+        }
+        
+        let packets = self.pendingContextRestorationPackets
+        self.pendingContextRestorationPackets.removeAll()
+        return packets
+    }
     
-    if isClosed || hardwareDecodeMode != .passThrough || pendingContextRestorationPackets.isEmpty {
-        stateLock.unlock()
+    if packets.isEmpty {
         return []
     }
     
     guard let builder = self.sampleBufferBuilder else {
-        stateLock.unlock()
         return []
     }
-
-    let packets = self.pendingContextRestorationPackets
-    self.pendingContextRestorationPackets.removeAll()
-    stateLock.unlock()
 
     var frames: [VideoFrame] = []
     frames.reserveCapacity(packets.count)

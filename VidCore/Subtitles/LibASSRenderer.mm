@@ -105,9 +105,7 @@ extern "C" {
                              (int)storageSize.height);
       }
       if (aspect > 0) {
-        ass_set_aspect_ratio(self->_assRenderer, aspect,
-                             (double)storageSize.width /
-                                 (double)storageSize.height);
+        ass_set_pixel_aspect(self->_assRenderer, aspect);
       }
     }
   });
@@ -168,7 +166,7 @@ extern "C" {
           const char *processedData =
               [eventLine cStringUsingEncoding:NSUTF8StringEncoding];
           if (processedData) {
-            ass_process_data(_assTrack, (char *)processedData,
+            ass_process_data(self->_assTrack, (char *)processedData,
                              (int)strlen(processedData));
           }
           return;
@@ -180,10 +178,10 @@ extern "C" {
       const char *prefix = "Dialogue: ";
       [fixedData appendBytes:prefix length:strlen(prefix)];
       [fixedData appendData:data];
-      ass_process_data(_assTrack, (char *)fixedData.bytes,
+      ass_process_data(self->_assTrack, (char *)fixedData.bytes,
                        (int)fixedData.length);
     } else {
-      ass_process_data(_assTrack, (char *)data.bytes, (int)data.length);
+      ass_process_data(self->_assTrack, (char *)data.bytes, (int)data.length);
     }
   });
 }

@@ -38,15 +38,56 @@ public final class MediaDecoder: @unchecked Sendable {
   
   var isClosed = false
   
-  // Cache for synchronous ASS check
-  var _isASSActive: Bool = false
+  // MARK: - Synchronization Helpers
+
+  func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return try body()
+  }
+
+  func performUnderLock(_ body: () -> Void) {
+    stateLock.lock()
+    body()
+    stateLock.unlock()
+  }
+
+  func checkIsClosed() -> Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return isClosed
+  }
+
+  func getAndRemoveFirstPendingPacket() -> FFmpegDemuxerPacket? {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard !pendingContextRestorationPackets.isEmpty else { return nil }
+    return pendingContextRestorationPackets.removeFirst()
+  }
+
+  func setClosed() -> Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard !isClosed else { return false }
+    isClosed = true
+    return true
+  }
+
+  // MARK: - State Accessors
   
   // Public accessor for subtitle renderer (thread-safe)
   public var isASSActive: Bool {
-      stateLock.lock()
-      defer { stateLock.unlock() }
-      return _isASSActive
+    checkIsASSActive()
   }
+
+  func checkIsASSActive() -> Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return _isASSActive
+  }
+
+  // Cache for synchronous ASS check
+  var _isASSActive: Bool = false
   
   // Pending restoration packets are kept here to be managed under lock
   // as they are part of the MediaDecoder seeking state machine.
@@ -216,13 +257,7 @@ public final class MediaDecoder: @unchecked Sendable {
   }
 
   public func close() {
-    stateLock.lock()
-    guard !isClosed else {
-        stateLock.unlock()
-        return
-    }
-    isClosed = true
-    stateLock.unlock()
+    guard setClosed() else { return }
 
     sampleBufferBuilder = nil
     
@@ -254,20 +289,14 @@ public final class MediaDecoder: @unchecked Sendable {
   ///
   /// - Returns: The next `FFmpegPacketData`, or `nil` if end-of-file is reached or an error occurs.
   public func demuxNextPacket() async -> FFmpegPacketData? {
-    stateLock.lock()
-    
     // Priority 1: Pending restoration packets (from seek)
-    if !self.pendingContextRestorationPackets.isEmpty {
-      let packet = self.pendingContextRestorationPackets.removeFirst()
-      stateLock.unlock()
+    if let packet = getAndRemoveFirstPendingPacket() {
       return self.convertPacket(packet)
     }
     
-    if isClosed {
-        stateLock.unlock()
+    if checkIsClosed() {
         return nil
     }
-    stateLock.unlock()
     
     // Priority 2: Queued audio packets (from seek)
     if let queuedAudioPacket = await demuxerActor.popQueuedAudioPacket() {
@@ -287,12 +316,9 @@ public final class MediaDecoder: @unchecked Sendable {
   /// - Parameter packet: The `FFmpegPacketData` to decode.
   /// - Returns: An array of `DecodedFrame` objects (video, audio, or subtitle). Returns an empty array if decoding produces no frames or if the decoder is closed.
   public func decodePacket(_ packet: FFmpegPacketData) async -> [DecodedFrame] {
-    stateLock.lock()
-    if isClosed {
-        stateLock.unlock()
+    if checkIsClosed() {
         return []
     }
-    stateLock.unlock()
     
     var results: [DecodedFrame] = []
 

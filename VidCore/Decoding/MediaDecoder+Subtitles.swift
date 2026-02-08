@@ -35,12 +35,9 @@ extension MediaDecoder {
   public func resetSubtitleState() async {
     // Acquire state lock for safe modification of _isASSActive if needed, 
     // although assPipeline is internal logic.
-    stateLock.lock()
-    if isClosed {
-        stateLock.unlock()
+    if checkIsClosed() {
         return
     }
-    stateLock.unlock()
     
     // Reset pipeline synchronously (class logic)
     self.assPipeline.reset(flush: true)
@@ -54,9 +51,9 @@ extension MediaDecoder {
     }
     
     // Update active cache
-    stateLock.lock()
-    self._isASSActive = (self.assRenderer != nil)
-    stateLock.unlock()
+    performUnderLock {
+      self._isASSActive = (self.assRenderer != nil)
+    }
   }
 
   /// Cleans ASS/SSA formatted subtitle text.

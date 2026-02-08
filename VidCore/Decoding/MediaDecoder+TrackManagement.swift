@@ -15,12 +15,9 @@ extension MediaDecoder {
   /// Asynchronously retrieves the currently selected audio stream index.
   /// - Returns: Stream index, or -1 if no audio is selected or the decoder is closed.
   public func selectedAudioStreamIndex() async -> Int {
-    stateLock.lock()
-    if isClosed {
-        stateLock.unlock()
+    if checkIsClosed() {
         return -1
     }
-    stateLock.unlock()
     
     return Int(await demuxerActor.selectedAudioStreamIndex())
   }
@@ -31,12 +28,9 @@ extension MediaDecoder {
   /// - Parameter streamIndex: The stream index to switch to.
   /// - Returns: `true` if successful, `false` on error or if the decoder is unavailable.
   public func switchAudioTrack(to streamIndex: Int) async -> Bool {
-    stateLock.lock()
-    guard let decoderActor = self.decoderActor, !isClosed else {
-        stateLock.unlock()
+    guard let decoderActor = self.decoderActor, !checkIsClosed() else {
         return false
     }
-    stateLock.unlock()
 
     // Update demuxer to use the new audio stream
     guard await demuxerActor.selectAudioStream(Int32(streamIndex)) else {
@@ -62,12 +56,9 @@ extension MediaDecoder {
   /// Asynchronously returns the currently selected subtitle stream index.
   /// - Returns: The stream index, or -1 if none is selected or decoder is closed.
   public func selectedSubtitleStreamIndex() async -> Int {
-    stateLock.lock()
-    if isClosed {
-        stateLock.unlock()
+    if checkIsClosed() {
         return -1
     }
-    stateLock.unlock()
     
     return Int(await demuxerActor.selectedSubtitleStreamIndex())
   }
@@ -76,23 +67,21 @@ extension MediaDecoder {
   /// - Parameter streamIndex: The stream index to switch to, or -1 to disable subtitles.
   /// - Returns: `true` if the switch was successful.
   public func switchSubtitleTrack(to streamIndex: Int) async -> Bool {
-    stateLock.lock()
-    guard let decoderActor = self.decoderActor, !isClosed else {
-        stateLock.unlock()
+    guard let decoderActor = self.decoderActor, !checkIsClosed() else {
         return false
     }
-    stateLock.unlock()
 
     if streamIndex == -1 {
       // Disable subtitles
       _ = await demuxerActor.selectSubtitleStream(-1)
       self.assPipeline.reset(flush: true)
       
-      stateLock.lock()
-      self._isASSActive = false
-      stateLock.unlock()
+      performUnderLock {
+        self._isASSActive = false
+      }
       
       return true
+
     }
 
     self.assPipeline.reset(flush: true)
@@ -112,9 +101,9 @@ extension MediaDecoder {
     // Update local ASS state cache.
     // The assPipeline is configured via `configureHeaderIfNeeded` above.
     // We assume valid ASS state if a renderer is successfully created.
-    stateLock.lock()
-    self._isASSActive = (self.assRenderer != nil)
-    stateLock.unlock()
+    performUnderLock {
+        self._isASSActive = (self.assRenderer != nil)
+    }
 
     return await decoderActor.switchSubtitleStream(newConfig)
   }

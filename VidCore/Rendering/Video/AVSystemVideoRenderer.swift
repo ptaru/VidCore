@@ -124,7 +124,7 @@ public struct AVSystemVideoRenderer: NSViewRepresentable {
   /// Creates a CGImage from a VideoFrame using VideoToolbox, handling HDR and Dolby Vision.
   /// - Parameter frame: The video frame to convert.
   /// - Returns: A CGImage representation of the frame, or `nil` if conversion fails.
-  public static func createCGImage(from frame: VideoFrame) -> CGImage? {
+  public nonisolated static func createCGImage(from frame: VideoFrame) -> CGImage? {
     guard let pixelBuffer = frame.pixelBuffer else { return nil }
 
     if frame.isHDR {
