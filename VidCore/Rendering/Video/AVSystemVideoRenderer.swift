@@ -97,11 +97,11 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
 
 /// SwiftUI view that renders video frames using macOS system APIs (AVSampleBufferDisplayLayer).
 public struct AVSystemVideoRenderer: NSViewRepresentable {
-  let player: VideoPlayer
+  let player: MediaPlayer
 
   /// Creates a new system video renderer view.
   /// - Parameter player: The video player to display.
-  public init(player: VideoPlayer) {
+  public init(player: MediaPlayer) {
     self.player = player
   }
 

@@ -27,7 +27,7 @@ struct ContentView: View {
 For more control with custom UI:
 
 ```swift
-@State private var player = VideoPlayer()
+@State private var player = MediaPlayer()
 
 VidPlayer(player: player, showsBuiltInControls: false) {
     CustomControlsOverlay(player: player)
@@ -49,9 +49,9 @@ VidPlayer(player: player, showsBuiltInControls: false) {
 
 ### Playback
 
-- ``VideoPlayer``
+- ``MediaPlayer``
 - ``PlaybackState``
-- ``VideoPlayerError``
+- ``MediaPlayerError``
 - ``PlayerDebugStats``
 - ``PlaybackClock``
 - ``SystemAudioRenderer``
@@ -73,7 +73,7 @@ For testing the fallback in a normal app, set `VIDCORE_FORCE_AUDIO_ENGINE=1` in 
 
 ### Decoding
 
-- ``VideoDecoder``
+- ``MediaDecoder``
 - ``VideoInfo``
 - ``VideoFrame``
 - ``DecodedFrame``

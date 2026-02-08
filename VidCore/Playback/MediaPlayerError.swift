@@ -1,5 +1,5 @@
 //
-//  VideoPlayerError.swift
+//  MediaPlayerError.swift
 //  VidCore
 //
 //  Error types for video player operations
@@ -8,7 +8,7 @@
 import Foundation
 
 /// Error types for video player operations
-public enum VideoPlayerError: Error, Equatable, LocalizedError, Sendable {
+public enum MediaPlayerError: Error, Equatable, LocalizedError, Sendable {
   case fileNotFound
   case decoderInitFailed(String)
   case unsupportedFormat

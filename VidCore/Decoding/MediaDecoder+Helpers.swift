@@ -1,12 +1,12 @@
 //
-//  VideoDecoder+Helpers.swift
+//  MediaDecoder+Helpers.swift
 //  VidCore
 //
 
 import CoreVideo
 import Foundation
 
-extension VideoDecoder {
+extension MediaDecoder {
   /// Convert FFmpegDemuxerPacket to FFmpegPacketData for API compatibility.
   func convertPacket(_ demuxerPacket: FFmpegDemuxerPacket) -> FFmpegPacketData {
     let packet = FFmpegPacketData()

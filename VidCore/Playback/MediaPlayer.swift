@@ -1,11 +1,11 @@
 //
-//  VideoPlayer.swift
+//  MediaPlayer.swift
 //  VidCore
 //
 //  High-level video player with playback orchestration
 //
 //  Decoupled Architecture:
-//  - VideoPlayer (MainActor): Orchestrates high-level state, user input, and UI/Debug mirroring.
+//  - MediaPlayer (MainActor): Orchestrates high-level state, user input, and UI/Debug mirroring.
 //
 
 import Foundation
@@ -13,18 +13,18 @@ import Observation
 
 /// High-level video player that orchestrates decoding, rendering, and audio playback.
 ///
-/// `VideoPlayer` provides a complete playback solution by managing the demux/decode/display
+/// `MediaPlayer` provides a complete playback solution by managing the demux/decode/display
 /// pipeline, A/V synchronization, seeking, and state management.
 ///
 /// ## Example
 /// ```swift
-/// let player = VideoPlayer()
+/// let player = MediaPlayer()
 /// try await player.load(url: videoURL)
 /// player.play()
 /// ```
 @Observable
 @MainActor
-public class VideoPlayer {
+public class MediaPlayer {
   // MARK: - Public State
 
   /// Current playback state
@@ -109,7 +109,7 @@ public class VideoPlayer {
   // MARK: - Internal Components
 
   var audioOutput: AudioRendering
-  var decoder: VideoDecoder?
+  var decoder: MediaDecoder?
   var packetQueue: PacketQueue
   var buffers: Buffers
 
@@ -191,7 +191,7 @@ public class VideoPlayer {
     let effectiveBuffers: Buffers
     switch buffers {
     case .auto:
-      let isHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
+      let isHardware = MediaDecoder.willUseHardwareAcceleration(for: url)
       effectiveBuffers = isHardware ? .hardware : .software
     default:
       effectiveBuffers = buffers
@@ -237,14 +237,14 @@ public class VideoPlayer {
   /// Load a video file for playback.
   ///
   /// - Parameter url: The file URL of the video to load.
-  /// - Throws: `VideoPlayerError` if the file cannot be loaded.
+  /// - Throws: `MediaPlayerError` if the file cannot be loaded.
   public func load(url: URL) async throws {
     hasAudio = false
     state = .loading
 
     // Handle auto-detection for deferred loading - resize buffers if needed
     if case .auto = buffers {
-      let isHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
+      let isHardware = MediaDecoder.willUseHardwareAcceleration(for: url)
       let targetBuffer: Buffers = isHardware ? .hardware : .software
 
       // Check if we need to resize buffers
@@ -264,11 +264,11 @@ public class VideoPlayer {
 
     do {
       // Check if we can use hardware acceleration (and thus pass-through)
-      let supportsHardware = VideoDecoder.willUseHardwareAcceleration(for: url)
+      let supportsHardware = MediaDecoder.willUseHardwareAcceleration(for: url)
       // Use pass-through for hardware, standard decode otherwise
-      let decodeMode: VideoDecoder.HardwareDecodeMode = supportsHardware ? .passThrough : .decode
+      let decodeMode: MediaDecoder.HardwareDecodeMode = supportsHardware ? .passThrough : .decode
 
-      decoder = try VideoDecoder(url: url, hardwareDecodeMode: decodeMode)
+      decoder = try MediaDecoder(url: url, hardwareDecodeMode: decodeMode)
       if let decoder = decoder {
         await worker.updateDecoder(decoder)
         await worker.updateRenderer(renderer)
@@ -315,7 +315,7 @@ public class VideoPlayer {
     } catch {
 
       state = .error(.decoderInitFailed(error.localizedDescription))
-      throw VideoPlayerError.decoderInitFailed(error.localizedDescription)
+      throw MediaPlayerError.decoderInitFailed(error.localizedDescription)
     }
   }
 

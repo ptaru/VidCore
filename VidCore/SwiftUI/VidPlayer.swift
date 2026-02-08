@@ -11,11 +11,11 @@ import SwiftUI
 ///
 /// `VidPlayer` provides an AVPlayer-like API for VidCore, encapsulating all
 /// rendering complexity and state management. It's designed to be a
-/// near drop-in replacement for SwiftUI's `VideoPlayer` from AVKit.
+/// near drop-in replacement for SwiftUI's `MediaPlayer` from AVKit.
 ///
 /// ## Basic Usage
 /// ```swift
-/// @State private var player = VideoPlayer()
+/// @State private var player = MediaPlayer()
 ///
 /// var body: some View {
 ///     VidPlayer(player: player)
@@ -54,7 +54,7 @@ public struct VidPlayer<Overlay: View>: View {
 
   // MARK: - Properties
 
-  private let player: VideoPlayer
+  private let player: MediaPlayer
   private let overlay: Overlay
   private let showsBuiltInControls: Bool
   private let allowsDebugMenu: Bool
@@ -62,8 +62,8 @@ public struct VidPlayer<Overlay: View>: View {
   private let url: URL?
   private let autoPlay: Bool
 
-  @State private var internalPlayer: VideoPlayer?
-  @State private var loadError: VideoPlayerError?
+  @State private var internalPlayer: MediaPlayer?
+  @State private var loadError: MediaPlayerError?
   @State private var showDebugInfo: Bool = false
   @Environment(\.displayScale) private var displayScale
 
@@ -75,12 +75,12 @@ public struct VidPlayer<Overlay: View>: View {
   /// such as custom play/pause buttons or seeking.
   ///
   /// - Parameters:
-  ///   - player: The `VideoPlayer` instance to display.
+  ///   - player: The `MediaPlayer` instance to display.
   ///   - showsBuiltInControls: Whether to show built-in loading, error, and finished states.
   ///     Defaults to `true`. Set to `false` when providing a complete custom UI.
   ///   - overlay: A view builder for content to display over the video.
   public init(
-    player: VideoPlayer,
+    player: MediaPlayer,
     showsBuiltInControls: Bool = true,
     allowsDebugMenu: Bool = false,
     @ViewBuilder overlay: () -> Overlay
@@ -232,10 +232,10 @@ extension VidPlayer where Overlay == EmptyView {
   /// Creates a video player view with an existing player.
   ///
   /// - Parameters:
-  ///   - player: The `VideoPlayer` instance to display.
+  ///   - player: The `MediaPlayer` instance to display.
   ///   - showsBuiltInControls: Whether to show built-in loading, error, and finished states.
   ///   - allowsDebugMenu: Whether to enable the debug info context menu. Defaults to `false`.
-  public init(player: VideoPlayer, showsBuiltInControls: Bool = true, allowsDebugMenu: Bool = false)
+  public init(player: MediaPlayer, showsBuiltInControls: Bool = true, allowsDebugMenu: Bool = false)
   {
     self.init(
       player: player, showsBuiltInControls: showsBuiltInControls, allowsDebugMenu: allowsDebugMenu
@@ -246,7 +246,7 @@ extension VidPlayer where Overlay == EmptyView {
 
   /// Creates a self-contained video player that loads and plays a URL.
   ///
-  /// This initializer creates an internal `VideoPlayer` and manages its
+  /// This initializer creates an internal `MediaPlayer` and manages its
   /// entire lifecycle. The video loads automatically and plays when ready.
   /// Buffer sizes are automatically configured based on hardware acceleration detection.
   ///
@@ -256,7 +256,7 @@ extension VidPlayer where Overlay == EmptyView {
   ///   - allowsDebugMenu: Whether to enable the debug info context menu. Defaults to `false`.
   public init(url: URL, autoPlay: Bool = true, allowsDebugMenu: Bool = false) {
     // Create player with auto-detection for optimal buffer sizes
-    self.player = VideoPlayer(url: url, buffers: .auto)
+    self.player = MediaPlayer(url: url, buffers: .auto)
     self.showsBuiltInControls = true
     self.allowsDebugMenu = allowsDebugMenu
     self.overlay = EmptyView()
@@ -272,7 +272,7 @@ extension VidPlayer where Overlay == EmptyView {
 
 /// Internal error display view
 private struct VidPlayerErrorView: View {
-  let error: VideoPlayerError
+  let error: MediaPlayerError
 
   var body: some View {
     VStack(spacing: 12) {

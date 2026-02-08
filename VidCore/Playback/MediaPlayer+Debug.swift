@@ -1,5 +1,5 @@
 //
-//  VideoPlayer+Debug.swift
+//  MediaPlayer+Debug.swift
 //  VidCore
 //
 
@@ -16,7 +16,7 @@ public struct PlayerDebugStats: Sendable {
   public var syncRate: Double = 0.0
 }
 
-extension VideoPlayer {
+extension MediaPlayer {
   func refreshDebugStats(videoPTS: Double? = nil) async {
     if let videoPTS = videoPTS {
       lastVideoPTS = videoPTS

@@ -17,5 +17,5 @@ public enum PlaybackState: Equatable, Sendable {
   case seeking
   case scrubbing
   case finished
-  case error(VideoPlayerError)
+  case error(MediaPlayerError)
 }

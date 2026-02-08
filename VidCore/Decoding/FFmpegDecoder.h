@@ -179,7 +179,7 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Flush the decoder to signal end of stream.
 ///
 /// Must be called before draining remaining frames.
-- (void)flushVideoDecoder;
+- (void)flushMediaDecoder;
 
 /// Drain remaining buffered frames from the decoder.
 ///

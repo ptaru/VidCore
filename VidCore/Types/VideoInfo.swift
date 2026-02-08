@@ -10,11 +10,11 @@ import Foundation
 /// Metadata about a video stream.
 ///
 /// Contains information about the video dimensions, timing, codec, and hardware acceleration status.
-/// This is available immediately after initializing a ``VideoDecoder``.
+/// This is available immediately after initializing a ``MediaDecoder``.
 ///
 /// ## Example
 /// ```swift
-/// let decoder = try VideoDecoder(url: videoURL)
+/// let decoder = try MediaDecoder(url: videoURL)
 /// print("Resolution: \(decoder.videoInfo.width)x\(decoder.videoInfo.height)")
 /// print("Duration: \(decoder.videoInfo.duration) seconds")
 /// ```

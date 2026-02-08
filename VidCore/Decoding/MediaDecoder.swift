@@ -1,5 +1,5 @@
 //
-//  VideoDecoder.swift
+//  MediaDecoder.swift
 //  VidCore
 //
 //  High-performance video decoder orchestrating FFmpeg and hardware passthrough
@@ -13,7 +13,7 @@ import Foundation
 extension FFmpegPacketData: @unchecked Sendable {}
 
 /// High-performance video decoder using FFmpeg with passthrough hardware rendering when available.
-public final class VideoDecoder: @unchecked Sendable {
+public final class MediaDecoder: @unchecked Sendable {
 
   /// Modes for hardware acceleration
   public enum HardwareDecodeMode {
@@ -49,7 +49,7 @@ public final class VideoDecoder: @unchecked Sendable {
   }
   
   // Pending restoration packets are kept here to be managed under lock
-  // as they are part of the VideoDecoder seeking state machine.
+  // as they are part of the MediaDecoder seeking state machine.
   let stateLock = NSLock()
   var pendingContextRestorationPackets: [FFmpegDemuxerPacket] = []
 
@@ -78,7 +78,7 @@ public final class VideoDecoder: @unchecked Sendable {
     // Read info synchronously during init
     guard let info = demuxer.getVideoInfo() else {
       throw NSError(
-        domain: "VideoDecoder", code: -2,
+        domain: "MediaDecoder", code: -2,
         userInfo: [NSLocalizedDescriptionKey: "Failed to get media info"])
     }
     
@@ -400,8 +400,8 @@ public final class VideoDecoder: @unchecked Sendable {
   /// Asynchronously flushes the video decoder, clearing internal buffers.
   ///
   /// This must be called before seeking or when the stream continuity is broken to avoid decoding artifacts.
-  public func flushVideoDecoder() async {
-    await decoderActor?.flushVideoDecoder()
+  public func flushMediaDecoder() async {
+    await decoderActor?.flushMediaDecoder()
   }
 
   /// Asynchronously flushes the audio decoder, clearing internal buffers.

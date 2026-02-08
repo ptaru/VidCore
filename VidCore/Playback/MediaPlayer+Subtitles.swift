@@ -1,12 +1,12 @@
 //
-//  VideoPlayer+Subtitles.swift
+//  MediaPlayer+Subtitles.swift
 //  VidCore
 //
 
 import CoreGraphics
 import Foundation
 
-extension VideoPlayer {
+extension MediaPlayer {
   func updateSubtitles(for time: Double) {
     // Ignore out-of-order frames to prevent flickering at subtitle boundaries
     // Only allow backwards jumps if they're significant (>1s, indicating a real seek)
@@ -77,7 +77,7 @@ extension VideoPlayer {
     return delta >= 0.5
   }
 
-  func scheduleASSRender(for time: Double, decoder: VideoDecoder) {
+  func scheduleASSRender(for time: Double, decoder: MediaDecoder) {
     pendingASSRenderTime = time
 
     guard subtitleRenderTask == nil else { return }
@@ -88,7 +88,7 @@ extension VideoPlayer {
     }
   }
 
-  private func runASSRenderLoop(decoder: VideoDecoder) async {
+  private func runASSRenderLoop(decoder: MediaDecoder) async {
     while true {
       if Task.isCancelled {
         break

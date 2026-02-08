@@ -1,5 +1,5 @@
 //
-//  VideoPlayer+Worker.swift
+//  MediaPlayer+Worker.swift
 //  VidCore
 //
 
@@ -7,7 +7,7 @@ import Foundation
 
 // MARK: - Playback Worker Delegate
 
-extension VideoPlayer: PlaybackWorkerDelegate {
+extension MediaPlayer: PlaybackWorkerDelegate {
   func workerDidRenderVideoFrame(_ frame: VideoFrame) {
     currentFrame = frame
   }

@@ -18,7 +18,7 @@ protocol PlaybackWorkerDelegate: AnyObject {
 
 actor PlaybackWorker {
   private weak var delegate: (any PlaybackWorkerDelegate)?
-  private var decoder: VideoDecoder?
+  private var decoder: MediaDecoder?
   private var packetQueue: PacketQueue
   private weak var renderer: (any VideoRendererTarget)?
   private var audioOutput: AudioRendering
@@ -29,7 +29,7 @@ actor PlaybackWorker {
   private var hasSignaledAudio = false
 
   init(
-    decoder: VideoDecoder?,
+    decoder: MediaDecoder?,
     packetQueue: PacketQueue,
     renderer: (any VideoRendererTarget)?,
     audioOutput: AudioRendering,
@@ -42,7 +42,7 @@ actor PlaybackWorker {
     self.delegate = delegate
   }
 
-  func updateDecoder(_ decoder: VideoDecoder?) {
+  func updateDecoder(_ decoder: MediaDecoder?) {
     self.decoder = decoder
     hasSignaledAudio = false
   }
@@ -147,7 +147,7 @@ actor PlaybackWorker {
   
   // MARK: - Helpers
   
-  private func processPacket(_ packet: FFmpegPacketData, decoder: VideoDecoder) async {
+  private func processPacket(_ packet: FFmpegPacketData, decoder: MediaDecoder) async {
       let decodedFrames = await decoder.decodePacket(packet)
       for frame in decodedFrames {
         switch frame {
@@ -161,8 +161,8 @@ actor PlaybackWorker {
       }
   }
   
-  private func drainDecoder(_ decoder: VideoDecoder) async {
-      await decoder.flushVideoDecoder()
+  private func drainDecoder(_ decoder: MediaDecoder) async {
+      await decoder.flushMediaDecoder()
       await decoder.flushAudioDecoder()
       
       while !Task.isCancelled {

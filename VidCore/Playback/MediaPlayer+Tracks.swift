@@ -1,11 +1,11 @@
 //
-//  VideoPlayer+Tracks.swift
+//  MediaPlayer+Tracks.swift
 //  VidCore
 //
 
 import Foundation
 
-extension VideoPlayer {
+extension MediaPlayer {
   // MARK: - Audio Track Selection
 
   /// All available audio tracks in the current video.

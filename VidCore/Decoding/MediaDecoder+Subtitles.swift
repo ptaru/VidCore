@@ -1,15 +1,15 @@
 //
-//  VideoDecoder+Subtitles.swift
+//  MediaDecoder+Subtitles.swift
 //  VidCore
 //
 
 import CoreGraphics
 import Foundation
 
-extension VideoDecoder {
+extension MediaDecoder {
   /// Whether the currently selected subtitle track is ASS/SSA.
   public var isCurrentSubtitleTrackASS: Bool {
-    return self.isASSActive // Uses the thread-safe property on VideoDecoder
+    return self.isASSActive // Uses the thread-safe property on MediaDecoder
   }
 
   /// Renders the subtitle image for a specific time and size.

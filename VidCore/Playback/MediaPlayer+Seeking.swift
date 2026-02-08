@@ -1,11 +1,11 @@
 //
-//  VideoPlayer+Seeking.swift
+//  MediaPlayer+Seeking.swift
 //  VidCore
 //
 
 import Foundation
 
-extension VideoPlayer {
+extension MediaPlayer {
   // MARK: - Scrubbing
 
   /// Begin a scrubbing session.
@@ -220,14 +220,14 @@ extension VideoPlayer {
 // MARK: - Seek/Scrub Coordinator
 
 actor SeekCoordinator {
-  private weak var player: VideoPlayer?
+  private weak var player: MediaPlayer?
   private var activeSeekTask: Task<Void, Never>?
   private var latestScrubTime: Double?
   private var isScrubbing = false
   private var previewTask: Task<Void, Never>?
   private var scrubToken: UInt64 = 0
 
-  init(player: VideoPlayer) {
+  init(player: MediaPlayer) {
     self.player = player
   }
 

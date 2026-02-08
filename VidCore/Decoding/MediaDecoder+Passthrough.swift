@@ -1,11 +1,11 @@
 //
-//  VideoDecoder+Passthrough.swift
+//  MediaDecoder+Passthrough.swift
 //  VidCore
 //
 
 import CoreMedia
 
-extension VideoDecoder {
+extension MediaDecoder {
   /// Consumes and returns any pending passthrough frames needed for context restoration.
   public func consumePendingPassthroughFrames() async -> [VideoFrame] {
     stateLock.lock()

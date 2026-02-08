@@ -1,5 +1,5 @@
 //
-//  VideoDecoder+Actors.swift
+//  MediaDecoder+Actors.swift
 //  VidCore
 //
 
@@ -105,8 +105,8 @@ actor DecoderActor {
     return decoder.decodePacket(packet)
   }
   
-  func flushVideoDecoder() {
-    decoder.flushVideoDecoder()
+  func flushMediaDecoder() {
+    decoder.flushMediaDecoder()
   }
   
   func flushAudioDecoder() {

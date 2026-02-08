@@ -63,7 +63,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 @property(nonatomic, assign)
     AVCodecContext *codecContext; // Video codec context
-// SampleBufferBuilder now handled by Swift VideoDecoder
+// SampleBufferBuilder now handled by Swift MediaDecoder
 @property(nonatomic, assign)
     AVCodecContext *audioCodecContext; // Audio codec context
 @property(nonatomic, assign)
@@ -581,7 +581,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 /// Decode a video packet and return ALL available frames
 /// With multi-threaded decoding, the decoder may have multiple frames ready
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacket:(AVPacket *)pkt {
-  // Note: SampleBufferBuilder is now used by VideoDecoder.swift for H264/HEVC
+  // Note: SampleBufferBuilder is now used by MediaDecoder.swift for H264/HEVC
   // passthrough This method handles FFmpeg software and FFmpeg-VideoToolbox
   // paths
 
@@ -888,7 +888,7 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 #pragma mark - Decoder Flushing & Draining
 
-- (void)flushVideoDecoder {
+- (void)flushMediaDecoder {
   if (!_codecContext) {
     return;
   }

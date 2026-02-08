@@ -1,5 +1,5 @@
 //
-//  VideoDecoder+SampleBufferBuilder.swift
+//  MediaDecoder+SampleBufferBuilder.swift
 //  VidCore
 //
 

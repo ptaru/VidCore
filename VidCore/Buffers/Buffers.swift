@@ -15,9 +15,9 @@ import Foundation
 ///
 /// ## Example
 /// ```swift
-/// let player = VideoPlayer(url: videoURL, buffers: .auto)      // Auto-detect decoder type
-/// let player = VideoPlayer(url: videoURL, buffers: .hardware)  // Force hardware sizes
-/// let player = VideoPlayer(url: videoURL, buffers: .custom(frameBuffer: 5, packetQueue: 50))
+/// let player = MediaPlayer(url: videoURL, buffers: .auto)      // Auto-detect decoder type
+/// let player = MediaPlayer(url: videoURL, buffers: .hardware)  // Force hardware sizes
+/// let player = MediaPlayer(url: videoURL, buffers: .custom(frameBuffer: 5, packetQueue: 50))
 /// ```
 public enum Buffers: Sendable {
     /// Automatically detect decoder type and use appropriate buffer sizes.

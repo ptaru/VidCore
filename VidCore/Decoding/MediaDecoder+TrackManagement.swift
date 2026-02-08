@@ -1,11 +1,11 @@
 //
-//  VideoDecoder+TrackManagement.swift
+//  MediaDecoder+TrackManagement.swift
 //  VidCore
 //
 
 import Foundation
 
-extension VideoDecoder {
+extension MediaDecoder {
   /// Asynchronously returns all available audio tracks from the container.
   /// - Returns: Array of `AudioTrackInfo`, empty if no audio tracks.
   public func getAudioTracks() -> [AudioTrackInfo] {

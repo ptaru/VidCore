@@ -1,12 +1,12 @@
 //
-//  VideoDecoder+Seeking.swift
+//  MediaDecoder+Seeking.swift
 //  VidCore
 //
 
 import CoreMedia
 import Foundation
 
-extension VideoDecoder {
+extension MediaDecoder {
   /// Asynchronously seeks to a specific time in the video.
   ///
   /// This method handles both normal FFmpeg decoding and hardware passthrough seeking.
@@ -31,7 +31,7 @@ extension VideoDecoder {
       return try await self.seekFFmpeg(to: seconds)
     } else {
       throw NSError(
-          domain: "VideoDecoder", code: -3,
+          domain: "MediaDecoder", code: -3,
           userInfo: [NSLocalizedDescriptionKey: "Seek failed - decoder unavailable"])
     }
   }
@@ -51,7 +51,7 @@ extension VideoDecoder {
     let seekSuccess = await demuxerActor.seek(toKeyframe: seconds)
     guard seekSuccess else {
       throw NSError(
-        domain: "VideoDecoder", code: -3,
+        domain: "MediaDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - seek error"])
     }
 
@@ -59,7 +59,7 @@ extension VideoDecoder {
     // Always collect until target for accurate seek
     guard let packets = await demuxerActor.collectPackets(until: seconds), !packets.isEmpty else {
       throw NSError(
-        domain: "VideoDecoder", code: -3,
+        domain: "MediaDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packets"])
     }
 
@@ -103,7 +103,7 @@ extension VideoDecoder {
 
       guard let packet = targetPacket else {
         throw NSError(
-          domain: "VideoDecoder", code: -3,
+          domain: "MediaDecoder", code: -3,
           userInfo: [NSLocalizedDescriptionKey: "Seek failed - no packet found"])
       }
 
@@ -132,7 +132,7 @@ extension VideoDecoder {
     }
 
     throw NSError(
-      domain: "VideoDecoder", code: -3,
+      domain: "MediaDecoder", code: -3,
       userInfo: [NSLocalizedDescriptionKey: "Seek failed - passthrough only path"])
   }
 
@@ -147,7 +147,7 @@ extension VideoDecoder {
     let seekSuccess = await demuxerActor.seek(toKeyframe: seconds)
     guard seekSuccess else {
       throw NSError(
-        domain: "VideoDecoder", code: -3,
+        domain: "MediaDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed"])
     }
 
@@ -216,7 +216,7 @@ extension VideoDecoder {
       return frame
     } else {
       throw NSError(
-        domain: "VideoDecoder", code: -3,
+        domain: "MediaDecoder", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Seek failed - no suitable frame found"])
     }
   }
