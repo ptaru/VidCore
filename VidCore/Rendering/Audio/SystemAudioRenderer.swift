@@ -56,8 +56,10 @@ public actor SystemAudioRenderer: AudioRendering {
 
   /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
-
-    // AVSampleBufferAudioRenderer manages its own readiness or we accept potential drops if not ready.
+    while renderer?.isReadyForMoreMediaData == false {
+      if Task.isCancelled { return }
+      try? await Task.sleep(nanoseconds: 10_000_000)
+    }
   }
 
   /// Flushes the audio renderer.
