@@ -44,6 +44,15 @@ extension VideoDecoder {
               ambientLightMetadata: packet.ambientLightMetadata
             )
 
+            // Mark as DoNotDisplay so AVSBDL decodes but doesn't show it
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(
+              sampleBuffer, createIfNecessary: true)
+            if let attachments = attachments as? [NSMutableDictionary],
+              let first = attachments.first
+            {
+              first[kCMSampleAttachmentKey_DoNotDisplay] = kCFBooleanTrue
+            }
+
             let frame = VideoFrame(
               sampleBuffer: sampleBuffer,
               presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
