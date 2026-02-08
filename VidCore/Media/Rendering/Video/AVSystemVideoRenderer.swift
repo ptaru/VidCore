@@ -18,9 +18,8 @@ extension AVSampleBufferDisplayLayer: @unchecked @retroactive Sendable {}
 /// It is Sendable and can be called from background threads.
 public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaDataReadinessAwaiting {
   public nonisolated let displayLayer = AVSampleBufferDisplayLayer()
-  private var readinessWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+  private var waiters: [CheckedContinuation<Void, Never>] = []
   private var isRequestingReadiness: Bool = false
-  private let readinessTimeoutNanos: UInt64 = 250_000_000
 
   /// Creates a new layer renderer.
   public init() {
@@ -51,94 +50,48 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
 
   /// Waits until the renderer is ready for more data.
   public func waitUntilReady() async {
-    if displayLayer.sampleBufferRenderer.isReadyForMoreMediaData {
+    let renderer = displayLayer.sampleBufferRenderer
+    if renderer.isReadyForMoreMediaData {
       return
     }
 
-    let waiterID = UUID()
     await withTaskCancellationHandler {
       await withCheckedContinuation { continuation in
-        readinessWaiters[waiterID] = continuation
-        let shouldStart = !isRequestingReadiness
-        if shouldStart {
+        waiters.append(continuation)
+
+        if !isRequestingReadiness {
           isRequestingReadiness = true
-        }
-
-        Task {
-          try? await Task.sleep(nanoseconds: readinessTimeoutNanos)
-          var shouldStop = false
-          var waiter: CheckedContinuation<Void, Never>?
-          self.timeoutWaiter(waiterID: waiterID) { stop, w in
-            shouldStop = stop
-            waiter = w
-          }
-          if shouldStop {
-            self.displayLayer.sampleBufferRenderer.stopRequestingMediaData()
-          }
-          waiter?.resume()
-        }
-
-        if shouldStart {
-          self.displayLayer.sampleBufferRenderer.requestMediaDataWhenReady(
-            on: DispatchQueue.global(qos: .userInteractive)
-          ) { [weak self] in
+          renderer.requestMediaDataWhenReady(on: .global()) { [weak self] in
             guard let self else { return }
-            guard self.displayLayer.sampleBufferRenderer.isReadyForMoreMediaData else { return }
-
-            self.displayLayer.sampleBufferRenderer.stopRequestingMediaData()
-
-            // Use detached task with high priority to jump back to actor context immediately
-            Task.detached(priority: .userInteractive) {
-              await self.resumeAllWaiters()
+            Task {
+              await self.resolveWaiters()
             }
           }
         }
       }
     } onCancel: {
       Task {
-        await self.cancelWaiter(waiterID: waiterID)
+        await self.resolveWaiters()
       }
     }
   }
 
-  private func timeoutWaiter(
-    waiterID: UUID, completion: (Bool, CheckedContinuation<Void, Never>?) -> Void
-  ) {
-    let waiter = readinessWaiters.removeValue(forKey: waiterID)
-    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-    if shouldStop {
-      isRequestingReadiness = false
-    }
-    completion(shouldStop, waiter)
-  }
-
-  private func resumeAllWaiters() {
-    let waiters = readinessWaiters.values
-    readinessWaiters.removeAll()
+  private func resolveWaiters() {
+    let currentWaiters = waiters
+    waiters.removeAll()
     isRequestingReadiness = false
-
-    for waiter in waiters {
+    displayLayer.sampleBufferRenderer.stopRequestingMediaData()
+    for waiter in currentWaiters {
       waiter.resume()
     }
-  }
-
-  private func cancelWaiter(waiterID: UUID) {
-    let waiter = readinessWaiters.removeValue(forKey: waiterID)
-    let shouldStop = readinessWaiters.isEmpty && isRequestingReadiness
-    if shouldStop {
-      isRequestingReadiness = false
-    }
-
-    if shouldStop {
-      displayLayer.sampleBufferRenderer.stopRequestingMediaData()
-    }
-
-    waiter?.resume()
   }
 
   /// Flushes the video renderer.
   public nonisolated func flush() {
     displayLayer.sampleBufferRenderer.flush()
+    Task {
+      await self.resolveWaiters()
+    }
   }
 }
 
