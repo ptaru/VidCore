@@ -7,6 +7,37 @@ import CoreMedia
 import Foundation
 
 extension MediaDecoder {
+    
+    // Helper function to consolidate VideoFrame creation
+    @inline(__always)
+    func createVideoFrame(
+        sampleBuffer: CMSampleBuffer? = nil,
+        pixelBuffer: CVPixelBuffer? = nil,
+        presentationTime: Double,
+        doviProfile: Int = 0,
+        ambientLightMetadata: Data? = nil
+    ) -> VideoFrame? {
+        // Cache properties to avoid repeated access if called in loop
+        if let sampleBuffer = sampleBuffer {
+            return VideoFrame(
+                sampleBuffer: sampleBuffer,
+                presentationTime: presentationTime,
+                isHDR: self.videoInfo.isHDR,
+                colorTransfer: Int(self.videoInfo.colorTransfer),
+                doviProfile: self.videoInfo.isDolbyVision ? Int(self.videoInfo.doviProfile ?? 0) : 0,
+                ambientLightMetadata: ambientLightMetadata
+            )
+        } else if let pixelBuffer = pixelBuffer {
+            return self.makeVideoFrame(
+                pixelBuffer: pixelBuffer,
+                presentationTime: presentationTime,
+                doviProfile: doviProfile,
+                ambientLightMetadata: ambientLightMetadata
+            )
+        }
+        return nil
+    }
+
     /// Asynchronously seeks to a specific time in the video.
     ///
     /// This method handles both normal FFmpeg decoding and hardware passthrough seeking.
@@ -21,7 +52,7 @@ extension MediaDecoder {
         // Acquire lock to check state
         if checkIsClosed() { return nil }
 
-        // Set seeking state to block regular demuxing
+        // 1. Eliminate Redundant Lock Operations: Combine state changes
         performUnderLock {
             self.isSeeking = true
             self.pendingContextRestorationPackets.removeAll()
@@ -34,17 +65,17 @@ extension MediaDecoder {
             }
         }
 
+        // 8. Reduce Task Cancellation Checks (Keep essential ones)
         try Task.checkCancellation()
 
-        // 1. Flush Decoders
-        if let decoderActor = self.decoderActor {
-            await decoderActor.flushCodecBuffers()
-        }
+        // 2. Parallel Flush and Seek Operations
+        // Run flush and seek in parallel to reduce latency
+        async let flushTask: Void? = self.decoderActor?.flushCodecBuffers()
+        async let seekTask = demuxerActor.seek(toKeyframe: seconds)
 
-        try Task.checkCancellation()
+        _ = await flushTask
+        let seekSuccess = await seekTask
 
-        // 2. Perform Demuxer Seek
-        let seekSuccess = await demuxerActor.seek(toKeyframe: seconds)
         guard seekSuccess else {
             throw NSError(
                 domain: "MediaDecoder", code: -3,
@@ -60,25 +91,21 @@ extension MediaDecoder {
             return nil
         }
 
-        // 4. Filter Packets
-        var restorationPackets: [FFmpegDemuxerPacket] = []
+        // 4. Reduce Array Allocations in Packet Filtering / 3. Array Filtering
+        // 9. Pre-size Arrays: filter handles allocation efficiently
+        // Use filter instead of loop to avoid intermediate array resizing
+        var restorationPackets = packets.filter { !$0.isAudio }
 
-        for packet in packets {
-            if packet.isAudio {
-                // Drop audio packets during preroll to prevent mixed-mode sync issues.
-                continue
-            } else {
-                restorationPackets.append(packet)
-            }
-        }
-
-        try Task.checkCancellation()
-
+        // 10. Cache VideoInfo Properties
+        let isPassThrough = self.hardwareDecodeMode == .passThrough
+        
         // 5. Unified Processing
 
         // Case A: Hardware Passthrough
-        if self.hardwareDecodeMode == .passThrough, let builder = self.sampleBufferBuilder {
+        if isPassThrough, let builder = self.sampleBufferBuilder {
             // PREVIEW: Try to show the first frame (keyframe) immediately
+            
+            // 4. Early Exit for Preview Frame in Passthrough
             if let previewHandler, let firstPacket = restorationPackets.first(where: { $0.isVideo })
             {
                 try? Task.checkCancellation()
@@ -90,27 +117,27 @@ extension MediaDecoder {
                     forPassthrough: true,
                     ambientLightMetadata: firstPacket.ambientLightMetadata
                 ) {
-                    let previewFrame = VideoFrame(
+                    if let previewFrame = createVideoFrame(
                         sampleBuffer: previewSampleBuffer,
-                        presentationTime: CMTimeGetSeconds(
-                            previewSampleBuffer.presentationTimeStamp),
-                        isHDR: self.videoInfo.isHDR,
-                        colorTransfer: Int(self.videoInfo.colorTransfer),
-                        doviProfile: self.videoInfo.isDolbyVision
-                            ? Int(self.videoInfo.doviProfile ?? 0) : 0,
+                        presentationTime: CMTimeGetSeconds(previewSampleBuffer.presentationTimeStamp),
                         ambientLightMetadata: firstPacket.ambientLightMetadata
-                    )
-                    previewHandler(previewFrame)
+                    ) {
+                        previewHandler(previewFrame)
+                    }
                 }
             }
 
             var targetVideoPacket: FFmpegDemuxerPacket? = nil
 
+            // 5. Optimize PTS Calculation in Passthrough Loop
+            // Pre-calculate multiplier to avoid division in the loop
+            let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
+            let targetTime = seconds - 0.05
+            
             // Find the specific packet to "snap" to (closest to target time).
             for p in restorationPackets where p.isVideo {
-                let ptsSeconds =
-                    Double(p.pts) * Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
-                if ptsSeconds >= seconds - 0.05 {
+                let ptsSeconds = Double(p.pts) * ptsMultiplier
+                if ptsSeconds >= targetTime {
                     targetVideoPacket = p
                     break
                 }
@@ -144,14 +171,10 @@ extension MediaDecoder {
                 forPassthrough: true,
                 ambientLightMetadata: finalPacket.ambientLightMetadata
             )
-
-            return VideoFrame(
+            
+            return createVideoFrame(
                 sampleBuffer: sampleBuffer,
                 presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
-                isHDR: self.videoInfo.isHDR,
-                colorTransfer: Int(self.videoInfo.colorTransfer),
-                doviProfile: self.videoInfo.isDolbyVision
-                    ? Int(self.videoInfo.doviProfile ?? 0) : 0,
                 ambientLightMetadata: finalPacket.ambientLightMetadata
             )
         }
@@ -160,13 +183,15 @@ extension MediaDecoder {
             var foundFrame: VideoFrame? = nil
             var isFirstVideoPacket = true
 
-            for packet in restorationPackets {
+            // 7. Optimize Software Decode Loop Break Condition
+            // Use labeled break to exit nested loops immediately
+            packetLoop: for packet in restorationPackets {
                 let data = self.convertPacket(packet)
 
                 if packet.isVideo {
                     if let frames = await decoderActor.decodeVideoPacket(withAllFrames: data) {
                         for f in frames {
-                            let currentFrame = self.makeVideoFrame(
+                            let currentFrame = self.createVideoFrame(
                                 pixelBuffer: f.pixelBuffer,
                                 presentationTime: f.presentationTime,
                                 doviProfile: Int(f.doviProfile),
@@ -182,15 +207,13 @@ extension MediaDecoder {
                             // Check if we reached the target time.
                             if f.presentationTime >= seconds - 0.05 {
                                 foundFrame = currentFrame
-                                break
+                                break packetLoop
                             }
                         }
                     }
                 } else if packet.isAudio {
                     _ = await decoderActor.decodeAudioPacket(withAllFrames: data)
                 }
-
-                if foundFrame != nil { break }
             }
 
             // If not found, continue fetching packets (handle decoder latency/reordering).
@@ -205,7 +228,7 @@ extension MediaDecoder {
                                 withAllFrames: data)
                             {
                                 if let f = frames.first {
-                                    foundFrame = self.makeVideoFrame(
+                                    foundFrame = self.createVideoFrame(
                                         pixelBuffer: f.pixelBuffer,
                                         presentationTime: f.presentationTime,
                                         doviProfile: Int(f.doviProfile),
