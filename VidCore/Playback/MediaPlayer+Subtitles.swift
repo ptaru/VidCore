@@ -135,7 +135,10 @@ extension MediaPlayer {
 
             if let info = info {
                 let storageSize = CGSize(width: Double(info.width), height: Double(info.height))
-                decoder.assRenderer?.setStorageSize(storageSize, aspect: info.displayAspectRatio)
+                let sar =
+                    (info.sampleAspectRatioNum > 0 && info.sampleAspectRatioDen > 0)
+                    ? Double(info.sampleAspectRatioNum) / Double(info.sampleAspectRatioDen) : 1.0
+                decoder.assRenderer?.setStorageSize(storageSize, aspect: sar)
             }
 
             let (image, changed) = decoder.getSubtitleImage(
