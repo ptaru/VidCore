@@ -13,7 +13,6 @@ extension MediaPlayer {
     /// This pauses playback, stops the decode loop, and prepares the player for rapid
     /// coalesced seeking. Use `scrub(to:)` to update the position.
     public func beginScrub() async {
-        print("beginScrub")
         // Cancel active seek/scrub
         currentSeekTask?.cancel()
         await decoder?.requestDemuxAbort()
@@ -46,7 +45,6 @@ extension MediaPlayer {
     ///
     /// - Parameter time: The target time to scrub to.
     public func scrub(to time: Double) async {
-        print("scrub(to: \(time))")
         guard isScrubbing else { return }
 
         let previousTask = currentSeekTask
@@ -64,7 +62,6 @@ extension MediaPlayer {
 
     /// End the scrubbing session.
     public func endScrub() async {
-        print("endScrub")
         guard isScrubbing else { return }
         isScrubbing = false
 
