@@ -12,11 +12,11 @@ set -e
 
 # Configuration
 FFMPEG_VERSION="8.0.1"
-DAV1D_VERSION="1.5.0"
-FREETYPE_VERSION="2.13.2"
-FRIBIDI_VERSION="1.0.13"
-HARFBUZZ_VERSION="8.3.0"
-LIBASS_VERSION="0.17.1"
+DAV1D_VERSION="1.5.3"
+FREETYPE_VERSION="2.14.1"
+FRIBIDI_VERSION="1.0.16"
+HARFBUZZ_VERSION="12.3.2"
+LIBASS_VERSION="0.17.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build-ffmpeg"
@@ -36,7 +36,7 @@ FFMPEG_LIBS=(
 )
 
 echo "=========================================="
-echo "FFmpeg + dav1d Static Library Builder"
+echo "          VidCore FFmpeg Builder"
 echo "=========================================="
 echo "FFmpeg version: $FFMPEG_VERSION"
 echo "dav1d version: $DAV1D_VERSION"
