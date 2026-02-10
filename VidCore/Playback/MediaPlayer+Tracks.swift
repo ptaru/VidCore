@@ -89,6 +89,9 @@ extension MediaPlayer {
             // Clear old subtitles
             subtitles.removeAll()
             currentSubtitle = nil
+            
+            // Force refresh to catch current subtitles by seeking to current time
+            await seek(to: currentTime)
         }
     }
 }

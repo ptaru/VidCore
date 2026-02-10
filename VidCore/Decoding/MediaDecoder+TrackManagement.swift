@@ -105,8 +105,13 @@ extension MediaDecoder {
         self.assPipeline.configureHeaderIfNeeded(from: newConfig)
 
         // Update local ASS state cache.
+        var isASSWrapper = false
+        if let track = self.videoInfo.subtitleTracks.first(where: { $0.streamIndex == streamIndex }) {
+            isASSWrapper = (track.codecName == "ass" || track.codecName == "ssa")
+        }
+
         performUnderLock {
-            self._isASSActive = (self.assRenderer != nil)
+            self._isASSActive = isASSWrapper
         }
 
         return await decoderActor.switchSubtitleStream(newConfig)

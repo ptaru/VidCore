@@ -42,15 +42,21 @@ extension MediaDecoder {
 
         // Re-configure based on selected stream from demuxer actor
         let index = await demuxerActor.selectedSubtitleStreamIndex()
+        var isASSWrapper = false
+
         if index >= 0 {
             if let config = await demuxerActor.getSubtitleDecoderConfig(forStream: index) {
                 self.assPipeline.configureHeaderIfNeeded(from: config)
+            }
+            // Check if track is ASS/SSA
+            if let track = self.videoInfo.subtitleTracks.first(where: { $0.streamIndex == index }) {
+                isASSWrapper = (track.codecName == "ass" || track.codecName == "ssa")
             }
         }
 
         // Update active cache
         performUnderLock {
-            self._isASSActive = (self.assRenderer != nil)
+            self._isASSActive = isASSWrapper
         }
     }
 
