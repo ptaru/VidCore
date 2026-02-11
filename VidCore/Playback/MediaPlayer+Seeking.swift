@@ -95,14 +95,7 @@ extension MediaPlayer {
             try Task.checkCancellation()
 
             // Seek Decoder
-            if let frame = try await decoder.seek(
-                to: clamped,
-                previewHandler: { [weak self] previewFrame in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.isScrubbing else { return }
-                        await self.renderFrame(previewFrame, flushRenderer: true)
-                    }
-                })
+            if let frame = try await decoder.seek(to: clamped)
             {
                 try Task.checkCancellation()
 

@@ -46,8 +46,7 @@ extension MediaDecoder {
     /// - Parameter seconds: The target time in seconds.
     /// - Returns: The first `VideoFrame` at or after the seek target, or `nil` if seeking fails or no frame is found.
     /// - Throws: An error if the seek operation fails (e.g., invalid time, I/O error).
-    public func seek(to seconds: Double, previewHandler: ((VideoFrame) -> Void)? = nil) async throws
-        -> VideoFrame?
+    public func seek(to seconds: Double) async throws -> VideoFrame?
     {
         // Acquire lock to check state
         if checkIsClosed() { return nil }
@@ -103,30 +102,6 @@ extension MediaDecoder {
 
         // Case A: Hardware Passthrough
         if isPassThrough, let builder = self.sampleBufferBuilder {
-            // PREVIEW: Try to show the first frame (keyframe) immediately
-            
-            // 4. Early Exit for Preview Frame in Passthrough
-            if let previewHandler, let firstPacket = restorationPackets.first(where: { $0.isVideo })
-            {
-                try? Task.checkCancellation()
-                if let previewSampleBuffer = try? builder.createSampleBuffer(
-                    from: firstPacket.data,
-                    pts: firstPacket.pts,
-                    dts: firstPacket.dts,
-                    duration: firstPacket.duration,
-                    forPassthrough: true,
-                    ambientLightMetadata: firstPacket.ambientLightMetadata
-                ) {
-                    if let previewFrame = createVideoFrame(
-                        sampleBuffer: previewSampleBuffer,
-                        presentationTime: CMTimeGetSeconds(previewSampleBuffer.presentationTimeStamp),
-                        ambientLightMetadata: firstPacket.ambientLightMetadata
-                    ) {
-                        previewHandler(previewFrame)
-                    }
-                }
-            }
-
             var targetVideoPacket: FFmpegDemuxerPacket? = nil
 
             // 5. Optimize PTS Calculation in Passthrough Loop
@@ -181,7 +156,6 @@ extension MediaDecoder {
         // Case B: FFmpeg / Software Decoding
         else if let decoderActor = self.decoderActor {
             var foundFrame: VideoFrame? = nil
-            var isFirstVideoPacket = true
 
             // 7. Optimize Software Decode Loop Break Condition
             // Use labeled break to exit nested loops immediately
@@ -197,12 +171,6 @@ extension MediaDecoder {
                                 doviProfile: Int(f.doviProfile),
                                 ambientLightMetadata: f.ambientLightMetadata
                             )
-
-                            // PREVIEW: Show the very first decoded frame (keyframe)
-                            if isFirstVideoPacket, let previewHandler, let currentFrame {
-                                previewHandler(currentFrame)
-                                isFirstVideoPacket = false
-                            }
 
                             // Check if we reached the target time.
                             if f.presentationTime >= seconds - 0.05 {
