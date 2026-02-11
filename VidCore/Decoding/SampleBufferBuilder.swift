@@ -266,6 +266,46 @@ public final class SampleBufferBuilder: @unchecked Sendable {
 
     // MARK: - Sample Buffer Creation
 
+    private func applySampleAttachments(
+        to sample: CMSampleBuffer,
+        isKeyframe: Bool?,
+        doNotDisplay: Bool
+    ) {
+        guard
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                sample, createIfNecessary: true) as? [NSMutableDictionary],
+            let first = attachments.first
+        else {
+            return
+        }
+
+        if let isKeyframe {
+            first[kCMSampleAttachmentKey_NotSync] =
+                isKeyframe ? kCFBooleanFalse : kCFBooleanTrue
+            first[kCMSampleAttachmentKey_DependsOnOthers] =
+                isKeyframe ? kCFBooleanFalse : kCFBooleanTrue
+        }
+
+        if doNotDisplay {
+            first[kCMSampleAttachmentKey_DoNotDisplay] = kCFBooleanTrue
+        } else {
+            first.removeObject(forKey: kCMSampleAttachmentKey_DoNotDisplay)
+        }
+    }
+
+    private func applySampleBufferAttachments(
+        to sample: CMSampleBuffer,
+        resetDecoderBeforeDecoding: Bool
+    ) {
+        guard resetDecoderBeforeDecoding else { return }
+        CMSetAttachment(
+            sample,
+            key: kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding,
+            value: kCFBooleanTrue,
+            attachmentMode: kCMAttachmentMode_ShouldNotPropagate
+        )
+    }
+
     /// Creates a CMSampleBuffer from raw packet data.
     /// This is used internally for passthrough (zero-copy) rendering.
     /// - Parameters:
@@ -282,7 +322,10 @@ public final class SampleBufferBuilder: @unchecked Sendable {
         dts: Int64,
         duration: Int64,
         forPassthrough: Bool = false,
-        ambientLightMetadata: Data? = nil
+        ambientLightMetadata: Data? = nil,
+        isKeyframe: Bool? = nil,
+        doNotDisplay: Bool = false,
+        resetDecoderBeforeDecoding: Bool = false
     ) throws -> CMSampleBuffer {
         guard !data.isEmpty else {
             throw SampleBufferBuilderError.blockBufferCreationFailed(-1)
@@ -401,6 +444,16 @@ public final class SampleBufferBuilder: @unchecked Sendable {
                 attachmentMode: kCMAttachmentMode_ShouldPropagate
             )
         }
+
+        applySampleAttachments(
+            to: sample,
+            isKeyframe: isKeyframe,
+            doNotDisplay: doNotDisplay
+        )
+        applySampleBufferAttachments(
+            to: sample,
+            resetDecoderBeforeDecoding: resetDecoderBeforeDecoding
+        )
 
         return sample
     }

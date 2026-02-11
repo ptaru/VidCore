@@ -93,7 +93,7 @@ extension MediaDecoder {
         // 4. Reduce Array Allocations in Packet Filtering / 3. Array Filtering
         // 9. Pre-size Arrays: filter handles allocation efficiently
         // Use filter instead of loop to avoid intermediate array resizing
-        var restorationPackets = packets.filter { !$0.isAudio }
+        var restorationPackets = packets.filter { $0.isVideo || $0.isAudio }
 
         // 10. Cache VideoInfo Properties
         let isPassThrough = self.hardwareDecodeMode == .passThrough
@@ -102,55 +102,56 @@ extension MediaDecoder {
 
         // Case A: Hardware Passthrough
         if isPassThrough, let builder = self.sampleBufferBuilder {
-            var targetVideoPacket: FFmpegDemuxerPacket? = nil
-
-            // 5. Optimize PTS Calculation in Passthrough Loop
-            // Pre-calculate multiplier to avoid division in the loop
+            var videoPackets = restorationPackets.filter { $0.isVideo }
             let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
             let targetTime = seconds - 0.05
-            
-            // Find the specific packet to "snap" to (closest to target time).
-            for p in restorationPackets where p.isVideo {
-                let ptsSeconds = Double(p.pts) * ptsMultiplier
-                if ptsSeconds >= targetTime {
-                    targetVideoPacket = p
-                    break
-                }
+
+            var targetPacketIndex = videoPackets.firstIndex {
+                Double($0.pts) * ptsMultiplier >= targetTime
             }
 
-            // If not found in restoration packets, fetch the next one.
-            if targetVideoPacket == nil {
-                if let nextP = await demuxerActor.demuxNextPacket() {
-                    restorationPackets.append(nextP)
-                    if nextP.isVideo {
-                        targetVideoPacket = nextP
+            // If not found in initial collection, continue reading until we reach target.
+            while targetPacketIndex == nil {
+                guard let nextPacket = await demuxerActor.demuxNextPacket() else {
+                    break
+                }
+                if nextPacket.isVideo {
+                    videoPackets.append(nextPacket)
+                    if Double(nextPacket.pts) * ptsMultiplier >= targetTime {
+                        targetPacketIndex = videoPackets.indices.last
+                        break
                     }
                 }
             }
 
-            // Store packets for context restoration.
-            performUnderLock {
-                self.pendingContextRestorationPackets = restorationPackets
+            guard let displayIndex = targetPacketIndex else {
+                return nil
             }
 
-            guard let finalPacket = targetVideoPacket else {
-                return nil
+            let prerollPackets = Array(videoPackets.prefix(displayIndex))
+            let displayPacket = videoPackets[displayIndex]
+
+            // Store packets for context restoration.
+            performUnderLock {
+                self.pendingContextRestorationPackets = prerollPackets
             }
 
             // Create the frame immediately.
             let sampleBuffer = try builder.createSampleBuffer(
-                from: finalPacket.data,
-                pts: finalPacket.pts,
-                dts: finalPacket.dts,
-                duration: finalPacket.duration,
+                from: displayPacket.data,
+                pts: displayPacket.pts,
+                dts: displayPacket.dts,
+                duration: displayPacket.duration,
                 forPassthrough: true,
-                ambientLightMetadata: finalPacket.ambientLightMetadata
+                ambientLightMetadata: displayPacket.ambientLightMetadata,
+                isKeyframe: displayPacket.isKeyframe,
+                resetDecoderBeforeDecoding: prerollPackets.isEmpty
             )
             
             return createVideoFrame(
                 sampleBuffer: sampleBuffer,
                 presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
-                ambientLightMetadata: finalPacket.ambientLightMetadata
+                ambientLightMetadata: displayPacket.ambientLightMetadata
             )
         }
         // Case B: FFmpeg / Software Decoding

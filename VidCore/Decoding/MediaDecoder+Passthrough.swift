@@ -31,7 +31,7 @@ extension MediaDecoder {
         var frames: [VideoFrame] = []
         frames.reserveCapacity(packets.count)
 
-        for packet in packets {
+        for (index, packet) in packets.enumerated() {
             do {
                 let sampleBuffer = try builder.createSampleBuffer(
                     from: packet.data,
@@ -39,17 +39,11 @@ extension MediaDecoder {
                     dts: packet.dts,
                     duration: packet.duration,
                     forPassthrough: true,
-                    ambientLightMetadata: packet.ambientLightMetadata
+                    ambientLightMetadata: packet.ambientLightMetadata,
+                    isKeyframe: packet.isKeyframe,
+                    doNotDisplay: true,
+                    resetDecoderBeforeDecoding: index == 0
                 )
-
-                // Mark as DoNotDisplay so AVSBDL decodes but doesn't show it
-                let attachments = CMSampleBufferGetSampleAttachmentsArray(
-                    sampleBuffer, createIfNecessary: true)
-                if let attachments = attachments as? [NSMutableDictionary],
-                    let first = attachments.first
-                {
-                    first[kCMSampleAttachmentKey_DoNotDisplay] = kCFBooleanTrue
-                }
 
                 let frame = VideoFrame(
                     sampleBuffer: sampleBuffer,

@@ -35,12 +35,24 @@ public actor LayerRenderer: VideoRendererTarget, SampleBufferRenderer, MediaData
     }
 
     private func _enqueue(_ frame: VideoFrame) {
-        if displayLayer.sampleBufferRenderer.status == .failed {
-            displayLayer.sampleBufferRenderer.flush()
+        let renderer = displayLayer.sampleBufferRenderer
+
+        if renderer.requiresFlushToResumeDecoding {
+            renderer.flush()
+        }
+
+        if renderer.status == .failed {
+            renderer.flush()
         }
 
         // Ensure the sample buffer is ready for display (attachments, etc are handled in VideoFrame)
-        displayLayer.sampleBufferRenderer.enqueue(frame.sampleBuffer)
+        renderer.enqueue(frame.sampleBuffer)
+
+        // Retry once after a failure that happened during enqueue.
+        if renderer.status == .failed {
+            renderer.flush()
+            renderer.enqueue(frame.sampleBuffer)
+        }
     }
 
     /// Whether the renderer is ready to accept more media data.

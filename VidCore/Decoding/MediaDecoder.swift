@@ -332,13 +332,15 @@ public final class MediaDecoder: @unchecked Sendable {
         if packet.isVideo {
             if let builder = self.sampleBufferBuilder, self.hardwareDecodeMode == .passThrough {
                 do {
+                    let isKeyframe = (packet.flags & 1) != 0
                     let sampleBuffer = try builder.createSampleBuffer(
                         from: packet.data,
                         pts: packet.pts,
                         dts: packet.dts,
                         duration: packet.duration,
                         forPassthrough: true,
-                        ambientLightMetadata: packet.ambientLightMetadata
+                        ambientLightMetadata: packet.ambientLightMetadata,
+                        isKeyframe: isKeyframe
                     )
                     // ... creation logic ...
                     let frame = VideoFrame(

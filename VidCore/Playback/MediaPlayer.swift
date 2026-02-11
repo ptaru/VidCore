@@ -86,6 +86,18 @@ public class MediaPlayer {
         }
     }
 
+    /// Optional scrub rate limit in FPS.
+    ///
+    /// - Set to `nil` (default) for unlimited scrub updates.
+    /// - Set to a positive value (e.g. `12`) to limit decoder seek frequency while scrubbing.
+    public var scrubRateLimitFPS: Double? = nil {
+        didSet {
+            if let fps = scrubRateLimitFPS, fps <= 0 {
+                scrubRateLimitFPS = nil
+            }
+        }
+    }
+
     private var preMuteVolume: Double = 1.0
 
     /// Whether audio is muted
@@ -132,6 +144,10 @@ public class MediaPlayer {
     var currentSeekTask: Task<Void, Never>?
     var isScrubbing: Bool = false
     var wasPlayingBeforeScrub: Bool = false
+    @ObservationIgnored
+    var scrubDispatchTask: Task<Void, Never>?
+    var pendingScrubTime: Double?
+    var lastScrubDispatchTime: TimeInterval?
     @ObservationIgnored
     lazy var displayLink = DisplayLink { [weak self] in
         guard let self = self else { return }
@@ -409,6 +425,11 @@ public class MediaPlayer {
 
     /// Close the player and release resources.
     public func close() async {
+        scrubDispatchTask?.cancel()
+        scrubDispatchTask = nil
+        pendingScrubTime = nil
+        lastScrubDispatchTime = nil
+
         currentSeekTask?.cancel()
         await decoder?.requestDemuxAbort()
         _ = await currentSeekTask?.result
@@ -509,6 +530,10 @@ public class MediaPlayer {
     public nonisolated func cancelAllTasks() {
         cancelLocalTasks()
         Task { @MainActor [weak self] in
+            self?.scrubDispatchTask?.cancel()
+            self?.scrubDispatchTask = nil
+            self?.pendingScrubTime = nil
+            self?.lastScrubDispatchTime = nil
             self?.currentSeekTask?.cancel()
         }
     }
