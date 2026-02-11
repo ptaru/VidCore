@@ -55,6 +55,7 @@ extension MediaDecoder {
         performUnderLock {
             self.isSeeking = true
             self.pendingContextRestorationPackets.removeAll()
+            self.pendingContextRestorationIndex = 0
         }
 
         // Defer reset of seek state
@@ -104,9 +105,10 @@ extension MediaDecoder {
         if isPassThrough, let builder = self.sampleBufferBuilder {
             let maxForwardReads = 1200
 
-            func readNextKeyframe(maxReads: Int) async -> FFmpegDemuxerPacket? {
+            func readNextKeyframe(maxReads: Int) async throws -> FFmpegDemuxerPacket? {
                 var reads = 0
                 while reads < maxReads {
+                    try Task.checkCancellation()
                     guard let packet = await demuxerActor.demuxNextPacket() else {
                         return nil
                     }
@@ -133,7 +135,7 @@ extension MediaDecoder {
             let displayPacket: FFmpegDemuxerPacket
 
             if videoPackets.isEmpty {
-                guard let keyframe = await readNextKeyframe(maxReads: maxForwardReads) else {
+                guard let keyframe = try await readNextKeyframe(maxReads: maxForwardReads) else {
                     return nil
                 }
                 displayPacket = keyframe
@@ -144,6 +146,7 @@ extension MediaDecoder {
 
                 // If not found in initial collection, continue reading until we reach target.
                 while targetPacketIndex == nil {
+                    try Task.checkCancellation()
                     guard let nextPacket = await demuxerActor.demuxNextPacket() else {
                         break
                     }
@@ -170,7 +173,7 @@ extension MediaDecoder {
 
                 // Unsafe landing: reset + visible non-key with no preroll context.
                 if prerollPackets.isEmpty && !candidateDisplayPacket.isKeyframe {
-                    guard let keyframe = await readNextKeyframe(maxReads: maxForwardReads) else {
+                    guard let keyframe = try await readNextKeyframe(maxReads: maxForwardReads) else {
                         return nil
                     }
                     candidateDisplayPacket = keyframe
@@ -182,6 +185,7 @@ extension MediaDecoder {
             // Store packets for context restoration.
             performUnderLock {
                 self.pendingContextRestorationPackets = prerollPackets
+                self.pendingContextRestorationIndex = 0
             }
 
             // Create the frame immediately.
@@ -209,11 +213,13 @@ extension MediaDecoder {
             // 7. Optimize Software Decode Loop Break Condition
             // Use labeled break to exit nested loops immediately
             packetLoop: for packet in restorationPackets {
+                try Task.checkCancellation()
                 let data = self.convertPacket(packet)
 
                 if packet.isVideo {
                     if let frames = await decoderActor.decodeVideoPacket(withAllFrames: data) {
                         for f in frames {
+                            try Task.checkCancellation()
                             let currentFrame = self.createVideoFrame(
                                 pixelBuffer: f.pixelBuffer,
                                 presentationTime: f.presentationTime,
@@ -235,16 +241,26 @@ extension MediaDecoder {
 
             // If not found, continue fetching packets (handle decoder latency/reordering).
             if foundFrame == nil {
-                var packetCount = 0
-                // Try up to 24 packets (approx 1s at 24fps) to clear decoder buffers
-                while foundFrame == nil && packetCount < 24 {
+                let targetTime = seconds - 0.05
+                let maxVideoPacketsAfterSeek = 48
+                let maxWallClockReads = 240
+                var videoPacketsRead = 0
+                var totalReads = 0
+
+                while foundFrame == nil
+                    && videoPacketsRead < maxVideoPacketsAfterSeek
+                    && totalReads < maxWallClockReads
+                {
+                    try Task.checkCancellation()
                     if let nextP = await demuxerActor.demuxNextPacket() {
+                        totalReads += 1
                         let data = self.convertPacket(nextP)
                         if nextP.isVideo {
+                            videoPacketsRead += 1
                             if let frames = await decoderActor.decodeVideoPacket(
                                 withAllFrames: data)
                             {
-                                if let f = frames.first {
+                                if let f = frames.first(where: { $0.presentationTime >= targetTime }) {
                                     foundFrame = self.createVideoFrame(
                                         pixelBuffer: f.pixelBuffer,
                                         presentationTime: f.presentationTime,
@@ -253,8 +269,9 @@ extension MediaDecoder {
                                     )
                                 }
                             }
+                        } else if nextP.isAudio {
+                            _ = await decoderActor.decodeAudioPacket(withAllFrames: data)
                         }
-                        packetCount += 1
                     } else {
                         break  // EOF
                     }
@@ -264,6 +281,7 @@ extension MediaDecoder {
             // Clear restoration packets as they are already decoded.
             performUnderLock {
                 self.pendingContextRestorationPackets.removeAll()
+                self.pendingContextRestorationIndex = 0
             }
 
             return foundFrame

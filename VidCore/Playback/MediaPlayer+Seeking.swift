@@ -162,10 +162,16 @@ extension MediaPlayer {
         await audioOutput.flush()
         await decoder?.resetSubtitleState()
 
-        state = .paused  // Now safe to transition
+        let hasErrorState: Bool = {
+            if case .error = state { return true }
+            return false
+        }()
+        if !hasErrorState {
+            state = .paused  // Now safe to transition
+        }
 
         // Resume playback if needed
-        if wasPlayingBeforeScrub {
+        if wasPlayingBeforeScrub && !hasErrorState {
             play()
         }
     }
@@ -222,8 +228,12 @@ extension MediaPlayer {
             currentSubtitle = nil
             await decoder.resetSubtitleState()
 
-        } catch {
+        } catch is CancellationError {
             // Task cancelled, ignore
+        } catch {
+            subtitles.removeAll()
+            currentSubtitle = nil
+            state = .error(.seekFailed)
         }
     }
 

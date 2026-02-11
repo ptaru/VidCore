@@ -17,6 +17,7 @@ extension MediaDecoder {
 
             let packets = self.pendingContextRestorationPackets
             self.pendingContextRestorationPackets.removeAll()
+            self.pendingContextRestorationIndex = 0
             return packets
         }
 

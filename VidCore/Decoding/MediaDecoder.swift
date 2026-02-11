@@ -61,8 +61,18 @@ public final class MediaDecoder: @unchecked Sendable {
     func getAndRemoveFirstPendingPacket() -> FFmpegDemuxerPacket? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard !pendingContextRestorationPackets.isEmpty else { return nil }
-        return pendingContextRestorationPackets.removeFirst()
+        guard pendingContextRestorationIndex < pendingContextRestorationPackets.count else {
+            pendingContextRestorationPackets.removeAll()
+            pendingContextRestorationIndex = 0
+            return nil
+        }
+        let packet = pendingContextRestorationPackets[pendingContextRestorationIndex]
+        pendingContextRestorationIndex += 1
+        if pendingContextRestorationIndex >= pendingContextRestorationPackets.count {
+            pendingContextRestorationPackets.removeAll()
+            pendingContextRestorationIndex = 0
+        }
+        return packet
     }
 
     func setClosed() -> Bool {
@@ -93,6 +103,7 @@ public final class MediaDecoder: @unchecked Sendable {
     // as they are part of the MediaDecoder seeking state machine.
     let stateLock = NSLock()
     var pendingContextRestorationPackets: [FFmpegDemuxerPacket] = []
+    var pendingContextRestorationIndex: Int = 0
     var isSeeking = false
 
     /// Metadata about the video stream.
