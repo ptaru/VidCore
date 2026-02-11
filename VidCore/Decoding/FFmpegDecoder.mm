@@ -959,6 +959,18 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   _audioNextPTS = -1.0;
 }
 
+- (void)setFastSeekDecodingEnabled:(BOOL)enabled {
+  if (!_codecContext) {
+    return;
+  }
+
+  if (enabled) {
+    _codecContext->flags2 |= AV_CODEC_FLAG2_FAST;
+  } else {
+    _codecContext->flags2 &= ~AV_CODEC_FLAG2_FAST;
+  }
+}
+
 - (BOOL)switchSubtitleStream:(NSDictionary<NSString *, id> *)config {
   if (!config[@"subtitleCodecId"])
     return NO;

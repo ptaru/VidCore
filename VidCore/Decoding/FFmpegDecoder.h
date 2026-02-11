@@ -202,6 +202,11 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// Use this when seeking to reset the decoder state.
 - (void)flushCodecBuffers;
 
+/// Toggle seek-time fast decode flags for video decode.
+///
+/// This is intended to be enabled only around seek operations.
+- (void)setFastSeekDecodingEnabled:(BOOL)enabled;
+
 /// Switch to a different audio stream with new codec parameters.
 /// This reinitializes the audio codec context and resampler for the new format.
 /// Must be called when switching between audio tracks with different codecs

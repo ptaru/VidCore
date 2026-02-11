@@ -6,22 +6,6 @@
 import Foundation
 
 extension MediaPlayer {
-    private var scrubMinInterval: TimeInterval? {
-        guard let fps = scrubRateLimitFPS, fps > 0 else { return nil }
-        return 1.0 / fps
-    }
-
-    private func scrubNow() -> TimeInterval {
-        ProcessInfo.processInfo.systemUptime
-    }
-
-    private func resetScrubLimiterState() {
-        scrubDispatchTask?.cancel()
-        scrubDispatchTask = nil
-        pendingScrubTime = nil
-        lastScrubDispatchTime = nil
-    }
-
     private func launchScrubSeek(to time: Double) {
         let previousTask = currentSeekTask
         currentSeekTask = Task { [weak self] in
@@ -34,36 +18,6 @@ extension MediaPlayer {
 
             await self?.performScrubOperation(to: time)
         }
-    }
-
-    private func scheduleScrubDispatch(after delay: TimeInterval) {
-        guard isScrubbing, scrubDispatchTask == nil else { return }
-
-        let sleepNanos = UInt64(max(0, delay) * 1_000_000_000)
-        scrubDispatchTask = Task { [weak self] in
-            if sleepNanos > 0 {
-                try? await Task.sleep(nanoseconds: sleepNanos)
-            }
-            await self?.dispatchPendingScrubIfNeeded()
-        }
-    }
-
-    private func dispatchPendingScrubIfNeeded() async {
-        scrubDispatchTask = nil
-        guard isScrubbing else { return }
-        guard let pending = pendingScrubTime else { return }
-
-        if let minInterval = scrubMinInterval, let lastDispatch = lastScrubDispatchTime {
-            let elapsed = scrubNow() - lastDispatch
-            if elapsed < minInterval {
-                scheduleScrubDispatch(after: minInterval - elapsed)
-                return
-            }
-        }
-
-        pendingScrubTime = nil
-        lastScrubDispatchTime = scrubNow()
-        launchScrubSeek(to: pending)
     }
 
     // MARK: - Public Scrubbing API
@@ -79,8 +33,6 @@ extension MediaPlayer {
         _ = await currentSeekTask?.result
         await decoder?.clearDemuxAbort()
         currentSeekTask = nil
-
-        resetScrubLimiterState()
 
         // Pause system
         await playbackClock.pause()
@@ -108,54 +60,18 @@ extension MediaPlayer {
     /// - Parameter time: The target time to scrub to.
     public func scrub(to time: Double) async {
         guard isScrubbing else { return }
-
-        guard let minInterval = scrubMinInterval else {
-            launchScrubSeek(to: time)
-            return
-        }
-
-        pendingScrubTime = time
-
-        if let lastDispatch = lastScrubDispatchTime {
-            let elapsed = scrubNow() - lastDispatch
-            if elapsed >= minInterval {
-                scrubDispatchTask?.cancel()
-                scrubDispatchTask = nil
-                if let pending = pendingScrubTime {
-                    pendingScrubTime = nil
-                    lastScrubDispatchTime = scrubNow()
-                    launchScrubSeek(to: pending)
-                }
-            } else {
-                scheduleScrubDispatch(after: minInterval - elapsed)
-            }
-        } else {
-            scrubDispatchTask?.cancel()
-            scrubDispatchTask = nil
-            if let pending = pendingScrubTime {
-                pendingScrubTime = nil
-                lastScrubDispatchTime = scrubNow()
-                launchScrubSeek(to: pending)
-            }
-        }
+        launchScrubSeek(to: time)
     }
 
     /// End the scrubbing session.
     public func endScrub() async {
         guard isScrubbing else { return }
 
-        scrubDispatchTask?.cancel()
-        scrubDispatchTask = nil
-        if let pending = pendingScrubTime {
-            pendingScrubTime = nil
-            launchScrubSeek(to: pending)
-        }
         isScrubbing = false
 
         // Wait for final scrub to complete
         _ = await currentSeekTask?.result
         currentSeekTask = nil
-        lastScrubDispatchTime = nil
 
         // Perform cleanup
         await packetQueue.reset()

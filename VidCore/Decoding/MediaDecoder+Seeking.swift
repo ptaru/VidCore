@@ -50,6 +50,15 @@ extension MediaDecoder {
     {
         // Acquire lock to check state
         if checkIsClosed() { return nil }
+        var didRequestAbortIO = false
+
+        func checkCancellationAndAbortDemuxIfNeeded() async throws {
+            if Task.isCancelled {
+                await demuxerActor.requestAbortIO()
+                didRequestAbortIO = true
+                throw CancellationError()
+            }
+        }
 
         // 1. Eliminate Redundant Lock Operations: Combine state changes
         performUnderLock {
@@ -67,303 +76,275 @@ extension MediaDecoder {
             }
         }
 
-        // 8. Reduce Task Cancellation Checks (Keep essential ones)
-        try Task.checkCancellation()
+        do {
+            // 8. Reduce Task Cancellation Checks (Keep essential ones)
+            try await checkCancellationAndAbortDemuxIfNeeded()
 
-        // 2. Parallel Flush and Seek Operations
-        // Run flush and seek in parallel to reduce latency
-        async let flushTask: Void? = self.decoderActor?.flushCodecBuffers()
-        async let seekTask = demuxerActor.seek(toKeyframe: seconds)
+            // 2. Parallel Flush and Seek Operations
+            // Run flush and seek in parallel to reduce latency
+            async let flushTask: Void? = self.decoderActor?.flushCodecBuffers()
+            async let seekTask = demuxerActor.seek(toKeyframe: seconds)
 
-        _ = await flushTask
-        let seekSuccess = await seekTask
+            _ = await flushTask
+            let seekSuccess = await seekTask
 
-        guard seekSuccess else {
-            throw NSError(
-                domain: "MediaDecoder", code: -3,
-                userInfo: [NSLocalizedDescriptionKey: "Seek failed - demux seek error"])
-        }
+            guard seekSuccess else {
+                throw NSError(
+                    domain: "MediaDecoder", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "Seek failed - demux seek error"])
+            }
 
-        try Task.checkCancellation()
+            try await checkCancellationAndAbortDemuxIfNeeded()
 
-        // 3. Preroll: Consume packets from Keyframe to Target
-        // Collects packets to rebuild decoder context (GOP) up to the seek time.
-        guard let packets = await demuxerActor.collectPackets(until: seconds), !packets.isEmpty
-        else {
-            return nil
-        }
-
-        // 4. Reduce Array Allocations in Packet Filtering / 3. Array Filtering
-        // 9. Pre-size Arrays: filter handles allocation efficiently
-        // Use filter instead of loop to avoid intermediate array resizing
-        var restorationPackets = packets.filter { $0.isVideo || $0.isAudio }
-
-        // 10. Cache VideoInfo Properties
-        let isPassThrough = self.hardwareDecodeMode == .passThrough
+            // 10. Cache VideoInfo Properties
+            let isPassThrough = self.hardwareDecodeMode == .passThrough
         
-        // 5. Unified Processing
+            // 5. Unified Processing
 
-        // Case A: Hardware Passthrough
-        if isPassThrough, let builder = self.sampleBufferBuilder {
-            let maxForwardReads = 1200
-            var demuxOrderedReadAheadPackets: [FFmpegDemuxerPacket] = []
-
-            func readNextKeyframe(maxReads: Int) async throws -> FFmpegDemuxerPacket? {
-                var reads = 0
-                while reads < maxReads {
-                    try Task.checkCancellation()
-                    guard let packet = await demuxerActor.demuxNextPacket() else {
-                        return nil
-                    }
-                    reads += 1
-                    if packet.isVideo && packet.isKeyframe {
-                        return packet
-                    }
-                }
-                return nil
-            }
-
-            func packetPTSSeconds(_ packet: FFmpegDemuxerPacket, multiplier: Double) -> Double? {
-                guard packet.pts != Int64.min else { return nil }
-                return Double(packet.pts) * multiplier
-            }
-
-            var videoPackets = restorationPackets.filter { $0.isVideo }
-
-            // After a seek reset, leading non-key packets are unsafe decode anchors.
-            if let firstKeyframeIndex = videoPackets.firstIndex(where: { $0.isKeyframe }),
-                firstKeyframeIndex > 0
-            {
-                videoPackets.removeFirst(firstKeyframeIndex)
-            }
-
-            let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
-            let targetTime = seconds - 0.05
-            var prerollPackets: [FFmpegDemuxerPacket] = []
-            var passthroughCarryoverPackets: [FFmpegDemuxerPacket] = []
-            let displayPacket: FFmpegDemuxerPacket
-            let initialVideoPacketCount = videoPackets.count
-
-            if videoPackets.isEmpty {
-                guard let keyframe = try await readNextKeyframe(maxReads: maxForwardReads) else {
+            // Case A: Hardware Passthrough
+            if isPassThrough, let builder = self.sampleBufferBuilder {
+                // Passthrough requires GOP/context packets for AVSampleBufferDisplayLayer stability.
+                guard let packets = await demuxerActor.collectPackets(until: seconds), !packets.isEmpty
+                else {
                     return nil
                 }
-                displayPacket = keyframe
-            } else {
-                var reachedTarget = videoPackets.contains {
-                    if let ptsSeconds = packetPTSSeconds($0, multiplier: ptsMultiplier) {
-                        return ptsSeconds >= targetTime
-                    }
-                    return false
-                }
-                var captureReadAheadPackets = reachedTarget
+                // Use filter instead of loop to avoid intermediate array resizing.
+                var restorationPackets = packets.filter { $0.isVideo || $0.isAudio }
 
-                // If not found in initial collection, continue reading until we reach target.
-                while !reachedTarget {
-                    try Task.checkCancellation()
-                    guard let nextPacket = await demuxerActor.demuxNextPacket() else {
-                        break
-                    }
-                    guard nextPacket.isVideo else {
-                        if captureReadAheadPackets {
-                            demuxOrderedReadAheadPackets.append(nextPacket)
-                        }
-                        continue
-                    }
+                let maxForwardReads = 1200
+                var demuxOrderedReadAheadPackets: [FFmpegDemuxerPacket] = []
 
-                    // If we still have no decode anchor, wait for the first keyframe.
-                    if videoPackets.isEmpty && !nextPacket.isKeyframe {
-                        continue
-                    }
-
-                    videoPackets.append(nextPacket)
-                    if captureReadAheadPackets {
-                        demuxOrderedReadAheadPackets.append(nextPacket)
-                    }
-
-                    if let ptsSeconds = packetPTSSeconds(nextPacket, multiplier: ptsMultiplier),
-                        ptsSeconds >= targetTime
-                    {
-                        reachedTarget = true
-                        captureReadAheadPackets = true
-                        if !demuxOrderedReadAheadPackets.isEmpty
-                            && demuxOrderedReadAheadPackets.last === nextPacket
-                        {
-                            // Already captured above.
-                        } else {
-                            demuxOrderedReadAheadPackets.append(nextPacket)
-                        }
-                    }
-                }
-
-                // Extend to the next keyframe so we can choose display frame in presentation
-                // order and preserve the remaining decode-order packets.
-                var nextGOPStartIndex = videoPackets.dropFirst().firstIndex(where: { $0.isKeyframe })
-                var forwardReads = 0
-                while nextGOPStartIndex == nil && forwardReads < maxForwardReads {
-                    try Task.checkCancellation()
-                    guard let nextPacket = await demuxerActor.demuxNextPacket() else {
-                        break
-                    }
-                    demuxOrderedReadAheadPackets.append(nextPacket)
-
-                    guard nextPacket.isVideo else {
-                        continue
-                    }
-
-                    forwardReads += 1
-                    videoPackets.append(nextPacket)
-                    if nextPacket.isKeyframe {
-                        nextGOPStartIndex = videoPackets.indices.last
-                        break
-                    }
-                }
-
-                let currentGOPEndIndex = nextGOPStartIndex ?? videoPackets.endIndex
-                let currentGOPPackets = Array(videoPackets[..<currentGOPEndIndex])
-                guard !currentGOPPackets.isEmpty else {
-                    return nil
-                }
-
-                // Pick first frame at/after target in presentation order, not decode order.
-                let displayIndex: Int? = currentGOPPackets
-                    .enumerated()
-                    .compactMap { index, packet -> (Int, Double)? in
-                        guard let ptsSeconds = packetPTSSeconds(packet, multiplier: ptsMultiplier),
-                            ptsSeconds >= targetTime
-                        else {
+                func readNextKeyframe(maxReads: Int) async throws -> FFmpegDemuxerPacket? {
+                    var reads = 0
+                    while reads < maxReads {
+                        try await checkCancellationAndAbortDemuxIfNeeded()
+                        guard let packet = await demuxerActor.demuxNextPacket() else {
                             return nil
                         }
-                        return (index, ptsSeconds)
+                        reads += 1
+                        if packet.isVideo && packet.isKeyframe {
+                            return packet
+                        }
                     }
-                    .min { lhs, rhs in
-                        if lhs.1 == rhs.1 { return lhs.0 < rhs.0 }
-                        return lhs.1 < rhs.1
-                    }?
-                    .0
-
-                var candidateDisplayPacket: FFmpegDemuxerPacket
-                if let displayIndex {
-                    prerollPackets = Array(currentGOPPackets.prefix(displayIndex))
-                    candidateDisplayPacket = currentGOPPackets[displayIndex]
-                } else if let nextGOPStartIndex {
-                    // Target fell after this GOP; display the next GOP keyframe.
-                    prerollPackets = currentGOPPackets
-                    candidateDisplayPacket = videoPackets[nextGOPStartIndex]
-                } else {
                     return nil
                 }
 
-                // Unsafe landing: reset + visible non-key with no preroll context.
-                if prerollPackets.isEmpty && !candidateDisplayPacket.isKeyframe {
+                func packetPTSSeconds(_ packet: FFmpegDemuxerPacket, multiplier: Double) -> Double? {
+                    guard packet.pts != Int64.min else { return nil }
+                    return Double(packet.pts) * multiplier
+                }
+
+                var videoPackets = restorationPackets.filter { $0.isVideo }
+
+                // After a seek reset, leading non-key packets are unsafe decode anchors.
+                if let firstKeyframeIndex = videoPackets.firstIndex(where: { $0.isKeyframe }),
+                    firstKeyframeIndex > 0
+                {
+                    videoPackets.removeFirst(firstKeyframeIndex)
+                }
+
+                let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
+                let targetTime = seconds - 0.05
+                var prerollPackets: [FFmpegDemuxerPacket] = []
+                var passthroughCarryoverPackets: [FFmpegDemuxerPacket] = []
+                let displayPacket: FFmpegDemuxerPacket
+                let initialVideoPacketCount = videoPackets.count
+
+                if videoPackets.isEmpty {
                     guard let keyframe = try await readNextKeyframe(maxReads: maxForwardReads) else {
                         return nil
                     }
-                    passthroughCarryoverPackets.removeAll()
-                    candidateDisplayPacket = keyframe
-                }
-
-                displayPacket = candidateDisplayPacket
-
-                var skipIDs = Set<ObjectIdentifier>()
-                prerollPackets.forEach { skipIDs.insert(ObjectIdentifier($0)) }
-                skipIDs.insert(ObjectIdentifier(displayPacket))
-
-                // Keep initial post-seek packets in their original order first.
-                for packet in videoPackets.prefix(initialVideoPacketCount) {
-                    let packetID = ObjectIdentifier(packet)
-                    if !skipIDs.contains(packetID) {
-                        passthroughCarryoverPackets.append(packet)
-                        skipIDs.insert(packetID)
+                    displayPacket = keyframe
+                } else {
+                    var reachedTarget = videoPackets.contains {
+                        if let ptsSeconds = packetPTSSeconds($0, multiplier: ptsMultiplier) {
+                            return ptsSeconds >= targetTime
+                        }
+                        return false
                     }
-                }
+                    var captureReadAheadPackets = reachedTarget
 
-                // Then append read-ahead packets in exact demux order to preserve A/V ordering.
-                for packet in demuxOrderedReadAheadPackets {
-                    let packetID = ObjectIdentifier(packet)
-                    if !skipIDs.contains(packetID) {
-                        passthroughCarryoverPackets.append(packet)
-                        skipIDs.insert(packetID)
-                    }
-                }
-            }
+                    // If not found in initial collection, continue reading until we reach target.
+                    while !reachedTarget {
+                        try await checkCancellationAndAbortDemuxIfNeeded()
+                        guard let nextPacket = await demuxerActor.demuxNextPacket() else {
+                            break
+                        }
+                        guard nextPacket.isVideo else {
+                            if captureReadAheadPackets {
+                                demuxOrderedReadAheadPackets.append(nextPacket)
+                            }
+                            continue
+                        }
 
-            // Store packets for context restoration and post-seek continuity.
-            performUnderLock {
-                self.pendingContextRestorationPackets = prerollPackets
-                self.pendingContextRestorationIndex = 0
-                self.pendingPassthroughCarryoverPackets = passthroughCarryoverPackets
-                self.pendingPassthroughCarryoverIndex = 0
-            }
+                        // If we still have no decode anchor, wait for the first keyframe.
+                        if videoPackets.isEmpty && !nextPacket.isKeyframe {
+                            continue
+                        }
 
-            // Create the frame immediately.
-            let sampleBuffer = try builder.createSampleBuffer(
-                from: displayPacket.data,
-                pts: displayPacket.pts,
-                dts: displayPacket.dts,
-                duration: displayPacket.duration,
-                forPassthrough: true,
-                ambientLightMetadata: displayPacket.ambientLightMetadata,
-                isKeyframe: displayPacket.isKeyframe,
-                resetDecoderBeforeDecoding: prerollPackets.isEmpty && displayPacket.isKeyframe
-            )
-            
-            return createVideoFrame(
-                sampleBuffer: sampleBuffer,
-                presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
-                ambientLightMetadata: displayPacket.ambientLightMetadata
-            )
-        }
-        // Case B: FFmpeg / Software Decoding
-        else if let decoderActor = self.decoderActor {
-            var foundFrame: VideoFrame? = nil
+                        videoPackets.append(nextPacket)
+                        if captureReadAheadPackets {
+                            demuxOrderedReadAheadPackets.append(nextPacket)
+                        }
 
-            // 7. Optimize Software Decode Loop Break Condition
-            // Use labeled break to exit nested loops immediately
-            packetLoop: for packet in restorationPackets {
-                try Task.checkCancellation()
-                let data = self.convertPacket(packet)
-
-                if packet.isVideo {
-                    if let frames = await decoderActor.decodeVideoPacket(withAllFrames: data) {
-                        for f in frames {
-                            try Task.checkCancellation()
-                            let currentFrame = self.createVideoFrame(
-                                pixelBuffer: f.pixelBuffer,
-                                presentationTime: f.presentationTime,
-                                doviProfile: Int(f.doviProfile),
-                                ambientLightMetadata: f.ambientLightMetadata
-                            )
-
-                            // Check if we reached the target time.
-                            if f.presentationTime >= seconds - 0.05 {
-                                foundFrame = currentFrame
-                                break packetLoop
+                        if let ptsSeconds = packetPTSSeconds(nextPacket, multiplier: ptsMultiplier),
+                            ptsSeconds >= targetTime
+                        {
+                            reachedTarget = true
+                            captureReadAheadPackets = true
+                            if !demuxOrderedReadAheadPackets.isEmpty
+                                && demuxOrderedReadAheadPackets.last === nextPacket
+                            {
+                                // Already captured above.
+                            } else {
+                                demuxOrderedReadAheadPackets.append(nextPacket)
                             }
                         }
                     }
-                } else if packet.isAudio {
-                    _ = await decoderActor.decodeAudioPacket(withAllFrames: data)
-                }
-            }
 
-            // If not found, continue fetching packets (handle decoder latency/reordering).
-            if foundFrame == nil {
+                    // Extend to the next keyframe so we can choose display frame in presentation
+                    // order and preserve the remaining decode-order packets.
+                    var nextGOPStartIndex = videoPackets.dropFirst().firstIndex(where: { $0.isKeyframe })
+                    var forwardReads = 0
+                    while nextGOPStartIndex == nil && forwardReads < maxForwardReads {
+                        try await checkCancellationAndAbortDemuxIfNeeded()
+                        guard let nextPacket = await demuxerActor.demuxNextPacket() else {
+                            break
+                        }
+                        demuxOrderedReadAheadPackets.append(nextPacket)
+
+                        guard nextPacket.isVideo else {
+                            continue
+                        }
+
+                        forwardReads += 1
+                        videoPackets.append(nextPacket)
+                        if nextPacket.isKeyframe {
+                            nextGOPStartIndex = videoPackets.indices.last
+                            break
+                        }
+                    }
+
+                    let currentGOPEndIndex = nextGOPStartIndex ?? videoPackets.endIndex
+                    let currentGOPPackets = Array(videoPackets[..<currentGOPEndIndex])
+                    guard !currentGOPPackets.isEmpty else {
+                        return nil
+                    }
+
+                    // Pick first frame at/after target in presentation order, not decode order.
+                    let displayIndex: Int? = currentGOPPackets
+                        .enumerated()
+                        .compactMap { index, packet -> (Int, Double)? in
+                            guard let ptsSeconds = packetPTSSeconds(packet, multiplier: ptsMultiplier),
+                                ptsSeconds >= targetTime
+                            else {
+                                return nil
+                            }
+                            return (index, ptsSeconds)
+                        }
+                        .min { lhs, rhs in
+                            if lhs.1 == rhs.1 { return lhs.0 < rhs.0 }
+                            return lhs.1 < rhs.1
+                        }?
+                        .0
+
+                    var candidateDisplayPacket: FFmpegDemuxerPacket
+                    if let displayIndex {
+                        prerollPackets = Array(currentGOPPackets.prefix(displayIndex))
+                        candidateDisplayPacket = currentGOPPackets[displayIndex]
+                    } else if let nextGOPStartIndex {
+                        // Target fell after this GOP; display the next GOP keyframe.
+                        prerollPackets = currentGOPPackets
+                        candidateDisplayPacket = videoPackets[nextGOPStartIndex]
+                    } else {
+                        return nil
+                    }
+
+                    // Unsafe landing: reset + visible non-key with no preroll context.
+                    if prerollPackets.isEmpty && !candidateDisplayPacket.isKeyframe {
+                        guard let keyframe = try await readNextKeyframe(maxReads: maxForwardReads) else {
+                            return nil
+                        }
+                        passthroughCarryoverPackets.removeAll()
+                        candidateDisplayPacket = keyframe
+                    }
+
+                    displayPacket = candidateDisplayPacket
+
+                    var skipIDs = Set<ObjectIdentifier>()
+                    prerollPackets.forEach { skipIDs.insert(ObjectIdentifier($0)) }
+                    skipIDs.insert(ObjectIdentifier(displayPacket))
+
+                    // Keep initial post-seek packets in their original order first.
+                    for packet in videoPackets.prefix(initialVideoPacketCount) {
+                        let packetID = ObjectIdentifier(packet)
+                        if !skipIDs.contains(packetID) {
+                            passthroughCarryoverPackets.append(packet)
+                            skipIDs.insert(packetID)
+                        }
+                    }
+
+                    // Then append read-ahead packets in exact demux order to preserve A/V ordering.
+                    for packet in demuxOrderedReadAheadPackets {
+                        let packetID = ObjectIdentifier(packet)
+                        if !skipIDs.contains(packetID) {
+                            passthroughCarryoverPackets.append(packet)
+                            skipIDs.insert(packetID)
+                        }
+                    }
+                }
+
+                // Store packets for context restoration and post-seek continuity.
+                performUnderLock {
+                    self.pendingContextRestorationPackets = prerollPackets
+                    self.pendingContextRestorationIndex = 0
+                    self.pendingPassthroughCarryoverPackets = passthroughCarryoverPackets
+                    self.pendingPassthroughCarryoverIndex = 0
+                }
+
+                // Create the frame immediately.
+                let sampleBuffer = try builder.createSampleBuffer(
+                    from: displayPacket.data,
+                    pts: displayPacket.pts,
+                    dts: displayPacket.dts,
+                    duration: displayPacket.duration,
+                    forPassthrough: true,
+                    ambientLightMetadata: displayPacket.ambientLightMetadata,
+                    isKeyframe: displayPacket.isKeyframe,
+                    resetDecoderBeforeDecoding: prerollPackets.isEmpty && displayPacket.isKeyframe
+                )
+            
+                return createVideoFrame(
+                    sampleBuffer: sampleBuffer,
+                    presentationTime: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp),
+                    ambientLightMetadata: displayPacket.ambientLightMetadata
+                )
+            }
+            // Case B: FFmpeg / Software Decoding
+            else if let decoderActor = self.decoderActor {
+                // FFmpeg software seek decodes packets in a streaming loop to avoid GOP buffering.
                 let targetTime = seconds - 0.05
-                let maxVideoPacketsAfterSeek = 48
-                let maxWallClockReads = 240
+                let maxVideoPacketsAfterSeek = 240
+                let maxWallClockReads = 1200
                 var videoPacketsRead = 0
                 var totalReads = 0
+                var foundFrame: VideoFrame? = nil
 
-                while foundFrame == nil
-                    && videoPacketsRead < maxVideoPacketsAfterSeek
-                    && totalReads < maxWallClockReads
-                {
-                    try Task.checkCancellation()
-                    if let nextP = await demuxerActor.demuxNextPacket() {
+                await decoderActor.setFastSeekDecodingEnabled(true)
+                do {
+                    while foundFrame == nil
+                        && videoPacketsRead < maxVideoPacketsAfterSeek
+                        && totalReads < maxWallClockReads
+                    {
+                        try await checkCancellationAndAbortDemuxIfNeeded()
+                        guard let packet = await demuxerActor.demuxNextPacket() else {
+                            break  // EOF
+                        }
+
                         totalReads += 1
-                        let data = self.convertPacket(nextP)
-                        if nextP.isVideo {
+                        let data = self.convertPacket(packet)
+
+                        if packet.isVideo {
                             videoPacketsRead += 1
                             if let frames = await decoderActor.decodeVideoPacket(
                                 withAllFrames: data)
@@ -377,24 +358,32 @@ extension MediaDecoder {
                                     )
                                 }
                             }
-                        } else if nextP.isAudio {
+                        } else if packet.isAudio {
                             _ = await decoderActor.decodeAudioPacket(withAllFrames: data)
                         }
-                    } else {
-                        break  // EOF
                     }
+
+                    await decoderActor.setFastSeekDecodingEnabled(false)
+                } catch {
+                    await decoderActor.setFastSeekDecodingEnabled(false)
+                    throw error
                 }
-            }
 
-            // Clear restoration packets as they are already decoded.
-            performUnderLock {
-                self.pendingContextRestorationPackets.removeAll()
-                self.pendingContextRestorationIndex = 0
-                self.pendingPassthroughCarryoverPackets.removeAll()
-                self.pendingPassthroughCarryoverIndex = 0
-            }
+                // Clear restoration packets as they are already decoded.
+                performUnderLock {
+                    self.pendingContextRestorationPackets.removeAll()
+                    self.pendingContextRestorationIndex = 0
+                    self.pendingPassthroughCarryoverPackets.removeAll()
+                    self.pendingPassthroughCarryoverIndex = 0
+                }
 
-            return foundFrame
+                return foundFrame
+            }
+        } catch {
+            if didRequestAbortIO {
+                await demuxerActor.clearAbortIO()
+            }
+            throw error
         }
 
         return nil

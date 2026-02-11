@@ -117,6 +117,10 @@ actor DecoderActor {
         decoder.flushCodecBuffers()
     }
 
+    func setFastSeekDecodingEnabled(_ enabled: Bool) {
+        decoder.setFastSeekDecodingEnabled(enabled)
+    }
+
     func drainVideoFrame() -> FFmpegVideoFrame? {
         return decoder.drainVideoFrame()
     }
