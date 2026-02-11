@@ -42,7 +42,7 @@ extension MediaDecoder {
                     ambientLightMetadata: packet.ambientLightMetadata,
                     isKeyframe: packet.isKeyframe,
                     doNotDisplay: true,
-                    resetDecoderBeforeDecoding: index == 0
+                    resetDecoderBeforeDecoding: index == 0 && packet.isKeyframe
                 )
 
                 let frame = VideoFrame(

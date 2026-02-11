@@ -102,34 +102,82 @@ extension MediaDecoder {
 
         // Case A: Hardware Passthrough
         if isPassThrough, let builder = self.sampleBufferBuilder {
-            var videoPackets = restorationPackets.filter { $0.isVideo }
-            let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
-            let targetTime = seconds - 0.05
+            let maxForwardReads = 1200
 
-            var targetPacketIndex = videoPackets.firstIndex {
-                Double($0.pts) * ptsMultiplier >= targetTime
+            func readNextKeyframe(maxReads: Int) async -> FFmpegDemuxerPacket? {
+                var reads = 0
+                while reads < maxReads {
+                    guard let packet = await demuxerActor.demuxNextPacket() else {
+                        return nil
+                    }
+                    reads += 1
+                    if packet.isVideo && packet.isKeyframe {
+                        return packet
+                    }
+                }
+                return nil
             }
 
-            // If not found in initial collection, continue reading until we reach target.
-            while targetPacketIndex == nil {
-                guard let nextPacket = await demuxerActor.demuxNextPacket() else {
-                    break
+            var videoPackets = restorationPackets.filter { $0.isVideo }
+
+            // After a seek reset, leading non-key packets are unsafe decode anchors.
+            if let firstKeyframeIndex = videoPackets.firstIndex(where: { $0.isKeyframe }),
+                firstKeyframeIndex > 0
+            {
+                videoPackets.removeFirst(firstKeyframeIndex)
+            }
+
+            let ptsMultiplier = Double(builder.timeBaseNum) / Double(builder.timeBaseDen)
+            let targetTime = seconds - 0.05
+            var prerollPackets: [FFmpegDemuxerPacket] = []
+            let displayPacket: FFmpegDemuxerPacket
+
+            if videoPackets.isEmpty {
+                guard let keyframe = await readNextKeyframe(maxReads: maxForwardReads) else {
+                    return nil
                 }
-                if nextPacket.isVideo {
+                displayPacket = keyframe
+            } else {
+                var targetPacketIndex = videoPackets.firstIndex {
+                    Double($0.pts) * ptsMultiplier >= targetTime
+                }
+
+                // If not found in initial collection, continue reading until we reach target.
+                while targetPacketIndex == nil {
+                    guard let nextPacket = await demuxerActor.demuxNextPacket() else {
+                        break
+                    }
+                    guard nextPacket.isVideo else { continue }
+
+                    // If we still have no decode anchor, wait for the first keyframe.
+                    if videoPackets.isEmpty && !nextPacket.isKeyframe {
+                        continue
+                    }
+
                     videoPackets.append(nextPacket)
                     if Double(nextPacket.pts) * ptsMultiplier >= targetTime {
                         targetPacketIndex = videoPackets.indices.last
                         break
                     }
                 }
-            }
 
-            guard let displayIndex = targetPacketIndex else {
-                return nil
-            }
+                guard let displayIndex = targetPacketIndex else {
+                    return nil
+                }
 
-            let prerollPackets = Array(videoPackets.prefix(displayIndex))
-            let displayPacket = videoPackets[displayIndex]
+                prerollPackets = Array(videoPackets.prefix(displayIndex))
+                var candidateDisplayPacket = videoPackets[displayIndex]
+
+                // Unsafe landing: reset + visible non-key with no preroll context.
+                if prerollPackets.isEmpty && !candidateDisplayPacket.isKeyframe {
+                    guard let keyframe = await readNextKeyframe(maxReads: maxForwardReads) else {
+                        return nil
+                    }
+                    candidateDisplayPacket = keyframe
+                }
+
+                displayPacket = candidateDisplayPacket
+            }
 
             // Store packets for context restoration.
             performUnderLock {
@@ -145,7 +193,7 @@ extension MediaDecoder {
                 forPassthrough: true,
                 ambientLightMetadata: displayPacket.ambientLightMetadata,
                 isKeyframe: displayPacket.isKeyframe,
-                resetDecoderBeforeDecoding: prerollPackets.isEmpty
+                resetDecoderBeforeDecoding: prerollPackets.isEmpty && displayPacket.isKeyframe
             )
             
             return createVideoFrame(
