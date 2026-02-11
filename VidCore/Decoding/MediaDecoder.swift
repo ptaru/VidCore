@@ -58,19 +58,36 @@ public final class MediaDecoder: @unchecked Sendable {
         return isClosed
     }
 
-    func getAndRemoveFirstPendingPacket() -> FFmpegDemuxerPacket? {
+    func getAndRemoveFirstPendingContextRestorationPacket() -> FFmpegDemuxerPacket? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard pendingContextRestorationIndex < pendingContextRestorationPackets.count else {
-            pendingContextRestorationPackets.removeAll()
-            pendingContextRestorationIndex = 0
+        if pendingContextRestorationIndex < pendingContextRestorationPackets.count {
+            let packet = pendingContextRestorationPackets[pendingContextRestorationIndex]
+            pendingContextRestorationIndex += 1
+            if pendingContextRestorationIndex >= pendingContextRestorationPackets.count {
+                pendingContextRestorationPackets.removeAll()
+                pendingContextRestorationIndex = 0
+            }
+            return packet
+        }
+        pendingContextRestorationPackets.removeAll()
+        pendingContextRestorationIndex = 0
+        return nil
+    }
+
+    func getAndRemoveFirstPendingCarryoverPacket() -> FFmpegDemuxerPacket? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard pendingPassthroughCarryoverIndex < pendingPassthroughCarryoverPackets.count else {
+            pendingPassthroughCarryoverPackets.removeAll()
+            pendingPassthroughCarryoverIndex = 0
             return nil
         }
-        let packet = pendingContextRestorationPackets[pendingContextRestorationIndex]
-        pendingContextRestorationIndex += 1
-        if pendingContextRestorationIndex >= pendingContextRestorationPackets.count {
-            pendingContextRestorationPackets.removeAll()
-            pendingContextRestorationIndex = 0
+        let packet = pendingPassthroughCarryoverPackets[pendingPassthroughCarryoverIndex]
+        pendingPassthroughCarryoverIndex += 1
+        if pendingPassthroughCarryoverIndex >= pendingPassthroughCarryoverPackets.count {
+            pendingPassthroughCarryoverPackets.removeAll()
+            pendingPassthroughCarryoverIndex = 0
         }
         return packet
     }
@@ -104,6 +121,8 @@ public final class MediaDecoder: @unchecked Sendable {
     let stateLock = NSLock()
     var pendingContextRestorationPackets: [FFmpegDemuxerPacket] = []
     var pendingContextRestorationIndex: Int = 0
+    var pendingPassthroughCarryoverPackets: [FFmpegDemuxerPacket] = []
+    var pendingPassthroughCarryoverIndex: Int = 0
     var isSeeking = false
 
     /// Metadata about the video stream.
@@ -298,12 +317,13 @@ public final class MediaDecoder: @unchecked Sendable {
     /// This method prioritizes packets in the following order:
     /// 1. Pending packets from a seek operation (context restoration).
     /// 2. Audio packets queued during a seek (maintained by `DemuxerActor`).
-    /// 3. New packets read directly from the demuxer.
+    /// 3. Passthrough post-seek carryover packets.
+    /// 4. New packets read directly from the demuxer.
     ///
     /// - Returns: The next `FFmpegPacketData`, or `nil` if end-of-file is reached or an error occurs.
     public func demuxNextPacket() async -> FFmpegPacketData? {
         // Priority 1: Pending restoration packets (from seek)
-        if let packet = getAndRemoveFirstPendingPacket() {
+        if let packet = getAndRemoveFirstPendingContextRestorationPacket() {
             return self.convertPacket(packet)
         }
 
@@ -321,7 +341,12 @@ public final class MediaDecoder: @unchecked Sendable {
             return self.convertPacket(queuedAudioPacket)
         }
 
-        // Priority 3: Fresh packet
+        // Priority 3: Post-seek carryover packets
+        if let carryoverPacket = getAndRemoveFirstPendingCarryoverPacket() {
+            return self.convertPacket(carryoverPacket)
+        }
+
+        // Priority 4: Fresh packet
         if let demuxerPacket = await demuxerActor.demuxNextPacket() {
             return self.convertPacket(demuxerPacket)
         } else {

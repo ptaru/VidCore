@@ -215,8 +215,9 @@ extension MediaPlayer {
                     await renderFrame(frame, flushRenderer: true)
                 }
 
-                // Sync clock to frame time
-                await playbackClock.seek(to: frame.presentationTime)
+                // Anchor clock to requested seek position to avoid audio render jitter
+                // when the first displayed frame lands slightly ahead in presentation order.
+                await playbackClock.seek(to: clamped)
             } else {
                 // Seek failed/EOF, set clock
                 currentTime = clamped
