@@ -7,12 +7,11 @@
 
 import Foundation
 
-/// Thread-safe packet queue using Swift actor for demuxer/decoder separation
-/// Uses FFmpegPacketData from the ObjC bridge layer
+/// Thread-safe packet queue using Swift actor for demuxer/decoder separation.
 public actor PacketQueue {
-    private var packets: [FFmpegPacketData] = []
+    private var packets: [FFmpegDemuxerPacket] = []
     public nonisolated let maxSize: Int
-    private var waitingConsumers: [(UUID, CheckedContinuation<FFmpegPacketData?, Never>)] = []
+    private var waitingConsumers: [(UUID, CheckedContinuation<FFmpegDemuxerPacket?, Never>)] = []
     private var waitingProducers: [(UUID, CheckedContinuation<Void, Never>)] = []
     private var isClosed = false
     private var isSuspended = false
@@ -25,7 +24,7 @@ public actor PacketQueue {
     ///
     /// This method will wait if the queue is full (back-pressure).
     /// - Parameter packet: The packet to push.
-    public func push(_ packet: FFmpegPacketData) async {
+    public func push(_ packet: FFmpegDemuxerPacket) async {
         guard !isClosed && !isSuspended else { return }
 
         while packets.count >= maxSize && !isClosed && !isSuspended {
@@ -52,7 +51,7 @@ public actor PacketQueue {
 
     /// Pops the next packet from the queue, waiting if empty.
     /// - Returns: The next packet, or `nil` if the queue is closed or suspended.
-    public func pop() async -> FFmpegPacketData? {
+    public func pop() async -> FFmpegDemuxerPacket? {
         if !packets.isEmpty {
             let packet = packets.removeFirst()
             if let (_, producer) = waitingProducers.first {
@@ -78,7 +77,7 @@ public actor PacketQueue {
 
     /// Returns a packet from the queue without waiting.
     /// - Returns: The next packet, or `nil` if the queue is empty.
-    public func tryPop() -> FFmpegPacketData? {
+    public func tryPop() -> FFmpegDemuxerPacket? {
         guard !packets.isEmpty else { return nil }
         let packet = packets.removeFirst()
         if let (_, producer) = waitingProducers.first {
@@ -106,7 +105,6 @@ public actor PacketQueue {
     /// Clears the queue and resets it for reuse.
     public func reset() {
         packets.removeAll()
-        packets = []
         isClosed = false
         isSuspended = false
 

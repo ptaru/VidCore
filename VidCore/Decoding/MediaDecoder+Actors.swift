@@ -93,15 +93,15 @@ actor DecoderActor {
         self.decoder = decoder
     }
 
-    func decodeVideoPacket(withAllFrames packet: FFmpegPacketData) -> [FFmpegVideoFrame]? {
+    func decodeVideoPacket(withAllFrames packet: FFmpegDemuxerPacket) -> [FFmpegVideoFrame]? {
         return decoder.decodeVideoPacket(withAllFrames: packet)
     }
 
-    func decodeAudioPacket(withAllFrames packet: FFmpegPacketData) -> [FFmpegAudioFrame]? {
+    func decodeAudioPacket(withAllFrames packet: FFmpegDemuxerPacket) -> [FFmpegAudioFrame]? {
         return decoder.decodeAudioPacket(withAllFrames: packet)
     }
 
-    func decodeSubtitlePacket(_ packet: FFmpegPacketData) -> FFmpegSubtitleFrame? {
+    func decodeSubtitlePacket(_ packet: FFmpegDemuxerPacket) -> FFmpegSubtitleFrame? {
         return decoder.decodeSubtitlePacket(packet)
     }
 

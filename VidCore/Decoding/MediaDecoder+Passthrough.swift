@@ -35,7 +35,7 @@ extension MediaDecoder {
         for (index, packet) in packets.enumerated() {
             do {
                 let sampleBuffer = try builder.createSampleBuffer(
-                    from: packet.data,
+                    from: packet,
                     pts: packet.pts,
                     dts: packet.dts,
                     duration: packet.duration,

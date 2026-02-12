@@ -78,6 +78,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) BOOL isKeyframe;
 @property(nonatomic, strong, nullable) NSData *ambientLightMetadata;
 
+/// Creates a CMBlockBuffer that references this packet memory without copying.
+/// The returned block buffer retains packet ownership until release.
+- (nullable CMBlockBufferRef)createCMBlockBuffer CF_RETURNS_RETAINED;
+
+/// Ref-counts packet memory into an AVPacket destination without payload copy.
+/// `outPacket` must be a valid AVPacket pointer.
+- (BOOL)copyToAVPacket:(void *)outPacket;
+
 @end
 
 #pragma mark - FFmpegDemuxer

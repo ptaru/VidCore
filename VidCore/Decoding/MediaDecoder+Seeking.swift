@@ -332,7 +332,7 @@ extension MediaDecoder {
 
                 // Create the frame immediately.
                 let sampleBuffer = try builder.createSampleBuffer(
-                    from: displayPacket.data,
+                    from: displayPacket,
                     pts: displayPacket.pts,
                     dts: displayPacket.dts,
                     duration: displayPacket.duration,
@@ -370,12 +370,11 @@ extension MediaDecoder {
                         }
 
                         totalReads += 1
-                        let data = self.convertPacket(packet)
 
                         if packet.isVideo {
                             videoPacketsRead += 1
                             if let frames = await decoderActor.decodeVideoPacket(
-                                withAllFrames: data)
+                                withAllFrames: packet)
                             {
                                 if let f = frames
                                     .filter({ $0.presentationTime >= targetTime })
@@ -390,7 +389,7 @@ extension MediaDecoder {
                                 }
                             }
                         } else if packet.isAudio {
-                            _ = await decoderActor.decodeAudioPacket(withAllFrames: data)
+                            _ = await decoderActor.decodeAudioPacket(withAllFrames: packet)
                         }
                     }
 

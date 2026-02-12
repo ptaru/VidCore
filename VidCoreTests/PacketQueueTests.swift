@@ -3,18 +3,17 @@ import XCTest
 @testable import VidCore
 
 final class PacketQueueTests: XCTestCase {
-    private func makePacket(pts: Int64) -> FFmpegPacketData {
-        let packet = FFmpegPacketData()
-        packet.streamIndex = 0
+    private func makePacket(pts: Int64) -> FFmpegDemuxerPacket {
+        let packet = FFmpegDemuxerPacket()
         packet.data = Data([0x01, 0x02, 0x03])
-        packet.size = Int32(packet.data.count)
+        packet.size = Int64(packet.data.count)
         packet.pts = pts
         packet.dts = pts
         packet.duration = 1
-        packet.flags = 0
         packet.isVideo = true
         packet.isAudio = false
         packet.isSubtitle = false
+        packet.isKeyframe = false
         return packet
     }
 

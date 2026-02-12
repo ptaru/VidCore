@@ -11,6 +11,7 @@
 #undef AVMediaType
 
 #import "FFmpegDecoder.h"
+#import "FFmpegDemuxer.h"
 #import "PixelFormatConverter.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -57,6 +58,10 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 #pragma mark - FFmpegPacketData
 
 @implementation FFmpegPacketData
+@end
+
+@interface FFmpegDemuxerPacket (VidCoreInternalPacketBridge)
+- (BOOL)copyToAVPacket:(void *)outPacket;
 @end
 
 @interface FFmpegDecoder ()
@@ -503,12 +508,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 - (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:
-    (FFmpegPacketData *)packetData {
+    (FFmpegDemuxerPacket *)packetData {
   if (!packetData || !packetData.isSubtitle || !_subtitleCodecContext) {
     return nil;
   }
 
-  AVPacket *pkt = [self createAVPacketFromData:packetData];
+  AVPacket *pkt = [self createAVPacketFromPacket:packetData];
   if (!pkt)
     return nil;
 
@@ -518,12 +523,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacketWithAllFrames:
-    (FFmpegPacketData *)packetData {
+    (FFmpegDemuxerPacket *)packetData {
   if (!packetData || !packetData.isVideo || !_codecContext) {
     return nil;
   }
 
-  AVPacket *pkt = [self createAVPacketFromData:packetData];
+  AVPacket *pkt = [self createAVPacketFromPacket:packetData];
   if (!pkt)
     return nil;
 
@@ -532,27 +537,17 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
   return result;
 }
 
-/// Helper to create AVPacket from FFmpegPacketData
-- (nullable AVPacket *)createAVPacketFromData:(FFmpegPacketData *)packetData {
+/// Helper to create AVPacket by retaining/refcounting packet buffers.
+- (nullable AVPacket *)createAVPacketFromPacket:(FFmpegDemuxerPacket *)packetData {
   AVPacket *pkt = av_packet_alloc();
   if (!pkt) {
     return nil;
   }
 
-  // Allocate buffer and copy data
-  if (packetData.size > 0 && packetData.data.length > 0) {
-    if (av_new_packet(pkt, packetData.size) < 0) {
-      av_packet_free(&pkt);
-      return nil;
-    }
-    memcpy(pkt->data, packetData.data.bytes, packetData.size);
+  if (![packetData copyToAVPacket:pkt]) {
+    av_packet_free(&pkt);
+    return nil;
   }
-
-  pkt->stream_index = packetData.streamIndex;
-  pkt->pts = packetData.pts;
-  pkt->dts = packetData.dts;
-  pkt->duration = packetData.duration;
-  pkt->flags = packetData.flags;
 
   return pkt;
 }
@@ -612,12 +607,12 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 }
 
 - (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFrames:
-    (FFmpegPacketData *)packetData {
+    (FFmpegDemuxerPacket *)packetData {
   if (!packetData || !packetData.isAudio || !_audioCodecContext) {
     return nil;
   }
 
-  AVPacket *pkt = [self createAVPacketFromData:packetData];
+  AVPacket *pkt = [self createAVPacketFromPacket:packetData];
   if (!pkt)
     return nil;
 

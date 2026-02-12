@@ -36,7 +36,96 @@
 @implementation FFmpegSubtitleTrackInfo
 @end
 
-@implementation FFmpegDemuxerPacket
+@interface FFmpegDemuxerPacket ()
+- (void)setBackingPacket:(AVPacket *)packet;
+@end
+
+static void ReleasePacketBackedBlockMemory(
+    void *refCon, void *doomedMemoryBlock, size_t sizeInBytes) {
+  (void)doomedMemoryBlock;
+  (void)sizeInBytes;
+  if (refCon) {
+    CFRelease((CFTypeRef)refCon);
+  }
+}
+
+@implementation FFmpegDemuxerPacket {
+  AVPacket *_backingPacket;
+}
+
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    _backingPacket = NULL;
+  }
+  return self;
+}
+
+- (void)dealloc {
+  if (_backingPacket) {
+    av_packet_free(&_backingPacket);
+    _backingPacket = NULL;
+  }
+}
+
+- (void)setBackingPacket:(AVPacket *)packet {
+  if (_backingPacket) {
+    av_packet_free(&_backingPacket);
+    _backingPacket = NULL;
+  }
+  _backingPacket = packet;
+}
+
+- (nullable CMBlockBufferRef)createCMBlockBuffer {
+  if (!_backingPacket || !_backingPacket->data || _backingPacket->size <= 0) {
+    return nil;
+  }
+
+  CMBlockBufferCustomBlockSource blockSource = {
+      .version = kCMBlockBufferCustomBlockSourceVersion,
+      .AllocateBlock = NULL,
+      .FreeBlock = ReleasePacketBackedBlockMemory,
+      .refCon = (void *)CFBridgingRetain(self),
+  };
+
+  CMBlockBufferRef blockBuffer = NULL;
+  OSStatus status = CMBlockBufferCreateWithMemoryBlock(
+      kCFAllocatorDefault, _backingPacket->data, _backingPacket->size,
+      kCFAllocatorNull, &blockSource, 0, _backingPacket->size, 0, &blockBuffer);
+  if (status != noErr || !blockBuffer) {
+    CFRelease(blockSource.refCon);
+    return nil;
+  }
+
+  return blockBuffer;
+}
+
+- (BOOL)copyToAVPacket:(void *)outPacket {
+  if (!outPacket) {
+    return NO;
+  }
+
+  AVPacket *dst = (AVPacket *)outPacket;
+  av_packet_unref(dst);
+
+  if (_backingPacket) {
+    return av_packet_ref(dst, _backingPacket) == 0;
+  }
+
+  // Fallback for packets without retained backing storage.
+  if (self.size > 0 && self.data.length > 0) {
+    if (av_new_packet(dst, (int)self.size) < 0) {
+      return NO;
+    }
+    memcpy(dst->data, self.data.bytes, (size_t)self.size);
+  }
+
+  dst->pts = self.pts;
+  dst->dts = self.dts;
+  dst->duration = self.duration;
+  dst->flags = self.isKeyframe ? AV_PKT_FLAG_KEY : 0;
+  return YES;
+}
 @end
 
 #pragma mark - Private Interface
@@ -1220,6 +1309,13 @@ static const NSUInteger kMaxQueuedAudioPackets =
                                     isAudio:(BOOL)isAudio
                                  isSubtitle:(BOOL)isSubtitle {
   FFmpegDemuxerPacket *packet = [[FFmpegDemuxerPacket alloc] init];
+  AVPacket *packetRef = av_packet_alloc();
+  if (packetRef && av_packet_ref(packetRef, pkt) == 0) {
+    [packet setBackingPacket:packetRef];
+  } else if (packetRef) {
+    av_packet_free(&packetRef);
+  }
+
   packet.pts = pkt->pts;
   packet.dts = pkt->dts;
   packet.duration = pkt->duration;
@@ -1228,7 +1324,14 @@ static const NSUInteger kMaxQueuedAudioPackets =
   packet.isSubtitle = isSubtitle;
   packet.isKeyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
 
-  if (pkt->data && pkt->size > 0) {
+  if (packetRef && packetRef->data && packetRef->size > 0) {
+    packet.data =
+        [NSData dataWithBytesNoCopy:packetRef->data
+                             length:packetRef->size
+                       freeWhenDone:NO];
+    packet.size = packetRef->size;
+  } else if (pkt->data && pkt->size > 0) {
+    // Fallback path if packet ref could not be retained.
     packet.data = [NSData dataWithBytes:pkt->data length:pkt->size];
     packet.size = pkt->size;
   } else {

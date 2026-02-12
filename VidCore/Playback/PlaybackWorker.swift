@@ -168,7 +168,7 @@ actor PlaybackWorker {
 
     // MARK: - Helpers
 
-    private func processPacket(_ packet: FFmpegPacketData, decoder: MediaDecoder) async {
+    private func processPacket(_ packet: FFmpegDemuxerPacket, decoder: MediaDecoder) async {
         let decodedFrames = await decoder.decodePacket(packet)
         for frame in decodedFrames {
             switch frame {

@@ -10,7 +10,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 
-extension FFmpegPacketData: @unchecked Sendable {}
+extension FFmpegDemuxerPacket: @unchecked Sendable {}
 
 /// High-performance video decoder using FFmpeg with passthrough hardware rendering when available.
 public final class MediaDecoder: @unchecked Sendable {
@@ -291,6 +291,13 @@ public final class MediaDecoder: @unchecked Sendable {
         guard setClosed() else { return }
 
         sampleBufferBuilder = nil
+        performUnderLock {
+            self.isSeeking = false
+            self.pendingContextRestorationPackets.removeAll()
+            self.pendingContextRestorationIndex = 0
+            self.pendingPassthroughCarryoverPackets.removeAll()
+            self.pendingPassthroughCarryoverIndex = 0
+        }
 
         // Trigger async close on actors
         Task {
@@ -320,11 +327,11 @@ public final class MediaDecoder: @unchecked Sendable {
     /// 3. Passthrough post-seek carryover packets.
     /// 4. New packets read directly from the demuxer.
     ///
-    /// - Returns: The next `FFmpegPacketData`, or `nil` if end-of-file is reached or an error occurs.
-    public func demuxNextPacket() async -> FFmpegPacketData? {
+    /// - Returns: The next `FFmpegDemuxerPacket`, or `nil` if end-of-file is reached or an error occurs.
+    public func demuxNextPacket() async -> FFmpegDemuxerPacket? {
         // Priority 1: Pending restoration packets (from seek)
         if let packet = getAndRemoveFirstPendingContextRestorationPacket() {
-            return self.convertPacket(packet)
+            return packet
         }
 
         // Check seek/closed state under lock
@@ -338,17 +345,17 @@ public final class MediaDecoder: @unchecked Sendable {
 
         // Priority 2: Queued audio packets (from seek)
         if let queuedAudioPacket = await demuxerActor.popQueuedAudioPacket() {
-            return self.convertPacket(queuedAudioPacket)
+            return queuedAudioPacket
         }
 
         // Priority 3: Post-seek carryover packets
         if let carryoverPacket = getAndRemoveFirstPendingCarryoverPacket() {
-            return self.convertPacket(carryoverPacket)
+            return carryoverPacket
         }
 
         // Priority 4: Fresh packet
         if let demuxerPacket = await demuxerActor.demuxNextPacket() {
-            return self.convertPacket(demuxerPacket)
+            return demuxerPacket
         } else {
             return nil
         }
@@ -356,9 +363,9 @@ public final class MediaDecoder: @unchecked Sendable {
 
     /// Asynchronously decodes a demuxed packet.
     ///
-    /// - Parameter packet: The `FFmpegPacketData` to decode.
+    /// - Parameter packet: The `FFmpegDemuxerPacket` to decode.
     /// - Returns: An array of `DecodedFrame` objects (video, audio, or subtitle). Returns an empty array if decoding produces no frames or if the decoder is closed.
-    public func decodePacket(_ packet: FFmpegPacketData) async -> [DecodedFrame] {
+    public func decodePacket(_ packet: FFmpegDemuxerPacket) async -> [DecodedFrame] {
         if checkIsClosed() {
             return []
         }
@@ -368,15 +375,14 @@ public final class MediaDecoder: @unchecked Sendable {
         if packet.isVideo {
             if let builder = self.sampleBufferBuilder, self.hardwareDecodeMode == .passThrough {
                 do {
-                    let isKeyframe = (packet.flags & 1) != 0
                     let sampleBuffer = try builder.createSampleBuffer(
-                        from: packet.data,
+                        from: packet,
                         pts: packet.pts,
                         dts: packet.dts,
                         duration: packet.duration,
                         forPassthrough: true,
                         ambientLightMetadata: packet.ambientLightMetadata,
-                        isKeyframe: isKeyframe
+                        isKeyframe: packet.isKeyframe
                     )
                     // ... creation logic ...
                     let frame = VideoFrame(

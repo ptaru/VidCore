@@ -317,7 +317,7 @@ public final class SampleBufferBuilder: @unchecked Sendable {
     /// - Returns: A new CMSampleBuffer.
     /// - Throws: `SampleBufferBuilderError` if creation fails.
     public func createSampleBuffer(
-        from data: Data,
+        from packet: FFmpegDemuxerPacket,
         pts: Int64,
         dts: Int64,
         duration: Int64,
@@ -327,43 +327,11 @@ public final class SampleBufferBuilder: @unchecked Sendable {
         doNotDisplay: Bool = false,
         resetDecoderBeforeDecoding: Bool = false
     ) throws -> CMSampleBuffer {
-        guard !data.isEmpty else {
+        guard packet.size > 0 else {
             throw SampleBufferBuilderError.blockBufferCreationFailed(-1)
         }
-
-        // Zero-copy: allocate once, copy once, hand ownership to CMBlockBuffer.
-
-        let size = data.count
-        // Allocate memory (malloc)
-        guard let rawPtr = malloc(size) else {
+        guard let block = packet.createCMBlockBuffer() else {
             throw SampleBufferBuilderError.blockBufferCreationFailed(-1)
-        }
-
-        // Copy data to the allocated buffer
-        data.withUnsafeBytes { ptr in
-            if let baseAddress = ptr.baseAddress {
-                memcpy(rawPtr, baseAddress, size)
-            }
-        }
-
-        // Wrap malloc'd memory; kCFAllocatorMalloc frees when released.
-        var blockBuffer: CMBlockBuffer?
-        var status = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: rawPtr,
-            blockLength: size,
-            blockAllocator: kCFAllocatorMalloc,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: size,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-
-        guard status == noErr, let block = blockBuffer else {
-            // If creation fails, we must free manually as ownership wasn't transferred
-            free(rawPtr)
-            throw SampleBufferBuilderError.blockBufferCreationFailed(status)
         }
 
         // Create timing info
@@ -418,8 +386,8 @@ public final class SampleBufferBuilder: @unchecked Sendable {
 
         // Create sample buffer
         var sampleBuffer: CMSampleBuffer?
-        var sampleSize = data.count
-        status = CMSampleBufferCreateReady(
+        var sampleSize = Int(packet.size)
+        let status = CMSampleBufferCreateReady(
             allocator: kCFAllocatorDefault,
             dataBuffer: block,
             formatDescription: formatDescription,

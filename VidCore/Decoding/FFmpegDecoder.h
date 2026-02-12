@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 
 @class AVAudioPCMBuffer;
+@class FFmpegDemuxerPacket;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -162,20 +163,20 @@ typedef NS_ENUM(NSInteger, FFmpegFrameType) {
 /// With multi-threaded decoding, a single packet may produce multiple frames.
 /// @param packetData The video packet to decode.
 - (nullable NSArray<FFmpegVideoFrame *> *)decodeVideoPacketWithAllFrames:
-    (FFmpegPacketData *)packetData;
+    (FFmpegDemuxerPacket *)packetData;
 
 /// Decode an audio packet and return ALL available frames.
 ///
 /// With codecs like TrueHD, a single packet may produce multiple frames.
 /// @param packetData The audio packet to decode.
 - (nullable NSArray<FFmpegAudioFrame *> *)decodeAudioPacketWithAllFrames:
-    (FFmpegPacketData *)packetData;
+    (FFmpegDemuxerPacket *)packetData;
 
 /// Decode a subtitle packet.
 ///
 /// @param packetData The subtitle packet to decode.
 - (nullable FFmpegSubtitleFrame *)decodeSubtitlePacket:
-    (FFmpegPacketData *)packetData;
+    (FFmpegDemuxerPacket *)packetData;
 
 /// Flush the decoder to signal end of stream.
 ///

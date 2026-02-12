@@ -436,6 +436,15 @@ public class MediaPlayer {
         currentFrame = nil
         currentSubtitle = nil
         subtitles.removeAll()
+        videoInfo = nil
+        duration = 0
+        currentTime = 0
+        debugStats = PlayerDebugStats()
+        selectedAudioTrackIndex = -1
+        selectedSubtitleTrackIndex = -1
+        pendingPlay = false
+        lastVideoPTS = 0
+        lastStatsUpdateTime = 0
         hasAudio = false
 
         state = .idle
@@ -543,6 +552,18 @@ public class MediaPlayer {
                 self.decoder = nil
                 Task { await worker.updateDecoder(nil) }
                 currentFrame = nil
+                currentSubtitle = nil
+                subtitles.removeAll()
+                videoInfo = nil
+                duration = 0
+                currentTime = 0
+                debugStats = PlayerDebugStats()
+                selectedAudioTrackIndex = -1
+                selectedSubtitleTrackIndex = -1
+                pendingPlay = false
+                lastVideoPTS = 0
+                lastStatsUpdateTime = 0
+                hasAudio = false
 
                 Task { await playbackClock.pause() }
                 if let sbRenderer = renderer as? SampleBufferRenderer {
@@ -576,6 +597,18 @@ public class MediaPlayer {
                     self.decoder = nil
                     Task { await worker.updateDecoder(nil) }
                     currentFrame = nil
+                    currentSubtitle = nil
+                    subtitles.removeAll()
+                    videoInfo = nil
+                    duration = 0
+                    currentTime = 0
+                    debugStats = PlayerDebugStats()
+                    selectedAudioTrackIndex = -1
+                    selectedSubtitleTrackIndex = -1
+                    pendingPlay = false
+                    lastVideoPTS = 0
+                    lastStatsUpdateTime = 0
+                    hasAudio = false
 
                     Task { await playbackClock.pause() }
                     if let sbRenderer = renderer as? SampleBufferRenderer {
